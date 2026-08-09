@@ -21,6 +21,7 @@ export * from "./model";
 export * from "./agentMentions";
 export * from "./agentGateway";
 export * from "./externalMcp";
+export * from "./factory";
 export * from "./workspaceLayout";
 export * from "./ws";
 export * from "./wsCompatibility";
