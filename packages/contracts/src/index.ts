@@ -22,6 +22,7 @@ export * from "./agentMentions";
 export * from "./agentGateway";
 export * from "./externalMcp";
 export * from "./factory";
+export * from "./workItem";
 export * from "./workspaceLayout";
 export * from "./ws";
 export * from "./wsCompatibility";

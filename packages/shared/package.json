@@ -12,6 +12,10 @@
       "types": "./src/tracerBulletWorkflow.ts",
       "import": "./src/tracerBulletWorkflow.ts"
     },
+    "./workItemProjection": {
+      "types": "./src/workItemProjection.ts",
+      "import": "./src/workItemProjection.ts"
+    },
     "./factoryKernel": {
       "types": "./src/factoryKernel.ts",
       "import": "./src/factoryKernel.ts"
