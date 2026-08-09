@@ -5,6 +5,7 @@
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { WebglAddon } from "@xterm/addon-webgl";
+import type { TerminalLaunch } from "@vulcan/contracts";
 import { type TerminalActivityState, type TerminalCliKind } from "@vulcan/shared/terminalThreads";
 import { Terminal, type IDisposable } from "@xterm/xterm";
 import type { TerminalLinkMatch } from "../../terminal-links";
@@ -34,6 +35,13 @@ export interface TerminalRuntimeConfig {
   terminalCliKind?: TerminalCliKind | null;
   cwd: string;
   runtimeEnv?: Record<string, string>;
+  /**
+   * What the session runs. Omitted means the login shell, which is what every
+   * existing terminal surface wants. A Herdr Terminal pane names the durable
+   * session it is attaching to, and the server resolves the command -- the
+   * client never sends an argv.
+   */
+  launch?: TerminalLaunch;
   callbacks: TerminalRuntimeCallbacks;
 }
 
@@ -57,6 +65,7 @@ export interface TerminalRuntimeEntry {
   terminalLabel: string;
   terminalCliKind: TerminalCliKind | null;
   cwd: string;
+  launch?: TerminalLaunch;
   runtimeEnv?: Record<string, string>;
   callbacks: TerminalRuntimeCallbacks;
   wrapper: HTMLDivElement;

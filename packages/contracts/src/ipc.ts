@@ -1,4 +1,11 @@
 import { Schema } from "effect";
+import type { HerdrStatus } from "./herdr";
+import type { ProjectId, WorkspaceId } from "./baseSchemas";
+import type {
+  StoredWorkspaceLayout,
+  WorkspaceLayoutWriteInput,
+  WorkspaceLayoutWriteResult,
+} from "./workspaceLayout";
 
 import type {
   AuthBearerBootstrapResult,
@@ -572,6 +579,15 @@ export interface NativeApi {
       filters?: ReadonlyArray<{ name: string; extensions: ReadonlyArray<string> }>;
     }) => Promise<string | null>;
     confirm: (message: string) => Promise<boolean>;
+  };
+  workspaceLayouts: {
+    read: (input: { workspaceId: WorkspaceId }) => Promise<StoredWorkspaceLayout | null>;
+    list: (input: { projectId: ProjectId }) => Promise<ReadonlyArray<StoredWorkspaceLayout>>;
+    write: (input: WorkspaceLayoutWriteInput) => Promise<WorkspaceLayoutWriteResult>;
+    delete: (input: { workspaceId: WorkspaceId }) => Promise<void>;
+  };
+  herdr: {
+    status: (input: { refresh?: boolean }) => Promise<HerdrStatus>;
   };
   terminal: {
     open: (input: TerminalOpenInput) => Promise<TerminalSessionSnapshot>;

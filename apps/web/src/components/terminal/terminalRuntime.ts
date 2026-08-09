@@ -188,6 +188,7 @@ function buildOpenInput(entry: TerminalRuntimeEntry) {
     cols: entry.terminal.cols,
     rows: entry.terminal.rows,
     ...(entry.runtimeEnv ? { env: entry.runtimeEnv } : {}),
+    ...(entry.launch ? { launch: entry.launch } : {}),
   };
 }
 
@@ -797,6 +798,7 @@ export function createRuntimeEntry(config: TerminalRuntimeConfig): TerminalRunti
     terminalLabel: config.terminalLabel,
     terminalCliKind: config.terminalCliKind ?? null,
     cwd: config.cwd,
+    ...(config.launch ? { launch: config.launch } : {}),
     callbacks: config.callbacks,
     wrapper,
     container: null,

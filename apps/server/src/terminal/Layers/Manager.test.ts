@@ -5,11 +5,13 @@ import path from "node:path";
 import {
   DEFAULT_TERMINAL_ID,
   type TerminalEvent,
+  type TerminalLaunch,
   type TerminalOpenInput,
   type TerminalRestartInput,
 } from "@vulcan/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { ShellCandidate } from "../Services/Manager";
 import {
   PtySpawnError,
   type PtyAdapterShape,
@@ -236,6 +238,7 @@ describe("TerminalManager", () => {
       processKillGraceMs?: number;
       maxRetainedInactiveSessions?: number;
       ptyAdapter?: FakePtyAdapter;
+      launchResolver?: (launch: TerminalLaunch) => Promise<ShellCandidate | null>;
       prepareLogs?: (logsDir: string) => void;
     } = {},
   ) {
@@ -260,9 +263,77 @@ describe("TerminalManager", () => {
       ...(options.maxRetainedInactiveSessions
         ? { maxRetainedInactiveSessions: options.maxRetainedInactiveSessions }
         : {}),
+      ...(options.launchResolver ? { launchResolver: options.launchResolver } : {}),
     });
     return { logsDir, ptyAdapter, manager };
   }
+
+  it("runs the resolved command for a named launch and never a shell", async () => {
+    const resolved: TerminalLaunch[] = [];
+    const { manager, ptyAdapter } = makeManager(5, {
+      shellResolver: () => "/bin/bash",
+      launchResolver: async (launch) => {
+        resolved.push(launch);
+        return { shell: "/usr/bin/herdr", args: ["session", "attach", "vulcan-1"] };
+      },
+    });
+
+    await manager.open({
+      ...openInput(),
+      launch: { kind: "herdr", sessionName: "vulcan-1" },
+    });
+
+    expect(resolved).toEqual([{ kind: "herdr", sessionName: "vulcan-1" }]);
+    expect(ptyAdapter.spawnInputs).toHaveLength(1);
+    expect(ptyAdapter.spawnInputs[0]?.shell).toBe("/usr/bin/herdr");
+    expect(ptyAdapter.spawnInputs[0]?.args).toEqual(["session", "attach", "vulcan-1"]);
+
+    manager.dispose();
+  });
+
+  it("fails a named launch whose backing tool is unavailable instead of falling back to a shell", async () => {
+    // This is the guard that keeps a Herdr pane from silently becoming a plain
+    // shell wearing Herdr's name. An unavailable tool must produce a visible
+    // failure, never a substitute process.
+    const { manager, ptyAdapter } = makeManager(5, {
+      shellResolver: () => "/bin/bash",
+      launchResolver: async () => null,
+    });
+
+    const snapshot = await manager.open({
+      ...openInput(),
+      launch: { kind: "herdr", sessionName: "vulcan-1" },
+    });
+
+    expect(snapshot.status).toBe("error");
+    expect(ptyAdapter.spawnInputs).toHaveLength(0);
+
+    manager.dispose();
+  });
+
+  it("fails a named launch when the server has no resolver configured", async () => {
+    const { manager, ptyAdapter } = makeManager(5, { shellResolver: () => "/bin/bash" });
+
+    const snapshot = await manager.open({
+      ...openInput(),
+      launch: { kind: "herdr", sessionName: "vulcan-1" },
+    });
+
+    expect(snapshot.status).toBe("error");
+    expect(ptyAdapter.spawnInputs).toHaveLength(0);
+
+    manager.dispose();
+  });
+
+  it("still uses the ordered shell candidates when no launch is requested", async () => {
+    const { manager, ptyAdapter } = makeManager(5, { shellResolver: () => "/bin/bash" });
+
+    await manager.open(openInput());
+
+    expect(ptyAdapter.spawnInputs[0]?.shell).toBe("/bin/bash");
+
+    manager.dispose();
+  });
 
   it("spawns lazily and reuses running terminal per thread", async () => {
     const { manager, ptyAdapter } = makeManager();

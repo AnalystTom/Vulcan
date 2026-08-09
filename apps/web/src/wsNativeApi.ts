@@ -500,6 +500,15 @@ export function createWsNativeApi(): NativeApi {
         return showConfirmDialogFallback(message);
       },
     },
+    workspaceLayouts: {
+      read: (input) => transport.request(WS_METHODS.workspaceLayoutRead, input),
+      list: (input) => transport.request(WS_METHODS.workspaceLayoutList, input),
+      write: (input) => transport.request(WS_METHODS.workspaceLayoutWrite, input),
+      delete: (input) => transport.request(WS_METHODS.workspaceLayoutDelete, input),
+    },
+    herdr: {
+      status: (input) => transport.request(WS_METHODS.herdrStatus, input),
+    },
     terminal: {
       open: (input) => transport.request(WS_METHODS.terminalOpen, input),
       write: (input) => transport.request(WS_METHODS.terminalWrite, input),
