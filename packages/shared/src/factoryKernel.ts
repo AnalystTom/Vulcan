@@ -17,6 +17,7 @@
 
 import {
   ACTIVE_ATTEMPT_STATES,
+  isVerificationNodeKind,
   type Artifact,
   type ArtifactId,
   type ExecutionTarget,
@@ -182,14 +183,21 @@ export function findLatestAttempt(
 /**
  * Whether a node counts as done.
  *
- * A node is only satisfied by an attempt that succeeded *against the current
- * revision*. Once the workspace moves, work done against the old revision stops
- * counting, which is what forces changed code to be retested and rereviewed
- * rather than inheriting a stale pass.
+ * A verification node -- a test, a browser check, a review, a gate -- is only
+ * satisfied by a success against the *current* revision, so changed code is
+ * always retested and rereviewed rather than inheriting a stale pass.
+ *
+ * Production work is satisfied by any success. It has to be: a build that commits
+ * moves the revision, so invalidating it on a revision change would make every
+ * build invalidate itself and the run would never converge. What a change
+ * invalidates is the checking of it, not the doing of it.
  */
 export function isNodeSatisfied(snapshot: RunSnapshot, nodeId: WorkflowNodeId): boolean {
   const attempt = latestAttemptFor(snapshot.attempts, nodeId);
   if (!attempt || attempt.state !== "succeeded") return false;
+
+  const node = snapshot.definition.nodes.find((candidate) => candidate.id === nodeId);
+  if (node && !isVerificationNodeKind(node.kind)) return true;
   return attempt.revision === snapshot.currentRevision;
 }
 

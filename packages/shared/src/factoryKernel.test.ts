@@ -263,20 +263,24 @@ describe("scheduling", () => {
     expect(findReadyNodes(exhausted, policy)).toEqual([]);
   });
 
-  it("stops counting work done against a revision the workspace has left", () => {
-    // The whole point of pinning: changed code has to be rebuilt and retested
-    // rather than inheriting a pass from the revision before it.
+  it("re-runs verification when the revision moves, but not the work that moved it", () => {
+    // The pinning rule applies to checking, not to doing. Invalidating the build
+    // would make every build invalidate itself -- it commits, which moves the
+    // revision -- and the run would never converge.
     const snapshot = snapshotOf({
       definition,
       currentRevision: REV_B,
       attempts: [
         attemptOf({ nodeId: nodeId("plan"), state: "succeeded", revision: REV_A }),
         attemptOf({ nodeId: nodeId("build"), state: "succeeded", revision: REV_A }),
+        attemptOf({ nodeId: nodeId("test"), state: "succeeded", revision: REV_A }),
       ],
     });
-    expect(isNodeSatisfied(snapshot, nodeId("plan"))).toBe(false);
+    expect(isNodeSatisfied(snapshot, nodeId("plan"))).toBe(true);
+    expect(isNodeSatisfied(snapshot, nodeId("build"))).toBe(true);
+    expect(isNodeSatisfied(snapshot, nodeId("test"))).toBe(false);
     expect(findReadyNodes(snapshot, DEFAULT_FACTORY_POLICY).map((r) => r.node.id)).toEqual([
-      "plan",
+      "test",
     ]);
   });
 });

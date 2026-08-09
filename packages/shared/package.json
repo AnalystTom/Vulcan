@@ -16,6 +16,10 @@
       "types": "./src/workItemProjection.ts",
       "import": "./src/workItemProjection.ts"
     },
+    "./factoryController": {
+      "types": "./src/factoryController.ts",
+      "import": "./src/factoryController.ts"
+    },
     "./factoryKernel": {
       "types": "./src/factoryKernel.ts",
       "import": "./src/factoryKernel.ts"

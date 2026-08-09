@@ -219,13 +219,21 @@ describe("factory waterfall", () => {
     expect(build?.status).toBe("running");
   });
 
-  it("stops showing a node as complete once the revision moves under it", () => {
+  it("stops showing a verification node as complete once the revision moves under it", () => {
     const snapshot = snapshotOf({
       currentRevision: REV_B,
-      attempts: [attemptOf("plan", "succeeded", { revision: REV_A })],
+      attempts: [
+        attemptOf("plan", "succeeded", { revision: REV_A }),
+        attemptOf("build", "succeeded", { revision: REV_A }),
+        attemptOf("test", "succeeded", { revision: REV_A }),
+      ],
     });
-    const plan = buildFactoryWaterfall(snapshot).find((entry) => entry.node.id === "plan");
-    expect(plan?.status).toBe("not-started");
+    const waterfall = buildFactoryWaterfall(snapshot);
+    const statusOf = (id: string) => waterfall.find((entry) => entry.node.id === id)?.status;
+    // The work that produced the revision stays done; the checking of it does not.
+    expect(statusOf("plan")).toBe("complete");
+    expect(statusOf("build")).toBe("complete");
+    expect(statusOf("test")).toBe("not-started");
   });
 
   it("stays inspectable for a definition whose graph is cyclic", () => {

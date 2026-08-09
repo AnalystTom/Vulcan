@@ -233,6 +233,26 @@ export type WorkflowNodeKind = WorkflowNode["kind"];
 /** Kinds whose result is judgment rather than a determinate outcome. */
 export const AGENT_NODE_KINDS = ["agent", "review"] as const;
 
+/**
+ * Kinds whose output is a verdict about the code as it stands.
+ *
+ * Only these are invalidated when the revision moves. The distinction is load
+ * bearing: a build that commits changes the revision, so treating production
+ * work the same way would make every build invalidate itself and the run would
+ * never converge. What has to be redone after a change is the *checking* --
+ * tests, browser verification, review, and the gates over them.
+ */
+export const VERIFICATION_NODE_KINDS = [
+  "test",
+  "browserVerification",
+  "review",
+  "lavishReview",
+  "gate",
+] as const satisfies readonly WorkflowNodeKind[];
+
+export const isVerificationNodeKind = (kind: WorkflowNodeKind): boolean =>
+  (VERIFICATION_NODE_KINDS as readonly string[]).includes(kind);
+
 // --- definition --------------------------------------------------------------
 
 /**
