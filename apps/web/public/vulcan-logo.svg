@@ -1,0 +1,9 @@
+<svg width="470" height="504" viewBox="0 0 470 504" fill="none" xmlns="http://www.w3.org/2000/svg">
+<style>
+  .vulcan-logo-fill { fill: #1c2933; }
+  @media (prefers-color-scheme: dark) {
+    .vulcan-logo-fill { fill: #f5f5f5; }
+  }
+</style>
+<path class="vulcan-logo-fill" d="M20 162L146 86L450 86L450 172L318 172L306 288L380 288L406 418L108 418L134 288L208 288L196 172L66 172Z"/>
+</svg>
