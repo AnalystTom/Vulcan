@@ -10,6 +10,7 @@ import {
   WS_FEATURE_PATH,
   WS_NEGOTIATE_HTTP_PATH,
   WS_METHODS,
+  type WorkspaceLayoutWriteResult,
   WsBootstrapRpcGroup,
   WsCompatibilityError,
   WsFeatureRpcGroup,
@@ -104,6 +105,8 @@ import { ServerLifecycleEvents } from "./serverLifecycleEvents";
 import { ServerRuntimeStartup } from "./serverRuntimeStartup";
 import { ServerSettingsService } from "./serverSettings";
 import { isLoopbackHost } from "./startupAccess";
+import { HerdrBridge } from "./herdr/Services/HerdrBridge";
+import { WorkspaceLayouts } from "./persistence/Services/WorkspaceLayouts";
 import { TerminalManager } from "./terminal/Services/Manager";
 import { TerminalThreadTitleTracker } from "./terminal/terminalThreadTitleTracker";
 import { resolveOutOfRootFileReference } from "./workspace/outOfRootFileReference";
@@ -330,6 +333,8 @@ const makeWsRpcHandlersLayer = () =>
       const serverEnvironment = yield* ServerEnvironment;
       const serverSettings = yield* ServerSettingsService;
       const terminalManager = yield* TerminalManager;
+      const herdrBridge = yield* HerdrBridge;
+      const workspaceLayouts = yield* WorkspaceLayouts;
       const textGeneration = yield* TextGeneration;
       const workspaceEntries = yield* WorkspaceEntries;
       const workspaceFileSystem = yield* WorkspaceFileSystem;
@@ -1508,6 +1513,58 @@ const makeWsRpcHandlersLayer = () =>
               return result;
             }),
             "Failed to hand off thread",
+          ),
+
+        [WS_METHODS.workspaceLayoutRead]: (input) =>
+          rpcEffect(
+            workspaceLayouts.read(input.workspaceId),
+            "Failed to read the workspace layout",
+          ),
+        [WS_METHODS.workspaceLayoutList]: (input) =>
+          rpcEffect(
+            workspaceLayouts.listByProject(input.projectId),
+            "Failed to list workspace layouts",
+          ),
+        [WS_METHODS.workspaceLayoutWrite]: (input) =>
+          rpcEffect(
+            workspaceLayouts.upsert(input).pipe(
+              Effect.map(
+                (stored) => ({ outcome: "stored", stored }) satisfies WorkspaceLayoutWriteResult,
+              ),
+              // A losing write is an expected outcome of two clients holding the
+              // same Workspace, so it is returned as a result the caller can
+              // rebase from rather than raised as a transport error.
+              Effect.catchTag("WorkspaceLayoutConflictError", (conflict) =>
+                workspaceLayouts.read(conflict.workspaceId).pipe(
+                  Effect.map(
+                    (current) =>
+                      ({
+                        outcome: "conflict",
+                        expectedRevision: conflict.expectedRevision,
+                        current: current ?? {
+                          layout: conflict.current,
+                          projectId: input.projectId,
+                          threadId: input.threadId,
+                          createdAt: new Date().toISOString(),
+                          updatedAt: new Date().toISOString(),
+                        },
+                      }) satisfies WorkspaceLayoutWriteResult,
+                  ),
+                ),
+              ),
+            ),
+            "Failed to write the workspace layout",
+          ),
+        [WS_METHODS.workspaceLayoutDelete]: (input) =>
+          rpcEffect(
+            workspaceLayouts.remove(input.workspaceId),
+            "Failed to delete the workspace layout",
+          ),
+
+        [WS_METHODS.herdrStatus]: (input) =>
+          rpcEffect(
+            herdrBridge.status({ refresh: input.refresh ?? false }),
+            "Failed to read Herdr status",
           ),
 
         [WS_METHODS.terminalOpen]: (input) =>

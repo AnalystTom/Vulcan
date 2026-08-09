@@ -196,6 +196,15 @@ export const WS_METHODS = {
   pullRequestsSetPinned: "pullRequests.setPinned",
 
   // Terminal methods
+  // Workspace pane layout
+  workspaceLayoutRead: "workspace.layout.read",
+  workspaceLayoutList: "workspace.layout.list",
+  workspaceLayoutWrite: "workspace.layout.write",
+  workspaceLayoutDelete: "workspace.layout.delete",
+
+  // Herdr terminal backend
+  herdrStatus: "herdr.status",
+
   terminalOpen: "terminal.open",
   terminalWrite: "terminal.write",
   terminalAckOutput: "terminal.ackOutput",

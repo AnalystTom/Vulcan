@@ -1,5 +1,6 @@
 import { Schema } from "effect";
 import { ProcessEnvRecord, TrimmedNonEmptyString } from "./baseSchemas";
+import { TerminalLaunch } from "./herdr";
 
 export const DEFAULT_TERMINAL_ID = "default";
 
@@ -49,6 +50,10 @@ export const TerminalOpenInput = Schema.Struct({
   // sessions (e.g. dev servers) whose output no renderer consumes. Defaults to
   // true so interactive terminals stream as usual.
   streamOutput: Schema.optional(Schema.Boolean),
+  // What to run. The client names a capability and the server resolves the
+  // command; a client never supplies an argv. Defaults to the login shell, so
+  // every existing caller keeps its behaviour.
+  launch: Schema.optional(TerminalLaunch),
 });
 export type TerminalOpenInput = Schema.Codec.Encoded<typeof TerminalOpenInput>;
 

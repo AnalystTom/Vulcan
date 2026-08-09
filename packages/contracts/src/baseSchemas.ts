@@ -51,6 +51,12 @@ export const AutomationRunId = makeEntityId("AutomationRunId");
 export type AutomationRunId = typeof AutomationRunId.Type;
 export const TurnId = makeEntityId("TurnId");
 export type TurnId = typeof TurnId.Type;
+export const WorkspaceId = makeEntityId("WorkspaceId");
+export type WorkspaceId = typeof WorkspaceId.Type;
+export const PaneId = makeEntityId("PaneId");
+export type PaneId = typeof PaneId.Type;
+export const PaneRowId = makeEntityId("PaneRowId");
+export type PaneRowId = typeof PaneRowId.Type;
 
 export const ProviderItemId = makeEntityId("ProviderItemId");
 export type ProviderItemId = typeof ProviderItemId.Type;

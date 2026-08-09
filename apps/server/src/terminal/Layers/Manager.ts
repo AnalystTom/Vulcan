@@ -17,6 +17,7 @@ import {
   TerminalWriteInput,
   type TerminalEvent,
   type TerminalSessionSnapshot,
+  type TerminalLaunch,
 } from "@vulcan/contracts";
 import { describeErrorMessage } from "@vulcan/shared/errorMessages";
 import {
@@ -30,6 +31,7 @@ import {
 } from "@vulcan/shared/terminalThreads";
 import { Effect, Encoding, Layer, Schema } from "effect";
 
+import { HerdrBridge } from "../../herdr/Services/HerdrBridge";
 import { createLogger } from "../../logger";
 import { PtyAdapter, PtyAdapterShape, type PtyExitEvent, type PtyProcess } from "../Services/PTY";
 import { ServerConfig } from "../../config";
@@ -746,6 +748,16 @@ interface TerminalManagerOptions {
   historyByteLimit?: number;
   ptyAdapter: PtyAdapterShape;
   shellResolver?: () => string;
+  /**
+   * Resolves a non-shell launch to the command that serves it, or null when the
+   * backing tool is unavailable.
+   *
+   * Returning null must abort the spawn. Falling through to the shell candidates
+   * would present a plain shell as a Herdr terminal, which the product forbids:
+   * the operator has to be told Herdr is unavailable and choose the fallback
+   * explicitly.
+   */
+  launchResolver?: (launch: TerminalLaunch) => Promise<ShellCandidate | null>;
   subprocessChecker?: TerminalSubprocessChecker;
   processSnapshotObserver?: ProcessChildrenSnapshotObserver;
   processTreeKiller?: ProcessTreeKiller;
@@ -770,6 +782,9 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
   private readonly historyByteLimit: number;
   private readonly ptyAdapter: PtyAdapterShape;
   private readonly shellResolver: () => string;
+  private readonly launchResolver:
+    | ((launch: TerminalLaunch) => Promise<ShellCandidate | null>)
+    | null;
   private readonly persistQueues = new Map<string, Promise<void>>();
   private readonly persistTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /**
@@ -809,6 +824,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
     this.historyByteLimit = options.historyByteLimit ?? DEFAULT_HISTORY_BYTE_LIMIT;
     this.ptyAdapter = options.ptyAdapter;
     this.shellResolver = options.shellResolver ?? defaultShellResolver;
+    this.launchResolver = options.launchResolver ?? null;
     this.persistDebounceMs = DEFAULT_PERSIST_DEBOUNCE_MS;
     this.subprocessChecker = options.subprocessChecker ?? defaultSubprocessChecker;
     this.processTreeKiller = options.processTreeKiller ?? defaultProcessTreeKiller;
@@ -889,6 +905,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
           managedAgentState: null,
           managedAgentObserved: false,
           runtimeEnv: normalizedRuntimeEnv(input.env),
+          launch: input.launch ?? { kind: "shell" },
           pendingInputBuffer: "",
           modeReplayTracker: null,
           pendingOutputChunks: [],
@@ -1101,6 +1118,10 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
           managedAgentState: null,
           managedAgentObserved: false,
           runtimeEnv: normalizedRuntimeEnv(input.env),
+          // Restarting a session that does not exist yet has nothing to preserve.
+          // An existing session is not rebuilt here, so its launch — and therefore
+          // its Herdr attachment — survives a restart untouched.
+          launch: { kind: "shell" },
           pendingInputBuffer: "",
           modeReplayTracker: null,
           pendingOutputChunks: [],
@@ -1270,7 +1291,10 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
     let ptyProcess: PtyProcess | null = null;
     let startedShell: string | null = null;
     try {
-      const shellCandidates = resolveShellCandidates(this.shellResolver);
+      // A non-shell launch has exactly one acceptable command and no fallbacks.
+      // If its backing tool is unavailable the spawn fails here, so the operator
+      // is told the tool is missing rather than handed a shell wearing its name.
+      const shellCandidates = await this.resolveLaunchCandidates(session.launch);
       const terminalEnv = createTerminalSpawnEnv(process.env, session.runtimeEnv, {
         binDir: this.managedWrapperBinDir,
         zshDir: this.managedWrapperZshDir,
@@ -2215,6 +2239,33 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
     }
   }
 
+  /**
+   * The commands to try for a session's launch, in preference order.
+   *
+   * A shell launch gets the usual ordered candidate list, because any working
+   * shell satisfies the request. A named launch gets exactly one command and no
+   * fallback: substituting a different program would misrepresent what the
+   * operator is looking at. When the backing tool is unavailable this throws, and
+   * the caller records the session as failed with the reason.
+   */
+  private async resolveLaunchCandidates(launch: TerminalLaunch): Promise<ShellCandidate[]> {
+    if (launch.kind === "shell") {
+      return resolveShellCandidates(this.shellResolver);
+    }
+    if (!this.launchResolver) {
+      throw new Error(
+        `This server cannot start a ${launch.kind} terminal because no launch resolver is configured.`,
+      );
+    }
+    const candidate = await this.launchResolver(launch);
+    if (!candidate) {
+      throw new Error(
+        `${launch.kind} is unavailable, so this terminal was not started. Check its status and retry, or choose the built-in terminal instead.`,
+      );
+    }
+    return [candidate];
+  }
+
   private async assertValidCwd(cwd: string): Promise<void> {
     let stats: fs.Stats;
     try {
@@ -2372,8 +2423,19 @@ export const TerminalManagerLive = Layer.effect(
     const { terminalLogsDir } = yield* ServerConfig;
 
     const ptyAdapter = yield* PtyAdapter;
+    const herdr = yield* HerdrBridge;
     const runtime = yield* Effect.acquireRelease(
-      Effect.sync(() => new TerminalManagerRuntime({ logsDir: terminalLogsDir, ptyAdapter })),
+      Effect.sync(
+        () =>
+          new TerminalManagerRuntime({
+            logsDir: terminalLogsDir,
+            ptyAdapter,
+            launchResolver: (launch) =>
+              launch.kind === "herdr"
+                ? Effect.runPromise(herdr.resolveAttachCommand(launch.sessionName))
+                : Promise.resolve(null),
+          }),
+      ),
       (r) => Effect.promise(() => r.disposeForShutdown()),
     );
 

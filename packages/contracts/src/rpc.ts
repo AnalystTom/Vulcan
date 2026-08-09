@@ -23,6 +23,13 @@ import {
   AutomationUpdateInput,
 } from "./automation";
 import { OpenInEditorInput } from "./editor";
+import { ProjectId, WorkspaceId } from "./baseSchemas";
+import { HerdrStatus } from "./herdr";
+import {
+  StoredWorkspaceLayout,
+  WorkspaceLayoutWriteInput,
+  WorkspaceLayoutWriteResult,
+} from "./workspaceLayout";
 import {
   ExternalMcpCreateIntegrationInput,
   ExternalMcpCreateIntegrationResult,
@@ -650,6 +657,48 @@ export const WsGitHandoffThreadRpc = Rpc.make(WS_METHODS.gitHandoffThread, {
   error: WsRpcError,
 });
 
+/**
+ * Workspace Pane layout.
+ *
+ * `write` carries the revision the client last read. The server refuses a write
+ * whose revision has moved on and returns the current layout in the error, so a
+ * second client editing the same Workspace produces a rebase rather than a lost
+ * layout.
+ */
+export const WsWorkspaceLayoutReadRpc = Rpc.make(WS_METHODS.workspaceLayoutRead, {
+  payload: Schema.Struct({ workspaceId: WorkspaceId }),
+  success: Schema.NullOr(StoredWorkspaceLayout),
+  error: WsRpcError,
+});
+
+export const WsWorkspaceLayoutListRpc = Rpc.make(WS_METHODS.workspaceLayoutList, {
+  payload: Schema.Struct({ projectId: ProjectId }),
+  success: Schema.Array(StoredWorkspaceLayout),
+  error: WsRpcError,
+});
+
+export const WsWorkspaceLayoutWriteRpc = Rpc.make(WS_METHODS.workspaceLayoutWrite, {
+  payload: WorkspaceLayoutWriteInput,
+  success: WorkspaceLayoutWriteResult,
+  error: WsRpcError,
+});
+
+export const WsWorkspaceLayoutDeleteRpc = Rpc.make(WS_METHODS.workspaceLayoutDelete, {
+  payload: Schema.Struct({ workspaceId: WorkspaceId }),
+  success: Schema.Void,
+  error: WsRpcError,
+});
+
+/**
+ * Herdr availability. Polled by Herdr Terminal panes so an operator who installs,
+ * updates, or starts Herdr sees the pane become usable without restarting Vulcan.
+ */
+export const WsHerdrStatusRpc = Rpc.make(WS_METHODS.herdrStatus, {
+  payload: Schema.Struct({ refresh: Schema.optional(Schema.Boolean) }),
+  success: HerdrStatus,
+  error: WsRpcError,
+});
+
 export const WsTerminalOpenRpc = Rpc.make(WS_METHODS.terminalOpen, {
   payload: TerminalOpenInput,
   success: TerminalSessionSnapshot,
@@ -1076,6 +1125,11 @@ export const WsFeatureRpcGroup = RpcGroup.make(
   WsGitStageFilesRpc,
   WsGitUnstageFilesRpc,
   WsGitHandoffThreadRpc,
+  WsWorkspaceLayoutReadRpc,
+  WsWorkspaceLayoutListRpc,
+  WsWorkspaceLayoutWriteRpc,
+  WsWorkspaceLayoutDeleteRpc,
+  WsHerdrStatusRpc,
   WsTerminalOpenRpc,
   WsTerminalWriteRpc,
   WsTerminalAckOutputRpc,
