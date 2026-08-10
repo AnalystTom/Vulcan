@@ -45,6 +45,7 @@ import { ExternalMcpGatewayLive } from "./externalMcp/Layers/ExternalMcpGateway"
 import { ServerEnvironmentLive } from "./environment/Layers/ServerEnvironment";
 import { AutomationRepositoryLive } from "./persistence/Layers/AutomationRepository";
 import { ProjectPullRequestPinsLive } from "./persistence/Layers/ProjectPullRequestPins";
+import { FactoryStoreLive } from "./persistence/Layers/FactoryStore";
 import { WorkspaceLayoutsLive } from "./persistence/Layers/WorkspaceLayouts";
 import { ProjectionTurnRepositoryLive } from "./persistence/Layers/ProjectionTurns";
 import { OrchestrationEventDeliveryRepositoryLive } from "./persistence/Layers/OrchestrationEventDeliveries";
@@ -207,6 +208,7 @@ export function makeServerRuntimeServicesLayer(
     providerHealthLayer,
     ProjectPullRequestPinsLive,
     WorkspaceLayoutsLive,
+    FactoryStoreLive,
     pullRequestServiceLayer,
     orchestrationReactorLayer,
     providerCommandReactorLayer,
