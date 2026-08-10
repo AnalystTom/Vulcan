@@ -31,6 +31,7 @@ import {
   useWorkspaceLayoutStore,
 } from "~/workspaceLayoutStore";
 
+import { FactoryPane } from "./FactoryPane";
 import { HerdrTerminalPane } from "./HerdrTerminalPane";
 import { describePaneMode } from "./paneModeRegistry";
 import { WorkspaceGrid } from "./WorkspaceGrid";
@@ -158,6 +159,8 @@ export function WorkspaceSurface({
               }
             />
           );
+        case "factory":
+          return <FactoryPane isVisible threadId={threadId} />;
         default: {
           const descriptor = describePaneMode(pane.mode);
           return (

@@ -66,6 +66,7 @@ export type PaneMode = typeof PaneMode.Type;
 export const IMPLEMENTED_PANE_MODES = [
   "agent",
   "herdrTerminal",
+  "factory",
 ] as const satisfies readonly PaneMode[];
 
 /**

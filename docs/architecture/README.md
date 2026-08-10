@@ -91,21 +91,55 @@ exercised against git rather than a fixture. It asserts the PR-ready Gate Result
 real 40-character SHA, that a later commit invalidates the pass, that a retry stays within budget, and
 that an exhausted budget produces exactly one Attention Item.
 
+### Running the factory (`apps/server/src/factory/`)
+
+Migration 091 persists definitions, runs, attempts, artifacts, gate verdicts,
+attention items, targets, and leases. `readRunSnapshot` rebuilds the exact value
+the kernel consumes, so a controller that restarts resumes with nothing lost.
+
+A polling controller ticks every two seconds: it reclaims expired leases, sweeps
+in-flight attempts for stalls, dispatches whatever the kernel says is ready, and
+derives the run's state. It holds no state between ticks, so a restart is
+indistinguishable from a slow tick. This is where `detectStall` and the recovery
+ladder finally take effect, with spent rungs stored on the attempt so a restart
+cannot restart the ladder.
+
+Work the server cannot do is refused by capability routing rather than faked. The
+local target reports `git`, `shell`, `node` and nothing else, so a node needing
+`agent`, `browser`, or `lavish` produces an Attention Item naming the missing
+capability. `checkout-verify` ships as a workflow that runs today; the tracer
+bullet correctly reports that it cannot.
+
+A run's working directory is derived from its thread through the same
+`resolveThreadWorkspaceCwd` helper terminals and checkpoints use, so a factory run
+and an Agent Pane on the same thread cannot disagree about which checkout they are
+in.
+
+### Factory pane (`apps/web/src/components/workspace/FactoryPane.tsx`)
+
+Renders the whole graph including nodes that have not run, an activity summary,
+per-node evidence drill-down with artifact output and gate checks, and the
+Attention Inbox with the recovery rungs already tried. The view is derived on the
+client by the same shared projections the kernel's tests cover, so it cannot show
+one thing while the kernel believes another. Its empty state lists the built-in
+workflows and says, per workflow, whether it can run here and which capabilities
+are missing if not.
+
 ## Specified, not yet implemented
 
-| Area                                                     | Status                                                                                                                                                                       |
-| -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Pane modes: Browser, Diff, Factory, Trace, Lavish Review | Declared in the registry so layout, persistence, and automation share one taxonomy. They render an explicit "not available yet" surface and are kept out of the mode picker. |
-| Work Item registry and RPC surface                       | Contract and projections exist; there is no persistence, no intake, and no board UI yet.                                                                                     |
-| Factory view UI                                          | Waterfall and activity board are computed and tested; nothing renders them.                                                                                                  |
-| Run/attempt/artifact persistence                         | The kernel and controller operate on values. Nothing is written to SQLite yet, so runs do not survive a restart.                                                             |
-| Long-running controller and stall supervision            | `detectStall` exists and is tested; the drive-to-standstill loop awaits each node and so has no in-flight attempt to supervise. A polling controller is required.            |
-| Execution targets and leases                             | Modelled and routed over in the kernel. No enrolment, heartbeat, or remote worker exists.                                                                                    |
-| Real agent, browser, and Lavish executors                | The tracer bullet uses deterministic stand-ins. No provider adapter, Playwright harness, or Lavish sidecar is wired to a node.                                               |
-| Excalidraw workflow editor                               | The canonical YAML representation it would read and emit exists; the editor does not.                                                                                        |
-| Linear, Hermes, mobile intake                            | Work Item sources are modelled. No integration exists.                                                                                                                       |
-| Tapes, Skill Proposals, optimization experiments         | Not started. Explicitly downstream of the tracer bullet being trustworthy.                                                                                                   |
-| Packaged-app end-to-end verification                     | The issue's primary seam runs through the packaged desktop app; the current end-to-end test runs at the kernel seam.                                                         |
+| Area                                                     | Status                                                                                                                                                                        |
+| -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Pane modes: Browser, Diff, Factory, Trace, Lavish Review | Declared in the registry so layout, persistence, and automation share one taxonomy. They render an explicit "not available yet" surface and are kept out of the mode picker.  |
+| Work Item registry and RPC surface                       | Contract and projections exist; there is no persistence, no intake, and no board UI yet.                                                                                      |
+| Factory view UI                                          | Waterfall and activity board are computed and tested; nothing renders them.                                                                                                   |
+| Real agent/browser/Lavish executors                      | Not wired. Those capabilities are deliberately not reported by the local target, so routing refuses their nodes and raises an Attention Item naming what is missing.          |
+| Execution target enrolment                               | The local target registers itself and routing works. There is no remote worker, heartbeat, or enrolment flow, so "execute on the always-on server" is modelled but not built. |
+| Execution targets and leases                             | Modelled and routed over in the kernel. No enrolment, heartbeat, or remote worker exists.                                                                                     |
+| Real agent, browser, and Lavish executors                | The tracer bullet uses deterministic stand-ins. No provider adapter, Playwright harness, or Lavish sidecar is wired to a node.                                                |
+| Excalidraw workflow editor                               | The canonical YAML representation it would read and emit exists; the editor does not.                                                                                         |
+| Linear, Hermes, mobile intake                            | Work Item sources are modelled. No integration exists.                                                                                                                        |
+| Tapes, Skill Proposals, optimization experiments         | Not started. Explicitly downstream of the tracer bullet being trustworthy.                                                                                                    |
+| Packaged-app end-to-end verification                     | The issue's primary seam runs through the packaged desktop app; the current end-to-end test runs at the kernel seam.                                                          |
 
 ## Conventions worth knowing
 

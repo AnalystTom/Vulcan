@@ -24,6 +24,15 @@ import {
 } from "./automation";
 import { OpenInEditorInput } from "./editor";
 import { ProjectId, WorkspaceId } from "./baseSchemas";
+import {
+  AttentionItem,
+  FactoryResolveAttentionInput,
+  FactoryRunDetail,
+  FactoryRunSummary,
+  FactoryStartRunInput,
+  FactoryStartRunResult,
+  WorkflowRunId,
+} from "./factory";
 import { HerdrStatus } from "./herdr";
 import {
   StoredWorkspaceLayout,
@@ -665,6 +674,52 @@ export const WsGitHandoffThreadRpc = Rpc.make(WS_METHODS.gitHandoffThread, {
  * second client editing the same Workspace produces a rebase rather than a lost
  * layout.
  */
+export const WsFactoryListRunsRpc = Rpc.make(WS_METHODS.factoryListRuns, {
+  payload: Schema.Struct({}),
+  success: Schema.Array(FactoryRunSummary),
+  error: WsRpcError,
+});
+
+export const WsFactoryReadRunRpc = Rpc.make(WS_METHODS.factoryReadRun, {
+  payload: Schema.Struct({ runId: WorkflowRunId }),
+  success: Schema.NullOr(FactoryRunDetail),
+  error: WsRpcError,
+});
+
+export const WsFactoryStartRunRpc = Rpc.make(WS_METHODS.factoryStartRun, {
+  payload: FactoryStartRunInput,
+  success: FactoryStartRunResult,
+  error: WsRpcError,
+});
+
+export const WsFactoryListAttentionRpc = Rpc.make(WS_METHODS.factoryListAttention, {
+  payload: Schema.Struct({ runId: Schema.optional(WorkflowRunId) }),
+  success: Schema.Array(AttentionItem),
+  error: WsRpcError,
+});
+
+export const WsFactoryResolveAttentionRpc = Rpc.make(WS_METHODS.factoryResolveAttention, {
+  payload: FactoryResolveAttentionInput,
+  success: Schema.Void,
+  error: WsRpcError,
+});
+
+/** The workflows this server knows about, so the UI can offer them without inventing YAML. */
+export const WsFactoryListWorkflowsRpc = Rpc.make(WS_METHODS.factoryListWorkflows, {
+  payload: Schema.Struct({}),
+  success: Schema.Array(
+    Schema.Struct({
+      id: Schema.String,
+      name: Schema.String,
+      description: Schema.String,
+      source: Schema.String,
+      runnableHere: Schema.Boolean,
+      missingCapabilities: Schema.Array(Schema.String),
+    }),
+  ),
+  error: WsRpcError,
+});
+
 export const WsWorkspaceLayoutReadRpc = Rpc.make(WS_METHODS.workspaceLayoutRead, {
   payload: Schema.Struct({ workspaceId: WorkspaceId }),
   success: Schema.NullOr(StoredWorkspaceLayout),
@@ -1125,6 +1180,12 @@ export const WsFeatureRpcGroup = RpcGroup.make(
   WsGitStageFilesRpc,
   WsGitUnstageFilesRpc,
   WsGitHandoffThreadRpc,
+  WsFactoryListRunsRpc,
+  WsFactoryReadRunRpc,
+  WsFactoryStartRunRpc,
+  WsFactoryListAttentionRpc,
+  WsFactoryResolveAttentionRpc,
+  WsFactoryListWorkflowsRpc,
   WsWorkspaceLayoutReadRpc,
   WsWorkspaceLayoutListRpc,
   WsWorkspaceLayoutWriteRpc,

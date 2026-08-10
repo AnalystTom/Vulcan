@@ -1,4 +1,13 @@
 import { Schema } from "effect";
+import type {
+  AttentionItem,
+  FactoryResolveAttentionInput,
+  FactoryRunDetail,
+  FactoryRunSummary,
+  FactoryStartRunInput,
+  FactoryStartRunResult,
+  WorkflowRunId,
+} from "./factory";
 import type { HerdrStatus } from "./herdr";
 import type { ProjectId, WorkspaceId } from "./baseSchemas";
 import type {
@@ -579,6 +588,23 @@ export interface NativeApi {
       filters?: ReadonlyArray<{ name: string; extensions: ReadonlyArray<string> }>;
     }) => Promise<string | null>;
     confirm: (message: string) => Promise<boolean>;
+  };
+  factory: {
+    listRuns: () => Promise<ReadonlyArray<FactoryRunSummary>>;
+    readRun: (input: { runId: WorkflowRunId }) => Promise<FactoryRunDetail | null>;
+    startRun: (input: FactoryStartRunInput) => Promise<FactoryStartRunResult>;
+    listAttention: (input: { runId?: WorkflowRunId }) => Promise<ReadonlyArray<AttentionItem>>;
+    resolveAttention: (input: FactoryResolveAttentionInput) => Promise<void>;
+    listWorkflows: () => Promise<
+      ReadonlyArray<{
+        id: string;
+        name: string;
+        description: string;
+        source: string;
+        runnableHere: boolean;
+        missingCapabilities: ReadonlyArray<string>;
+      }>
+    >;
   };
   workspaceLayouts: {
     read: (input: { workspaceId: WorkspaceId }) => Promise<StoredWorkspaceLayout | null>;

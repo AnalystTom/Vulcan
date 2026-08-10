@@ -196,6 +196,14 @@ export const WS_METHODS = {
   pullRequestsSetPinned: "pullRequests.setPinned",
 
   // Terminal methods
+  // Software factory
+  factoryListRuns: "factory.listRuns",
+  factoryReadRun: "factory.readRun",
+  factoryStartRun: "factory.startRun",
+  factoryListAttention: "factory.listAttention",
+  factoryResolveAttention: "factory.resolveAttention",
+  factoryListWorkflows: "factory.listWorkflows",
+
   // Workspace pane layout
   workspaceLayoutRead: "workspace.layout.read",
   workspaceLayoutList: "workspace.layout.list",

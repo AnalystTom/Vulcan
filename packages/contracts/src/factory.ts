@@ -543,3 +543,66 @@ export const AttentionItem = Schema.Struct({
   resolvedAt: Schema.NullOr(IsoDateTime),
 });
 export type AttentionItem = typeof AttentionItem.Type;
+
+// --- transport ---------------------------------------------------------------
+
+/**
+ * Everything a client needs to render one run.
+ *
+ * Deliberately the raw facts -- definition, attempts, artifacts, verdicts, the
+ * current revision -- and not a pre-computed view. The waterfall and activity
+ * board are derived on the client by the same shared functions the kernel's tests
+ * cover, so the server cannot show one thing while the kernel believes another.
+ */
+export const FactoryRunDetail = Schema.Struct({
+  run: WorkflowRun,
+  definition: WorkflowDefinition,
+  attempts: Schema.Array(NodeAttempt),
+  artifacts: Schema.Array(Artifact),
+  gateResults: Schema.Array(GateResult),
+  currentRevision: GitRevision,
+  attentionItems: Schema.Array(AttentionItem),
+});
+export type FactoryRunDetail = typeof FactoryRunDetail.Type;
+
+/** A run in a list, without its artifacts. */
+export const FactoryRunSummary = Schema.Struct({
+  run: WorkflowRun,
+  definitionName: TrimmedNonEmptyString,
+  nodeCount: NonNegativeInt,
+  completedNodeCount: NonNegativeInt,
+  openAttentionCount: NonNegativeInt,
+  currentRevision: GitRevision,
+});
+export type FactoryRunSummary = typeof FactoryRunSummary.Type;
+
+export const FactoryStartRunInput = Schema.Struct({
+  /** Canonical YAML. Parsed and validated server-side before anything is stored. */
+  workflowYaml: Schema.String.check(Schema.isMaxLength(200_000)),
+  workItemId: WorkItemId,
+  threadId: ThreadId,
+  workspaceId: Schema.NullOr(WorkspaceId),
+  projectId: Schema.NullOr(ProjectId),
+});
+export type FactoryStartRunInput = typeof FactoryStartRunInput.Type;
+
+/**
+ * Starting a run can fail for reasons the operator can act on -- a workflow that
+ * does not parse, a thread with no checkout -- so those are results rather than
+ * transport errors.
+ */
+export const FactoryStartRunResult = Schema.Union([
+  Schema.Struct({ outcome: Schema.Literal("started"), run: WorkflowRun }),
+  Schema.Struct({
+    outcome: Schema.Literal("invalid-workflow"),
+    problems: Schema.Array(Schema.Struct({ path: Schema.String, message: Schema.String })),
+  }),
+  Schema.Struct({ outcome: Schema.Literal("refused"), reason: Schema.String }),
+]);
+export type FactoryStartRunResult = typeof FactoryStartRunResult.Type;
+
+export const FactoryResolveAttentionInput = Schema.Struct({
+  attentionItemId: AttentionItemId,
+  resolution: TrimmedNonEmptyString.check(Schema.isMaxLength(2_000)),
+});
+export type FactoryResolveAttentionInput = typeof FactoryResolveAttentionInput.Type;

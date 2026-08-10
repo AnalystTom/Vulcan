@@ -10,6 +10,7 @@ import {
   WS_FEATURE_PATH,
   WS_NEGOTIATE_HTTP_PATH,
   WS_METHODS,
+  type FactoryStartRunResult,
   type WorkspaceLayoutWriteResult,
   WsBootstrapRpcGroup,
   WsCompatibilityError,
@@ -105,7 +106,13 @@ import { ServerLifecycleEvents } from "./serverLifecycleEvents";
 import { ServerRuntimeStartup } from "./serverRuntimeStartup";
 import { ServerSettingsService } from "./serverSettings";
 import { isLoopbackHost } from "./startupAccess";
+import { isNodeSatisfied } from "@vulcan/shared/factoryKernel";
+import { parseWorkflowYaml } from "@vulcan/shared/workflowYaml";
+import { CHECKOUT_VERIFY_WORKFLOW_YAML } from "@vulcan/shared/checkoutVerifyWorkflow";
+import { TRACER_BULLET_WORKFLOW_YAML } from "@vulcan/shared/tracerBulletWorkflow";
 import { HerdrBridge } from "./herdr/Services/HerdrBridge";
+import { FactoryRunner } from "./factory/Services/FactoryRunner";
+import { FactoryStore } from "./persistence/Services/FactoryStore";
 import { WorkspaceLayouts } from "./persistence/Services/WorkspaceLayouts";
 import { TerminalManager } from "./terminal/Services/Manager";
 import { TerminalThreadTitleTracker } from "./terminal/terminalThreadTitleTracker";
@@ -147,6 +154,18 @@ import { bufferLiveUiStream, type LiveUiStreamDropReport } from "./wsStreamBackp
 import { makeCursorSafeSnapshotLiveStream } from "./wsSnapshotLiveStream";
 import { PullRequestService } from "./pullRequests/Services/PullRequestService";
 import { resolveGitHubRepository } from "./pullRequests/repositoryResolution";
+
+/**
+ * Workflows that ship with the product.
+ *
+ * Kept here rather than seeded into the database so a build always offers the
+ * current version, and so an operator can read the YAML before running it.
+ */
+const BUILT_IN_WORKFLOWS = [
+  { id: "vulcan.checkout-verify", source: CHECKOUT_VERIFY_WORKFLOW_YAML },
+  { id: "vulcan.tracer-bullet", source: TRACER_BULLET_WORKFLOW_YAML },
+] as const;
+
 import {
   GitHubProjectProvisioningError,
   makeGitHubProjectProvisioner,
@@ -335,6 +354,8 @@ const makeWsRpcHandlersLayer = () =>
       const terminalManager = yield* TerminalManager;
       const herdrBridge = yield* HerdrBridge;
       const workspaceLayouts = yield* WorkspaceLayouts;
+      const factoryStore = yield* FactoryStore;
+      const factoryRunner = yield* FactoryRunner;
       const textGeneration = yield* TextGeneration;
       const workspaceEntries = yield* WorkspaceEntries;
       const workspaceFileSystem = yield* WorkspaceFileSystem;
@@ -1513,6 +1534,145 @@ const makeWsRpcHandlersLayer = () =>
               return result;
             }),
             "Failed to hand off thread",
+          ),
+
+        [WS_METHODS.factoryListRuns]: () =>
+          rpcEffect(
+            Effect.gen(function* () {
+              const active = yield* factoryStore.listActiveRuns();
+              return yield* Effect.forEach(active, (stored) =>
+                Effect.gen(function* () {
+                  const snapshot = yield* factoryStore.readRunSnapshot(stored.run.id);
+                  const attention = yield* factoryStore.listOpenAttentionItems({
+                    runId: stored.run.id,
+                  });
+                  const completed = snapshot
+                    ? stored.definition.nodes.filter((node) => isNodeSatisfied(snapshot, node.id))
+                        .length
+                    : 0;
+                  return {
+                    run: stored.run,
+                    definitionName: stored.definition.name,
+                    nodeCount: stored.definition.nodes.length,
+                    completedNodeCount: completed,
+                    openAttentionCount: attention.length,
+                    currentRevision: stored.currentRevision,
+                  };
+                }),
+              );
+            }),
+            "Failed to list factory runs",
+          ),
+
+        [WS_METHODS.factoryReadRun]: (input) =>
+          rpcEffect(
+            Effect.gen(function* () {
+              const stored = yield* factoryStore.readRun(input.runId);
+              const snapshot = yield* factoryStore.readRunSnapshot(input.runId);
+              if (!stored || !snapshot) return null;
+              const attentionItems = yield* factoryStore.listOpenAttentionItems({
+                runId: input.runId,
+              });
+              return {
+                run: stored.run,
+                definition: snapshot.definition,
+                attempts: snapshot.attempts,
+                artifacts: snapshot.artifacts,
+                gateResults: snapshot.gateResults,
+                currentRevision: snapshot.currentRevision,
+                attentionItems,
+              };
+            }),
+            "Failed to read the factory run",
+          ),
+
+        [WS_METHODS.factoryStartRun]: (input) =>
+          rpcEffect(
+            Effect.gen(function* () {
+              // Parsed and validated here, so a workflow that cannot execute is
+              // never stored and the operator sees every problem at once.
+              const parsed = parseWorkflowYaml(input.workflowYaml);
+              if (!parsed.ok) {
+                return {
+                  outcome: "invalid-workflow",
+                  problems: parsed.problems.map((problem) => ({
+                    path: problem.path,
+                    message: problem.message,
+                  })),
+                } satisfies FactoryStartRunResult;
+              }
+              const started = yield* factoryRunner
+                .startRun({
+                  definition: parsed.definition,
+                  workItemId: input.workItemId,
+                  workspaceId: input.workspaceId,
+                  projectId: input.projectId,
+                  threadId: input.threadId,
+                })
+                .pipe(
+                  Effect.map(
+                    (run) => ({ outcome: "started", run }) satisfies FactoryStartRunResult,
+                  ),
+                  // A thread with no checkout is an operator-actionable refusal,
+                  // not a transport failure.
+                  Effect.catchTag("FactoryRunError", (error) =>
+                    Effect.succeed({
+                      outcome: "refused",
+                      reason: error.message,
+                    } satisfies FactoryStartRunResult),
+                  ),
+                );
+              return started;
+            }),
+            "Failed to start the factory run",
+          ),
+
+        [WS_METHODS.factoryListAttention]: (input) =>
+          rpcEffect(
+            factoryStore.listOpenAttentionItems(
+              input.runId === undefined ? {} : { runId: input.runId },
+            ),
+            "Failed to list attention items",
+          ),
+
+        [WS_METHODS.factoryResolveAttention]: (input) =>
+          rpcEffect(
+            factoryStore.resolveAttentionItem({
+              attentionItemId: input.attentionItemId,
+              resolution: input.resolution,
+              at: new Date().toISOString(),
+            }),
+            "Failed to resolve the attention item",
+          ),
+
+        [WS_METHODS.factoryListWorkflows]: () =>
+          rpcEffect(
+            Effect.gen(function* () {
+              // Whether a workflow can run here is reported, never guessed: it is
+              // the capabilities its nodes need minus the ones a target reports.
+              const targets = yield* factoryStore.listTargets();
+              const available = new Set(targets.flatMap((target) => target.capabilities));
+              return BUILT_IN_WORKFLOWS.map((entry) => {
+                const parsed = parseWorkflowYaml(entry.source);
+                const required = parsed.ok
+                  ? [
+                      ...new Set(
+                        parsed.definition.nodes.flatMap((node) => node.requiredCapabilities),
+                      ),
+                    ]
+                  : [];
+                const missing = required.filter((capability) => !available.has(capability));
+                return {
+                  id: parsed.ok ? parsed.definition.id : entry.id,
+                  name: parsed.ok ? parsed.definition.name : entry.id,
+                  description: parsed.ok ? parsed.definition.description : "",
+                  source: entry.source,
+                  runnableHere: parsed.ok && missing.length === 0,
+                  missingCapabilities: missing,
+                };
+              });
+            }),
+            "Failed to list workflows",
           ),
 
         [WS_METHODS.workspaceLayoutRead]: (input) =>
