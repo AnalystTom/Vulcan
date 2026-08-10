@@ -42,6 +42,8 @@ export interface WorkspaceGridProps {
   readonly onSplitPane: (paneId: PaneId, direction: PaneSplitDirection) => void;
   readonly onTogglePinned: (paneId: PaneId) => void;
   readonly onClosePane: (paneId: PaneId) => void;
+  /** Null for panes that only reference a session rather than owning one. */
+  readonly resolveTerminateSession: (pane: WorkspacePane) => (() => void) | null;
   readonly onMovePane: (paneId: PaneId, targetPaneId: PaneId, zone: PaneDropZone) => void;
   readonly onSetRowHeights: (weights: readonly number[]) => void;
   readonly onSetCellWidths: (rowId: PaneRowId, weights: readonly number[]) => void;
@@ -56,6 +58,7 @@ export function WorkspaceGrid({
   onSplitPane,
   onTogglePinned,
   onClosePane,
+  resolveTerminateSession,
   onMovePane,
   onSetRowHeights,
   onSetCellWidths,
@@ -119,6 +122,7 @@ export function WorkspaceGrid({
                       // The last pane is still closable; an empty workspace is a
                       // valid state with its own add-a-pane affordance.
                       canClose={paneCount > 0}
+                      onTerminateSession={resolveTerminateSession(pane)}
                       onFocus={() => onFocusPane(pane.paneId)}
                       onSelectMode={(mode) => onSelectMode(pane.paneId, mode)}
                       onSplit={(direction) => onSplitPane(pane.paneId, direction)}

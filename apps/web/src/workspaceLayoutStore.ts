@@ -35,10 +35,12 @@ import {
 } from "@vulcan/contracts";
 import {
   addPane,
+  type AutomationPlacement,
   createPane,
   createWorkspaceLayout,
   focusPane,
   movePane,
+  planAutomationPlacement,
   type PaneLayoutResult,
   removePane,
   setCellWidthWeights,
@@ -116,6 +118,22 @@ interface WorkspaceLayoutStoreState {
     rowId: PaneRowId,
     weights: readonly number[],
   ) => Promise<void>;
+  /**
+   * Show a Pane Mode on behalf of factory automation.
+   *
+   * Automation may open or focus a Pane; it may never take a pinned one. The
+   * policy lives in the shared kernel (`planAutomationPlacement`) so the
+   * decision is the same one the server would make, and this only applies it.
+   *
+   * Returns what happened, so a caller that cannot be served -- every Pane
+   * pinned and the grid full -- can raise an Attention Item instead of silently
+   * doing nothing.
+   */
+  readonly requestPaneForMode: (
+    workspaceId: WorkspaceId,
+    mode: PaneMode,
+  ) => Promise<AutomationPlacement["kind"]>;
+
   readonly clearRejection: (workspaceId: WorkspaceId) => void;
 }
 
@@ -271,6 +289,34 @@ export const useWorkspaceLayoutStore = create<WorkspaceLayoutStoreState>((set, g
 
     setCellWidths: (workspaceId, rowId, weights) =>
       apply(workspaceId, (layout) => setCellWidthWeights(layout, rowId, weights)),
+
+    requestPaneForMode: async (workspaceId, mode) => {
+      const entry = readEntry(workspaceId);
+      if (!entry) return "attention";
+
+      const placement = planAutomationPlacement(entry.layout, mode);
+      switch (placement.kind) {
+        case "focus-existing":
+          await apply(workspaceId, (layout) => focusPane(layout, placement.paneId));
+          return placement.kind;
+        case "reuse":
+          // Repurposing an existing Pane, never a pinned one: the kernel has
+          // already excluded pinned Panes before returning this placement.
+          await apply(workspaceId, (layout) => setPaneMode(layout, placement.paneId, mode));
+          await apply(workspaceId, (layout) => focusPane(layout, placement.paneId));
+          return placement.kind;
+        case "add":
+          await apply(workspaceId, (layout) =>
+            addPane(layout, createPane(mintPaneId(), mode), mintRowId()),
+          );
+          return placement.kind;
+        case "attention":
+          // The grid is full and every Pane is pinned. Recorded as a refusal so
+          // the surface can say so rather than appearing to ignore the request.
+          patch(workspaceId, { lastRejection: placement.rejection });
+          return placement.kind;
+      }
+    },
 
     clearRejection: (workspaceId) => patch(workspaceId, { lastRejection: null }),
   };

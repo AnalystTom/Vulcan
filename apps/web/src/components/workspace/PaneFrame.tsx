@@ -15,6 +15,7 @@ import {
   IconLayoutRows,
   IconPin,
   IconPinnedOff,
+  IconPlugConnectedX,
   IconX,
 } from "@tabler/icons-react";
 import { type ReactNode, useCallback, useMemo, useState } from "react";
@@ -65,6 +66,16 @@ export interface PaneFrameProps {
   /** True when this pane needs the operator, which the header must make obvious. */
   readonly needsAttention?: boolean;
   readonly canClose: boolean;
+  /**
+   * Ends the session this Pane owns, when it owns one.
+   *
+   * Null when the Pane only *references* a session -- an Agent Pane is a view
+   * onto a thread that exists independently of any Pane, so offering to
+   * terminate it from a layout control would be a surprising amount of power for
+   * a view to have. A terminal is different: the Pane created it, so the Pane can
+   * end it.
+   */
+  readonly onTerminateSession: (() => void) | null;
   readonly onFocus: () => void;
   readonly onSelectMode: (mode: PaneMode) => void;
   readonly onSplit: (direction: PaneSplitDirection) => void;
@@ -80,6 +91,7 @@ export function PaneFrame({
   statusLabel,
   needsAttention,
   canClose,
+  onTerminateSession,
   onFocus,
   onSelectMode,
   onSplit,
@@ -207,6 +219,13 @@ export function PaneFrame({
               )
             }
           />
+          {onTerminateSession ? (
+            <PaneIconButton
+              label="Terminate this pane's session. This ends the process, unlike closing the pane."
+              onClick={onTerminateSession}
+              icon={<IconPlugConnectedX className="size-3.5" aria-hidden />}
+            />
+          ) : null}
           <PaneIconButton
             label="Close pane. This leaves its session running."
             disabled={!canClose}

@@ -32,9 +32,13 @@ import {
 } from "~/workspaceLayoutStore";
 
 import { FactoryPane } from "./FactoryPane";
+import { useIsMobile } from "~/hooks/useMediaQuery";
+import { ensureNativeApi } from "~/nativeApi";
+
 import { HerdrTerminalPane } from "./HerdrTerminalPane";
 import { describePaneMode } from "./paneModeRegistry";
 import { WorkspaceGrid } from "./WorkspaceGrid";
+import { WorkspacePaneSwitcher } from "./WorkspacePaneSwitcher";
 
 export interface WorkspaceSurfaceProps {
   readonly workspaceId: WorkspaceId;
@@ -64,6 +68,7 @@ export function WorkspaceSurface({
     useMemo(() => selectWorkspaceLayout(workspaceId), [workspaceId]),
   );
   const store = useWorkspaceLayoutStore();
+  const isNarrow = useIsMobile();
 
   useEffect(() => {
     void store.open({ workspaceId, projectId, threadId });
@@ -131,6 +136,36 @@ export function WorkspaceSurface({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [layout, store, workspaceId]);
 
+  /**
+   * Factory automation asking for a surface.
+   *
+   * When a run raises an Attention Item, the Factory pane is where the operator
+   * can act on it, so automation requests one. It goes through the store's
+   * `requestPaneForMode`, which applies the kernel's placement policy: focus a
+   * Pane already in that mode, otherwise repurpose an unpinned one, otherwise add
+   * one, and refuse rather than ever take a pinned Pane. That refusal is what
+   * makes pinning a promise the product keeps.
+   */
+  useEffect(() => {
+    if (!layout) return;
+    let cancelled = false;
+    const check = async () => {
+      try {
+        const open = await ensureNativeApi().factory.listAttention({});
+        if (cancelled || open.length === 0) return;
+        await store.requestPaneForMode(workspaceId, "factory");
+      } catch {
+        // A factory that cannot be reached must not disturb the layout.
+      }
+    };
+    void check();
+    const timer = window.setInterval(() => void check(), 10_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [layout, store, workspaceId]);
+
   const renderPane = useCallback(
     (pane: WorkspacePane, context: { isFocused: boolean }) => {
       switch (pane.mode) {
@@ -177,6 +212,52 @@ export function WorkspaceSurface({
       }
     },
     [cwd, renderAgentPane, store, workspaceId],
+  );
+
+  /**
+   * Ends the session a Pane owns.
+   *
+   * Only a terminal qualifies: the Pane created it, so the Pane can end it. An
+   * Agent Pane is a view onto a thread that exists independently of any layout,
+   * so it returns null and the control is not offered -- closing that Pane
+   * already leaves the session running, which is the guarantee.
+   */
+  const resolveTerminateSession = useCallback(
+    (pane: WorkspacePane) => {
+      if (pane.mode !== "herdrTerminal") return null;
+      const attachment = readPaneAttachment(pane, "herdrTerminal");
+      const terminalId = attachment?.fallbackTerminalId ?? attachment?.sessionName ?? null;
+      if (terminalId === null) return null;
+
+      return () => {
+        void (async () => {
+          const api = ensureNativeApi();
+          // Confirmed explicitly, because this is the one Pane control that
+          // destroys work rather than rearranging it.
+          const confirmed = await api.dialogs.confirm(
+            `Terminate the terminal session in this pane? This ends the process. Closing the pane instead leaves it running.`,
+          );
+          if (!confirmed) return;
+
+          const scopeKey = `${pane.paneId}:${attachment?.fallbackTerminalId ? "fallback" : "herdr"}`;
+          const resolvedId = attachment?.fallbackTerminalId ?? `herdr-${attachment?.sessionName}`;
+          const { disposeAndCloseTerminalSession } = await import("../terminal/terminalSession");
+          disposeAndCloseTerminalSession({
+            api,
+            threadId: scopeKey,
+            terminalId: resolvedId,
+          });
+          // The attachment is cleared so the Pane does not reattach to a session
+          // that no longer exists.
+          await store.setPaneAttachment(workspaceId, pane.paneId, {
+            mode: "herdrTerminal",
+            sessionName: null,
+            fallbackTerminalId: null,
+          });
+        })();
+      };
+    },
+    [store, workspaceId],
   );
 
   const describePaneStatus = useCallback((pane: WorkspacePane) => {
@@ -229,32 +310,44 @@ export function WorkspaceSurface({
       </div>
 
       <div className="min-h-0 min-w-0 flex-1">
-        <WorkspaceGrid
-          layout={layout}
-          renderPane={renderPane}
-          describePaneStatus={describePaneStatus}
-          onFocusPane={(paneId: PaneId) => void store.focusPane(workspaceId, paneId)}
-          onSelectMode={(paneId: PaneId, mode: PaneMode) =>
-            void store.setPaneMode(workspaceId, paneId, mode)
-          }
-          onSplitPane={(paneId: PaneId, direction: PaneSplitDirection) =>
-            void store.splitPane(workspaceId, paneId, direction, "agent")
-          }
-          onTogglePinned={(paneId: PaneId) => {
-            const pane = layout.panes.find((candidate) => candidate.paneId === paneId);
-            if (pane) void store.setPanePinned(workspaceId, paneId, !pane.pinned);
-          }}
-          onClosePane={(paneId: PaneId) => void store.removePane(workspaceId, paneId)}
-          onMovePane={(paneId: PaneId, targetPaneId: PaneId, zone: PaneDropZone) =>
-            void store.movePane(workspaceId, paneId, targetPaneId, zone)
-          }
-          onSetRowHeights={(weights: readonly number[]) =>
-            void store.setRowHeights(workspaceId, weights)
-          }
-          onSetCellWidths={(rowId: PaneRowId, weights: readonly number[]) =>
-            void store.setCellWidths(workspaceId, rowId, weights)
-          }
-        />
+        {isNarrow ? (
+          // Presentation only -- the stored 3x3 layout is untouched, so the
+          // desktop arrangement is still there when the same Workspace is
+          // opened on a larger screen.
+          <WorkspacePaneSwitcher
+            layout={layout}
+            renderPane={renderPane}
+            onFocusPane={(paneId: PaneId) => void store.focusPane(workspaceId, paneId)}
+          />
+        ) : (
+          <WorkspaceGrid
+            layout={layout}
+            renderPane={renderPane}
+            describePaneStatus={describePaneStatus}
+            onFocusPane={(paneId: PaneId) => void store.focusPane(workspaceId, paneId)}
+            onSelectMode={(paneId: PaneId, mode: PaneMode) =>
+              void store.setPaneMode(workspaceId, paneId, mode)
+            }
+            onSplitPane={(paneId: PaneId, direction: PaneSplitDirection) =>
+              void store.splitPane(workspaceId, paneId, direction, "agent")
+            }
+            onTogglePinned={(paneId: PaneId) => {
+              const pane = layout.panes.find((candidate) => candidate.paneId === paneId);
+              if (pane) void store.setPanePinned(workspaceId, paneId, !pane.pinned);
+            }}
+            onClosePane={(paneId: PaneId) => void store.removePane(workspaceId, paneId)}
+            onMovePane={(paneId: PaneId, targetPaneId: PaneId, zone: PaneDropZone) =>
+              void store.movePane(workspaceId, paneId, targetPaneId, zone)
+            }
+            onSetRowHeights={(weights: readonly number[]) =>
+              void store.setRowHeights(workspaceId, weights)
+            }
+            onSetCellWidths={(rowId: PaneRowId, weights: readonly number[]) =>
+              void store.setCellWidths(workspaceId, rowId, weights)
+            }
+            resolveTerminateSession={resolveTerminateSession}
+          />
+        )}
       </div>
       {focusedPaneId ? null : null}
     </div>

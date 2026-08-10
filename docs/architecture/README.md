@@ -129,7 +129,7 @@ are missing if not.
 
 | Area                                                     | Status                                                                                                                                                                        |
 | -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Pane modes: Browser, Diff, Factory, Trace, Lavish Review | Declared in the registry so layout, persistence, and automation share one taxonomy. They render an explicit "not available yet" surface and are kept out of the mode picker.  |
+| Pane modes: Browser, Diff, Trace, Lavish Review | Declared in the registry so layout, persistence, and automation share one taxonomy. They render an explicit "not available yet" surface and are kept out of the mode picker.  |
 | Work Item registry and RPC surface                       | Contract and projections exist; there is no persistence, no intake, and no board UI yet.                                                                                      |
 | Factory view UI                                          | Waterfall and activity board are computed and tested; nothing renders them.                                                                                                   |
 | Real agent/browser/Lavish executors                      | Not wired. Those capabilities are deliberately not reported by the local target, so routing refuses their nodes and raises an Attention Item naming what is missing.          |

@@ -20,6 +20,10 @@
       "types": "./src/workItemProjection.ts",
       "import": "./src/workItemProjection.ts"
     },
+    "./factoryTimeline": {
+      "types": "./src/factoryTimeline.ts",
+      "import": "./src/factoryTimeline.ts"
+    },
     "./factoryController": {
       "types": "./src/factoryController.ts",
       "import": "./src/factoryController.ts"

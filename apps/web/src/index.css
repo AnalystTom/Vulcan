@@ -484,9 +484,31 @@
   --warning: var(--color-amber-500);
   --warning-foreground: var(--color-amber-700);
   --claude: #d97757;
+  /* Factory swimlane tints — one hue per worker in the Factory session timeline, so a lane is
+     recognizable at a glance while scanning who is working. Follows the status-tint rule above:
+     the plain role color in light, a step toward white in dark. Lanes only ever tint borders,
+     bars, and their own name; block copy stays on `--foreground` so contrast never depends on
+     the hue. The four agent tints cycle by lane order, which is why they must stay distinct
+     from each other rather than merely from the background. */
+  --factory-lane-operator: var(--color-amber-500);
+  --factory-lane-workspace: var(--color-cyan-600);
+  --factory-lane-browser: var(--color-sky-500);
+  --factory-lane-gate: var(--color-emerald-500);
+  --factory-lane-agent-1: var(--color-violet-500);
+  --factory-lane-agent-2: var(--color-indigo-500);
+  --factory-lane-agent-3: var(--color-pink-500);
+  --factory-lane-agent-4: var(--color-teal-500);
 
   @variant dark {
     color-scheme: dark;
+    --factory-lane-operator: color-mix(in srgb, var(--color-amber-500) 76%, var(--color-white));
+    --factory-lane-workspace: color-mix(in srgb, var(--color-cyan-500) 76%, var(--color-white));
+    --factory-lane-browser: color-mix(in srgb, var(--color-sky-500) 76%, var(--color-white));
+    --factory-lane-gate: color-mix(in srgb, var(--color-emerald-500) 76%, var(--color-white));
+    --factory-lane-agent-1: color-mix(in srgb, var(--color-violet-500) 76%, var(--color-white));
+    --factory-lane-agent-2: color-mix(in srgb, var(--color-indigo-400) 76%, var(--color-white));
+    --factory-lane-agent-3: color-mix(in srgb, var(--color-pink-500) 76%, var(--color-white));
+    --factory-lane-agent-4: color-mix(in srgb, var(--color-teal-500) 76%, var(--color-white));
     --background: #0e0e0e;
     --foreground: var(--color-neutral-100);
     --card: color-mix(in srgb, var(--background) 99%, var(--color-white));
