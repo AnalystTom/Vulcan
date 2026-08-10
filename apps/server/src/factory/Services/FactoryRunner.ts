@@ -37,11 +37,14 @@ export type FactoryRunnerError = FactoryStoreError | FactoryRunError;
 export interface StartRunInput {
   readonly definition: WorkflowDefinition;
   readonly workItemId: WorkItemId;
-  /** Absolute path the run's nodes execute in. Must be a git checkout. */
-  readonly workspacePath: string;
   readonly workspaceId: WorkspaceId | null;
   readonly projectId: ProjectId | null;
-  readonly threadId: ThreadId | null;
+  /**
+   * The thread whose workspace the run executes in. Required, because a run
+   * without one has nowhere to produce evidence -- the path is derived from the
+   * thread rather than supplied, so a handoff to a worktree moves the run too.
+   */
+  readonly threadId: ThreadId;
 }
 
 /** What one tick did, so the caller can log or test it without reading the database. */

@@ -29,6 +29,7 @@ import { Cause, Duration, Effect, Layer, Schedule } from "effect";
 
 import { createLogger } from "../../logger.ts";
 import { FactoryStore } from "../../persistence/Services/FactoryStore.ts";
+import { FactoryWorkspaces } from "../Services/FactoryWorkspaces.ts";
 import { executeFactoryNode, readHeadRevision } from "../nodeExecutor.ts";
 import {
   FactoryRunError,
@@ -72,11 +73,7 @@ export const FACTORY_TICK_INTERVAL_MS = 2_000;
 
 const makeFactoryRunner = Effect.gen(function* () {
   const store = yield* FactoryStore;
-
-  // Where each run executes. Not on the definition, because the same workflow
-  // runs against many workspaces; not in the database yet either, so a restart
-  // loses it -- see the note on `readWorkspacePath`.
-  const workspacePaths = new Map<string, string>();
+  const workspaces = yield* FactoryWorkspaces;
 
   const localTarget: FactoryRunnerShape["localTarget"] = () =>
     Effect.gen(function* () {
@@ -95,17 +92,42 @@ const makeFactoryRunner = Effect.gen(function* () {
   const readWorkspaceRevision: FactoryRunnerShape["readWorkspaceRevision"] = (workspacePath) =>
     Effect.promise(() => readHeadRevision(workspacePath));
 
+  /**
+   * Where a run executes.
+   *
+   * Derived from the thread's workspace rather than stored on the run, using the
+   * same resolver terminals, checkpoints, and the agent gateway already use. A
+   * Run belongs to a Workspace and the Workspace owns its worktree, so copying
+   * the path onto the run would duplicate a fact that can then disagree -- and a
+   * thread handed off from local to a worktree would leave the run pointing at
+   * the old checkout.
+   *
+   * It also means the path survives a restart for free: it is re-derived from
+   * the projection every tick rather than remembered.
+   */
   const readWorkspacePath: FactoryRunnerShape["readWorkspacePath"] = (runId) =>
-    Effect.sync(() => workspacePaths.get(runId) ?? null);
+    Effect.gen(function* () {
+      const stored = yield* store.readRun(runId);
+      const threadId = stored?.run.threadId ?? null;
+      if (threadId === null) return null;
+      return yield* workspaces.resolveThreadWorkspacePath(threadId);
+    });
 
   const startRun: FactoryRunnerShape["startRun"] = (input: StartRunInput) =>
     Effect.gen(function* () {
-      const revision = yield* readWorkspaceRevision(input.workspacePath);
+      const workspacePath = yield* workspaces.resolveThreadWorkspacePath(input.threadId);
+      if (workspacePath === null) {
+        return yield* new FactoryRunError({
+          message: `Thread ${input.threadId} has no materialized workspace yet, so there is nowhere to run.`,
+        });
+      }
+
+      const revision = yield* readWorkspaceRevision(workspacePath);
       if (revision === null) {
         // A run with no revision could produce evidence pinned to nothing, which
         // would make every later gate meaningless. Refuse at the boundary.
         return yield* new FactoryRunError({
-          message: `${input.workspacePath} is not a git checkout, so a run started there could not pin its evidence to a revision.`,
+          message: `${workspacePath} is not a git checkout, so a run started there could not pin its evidence to a revision.`,
         });
       }
 
@@ -126,7 +148,6 @@ const makeFactoryRunner = Effect.gen(function* () {
         endedAt: null,
       };
       yield* store.createRun(run);
-      workspacePaths.set(run.id, input.workspacePath);
       yield* localTarget();
       return run;
     });
@@ -402,10 +423,11 @@ const makeFactoryRunner = Effect.gen(function* () {
         const snapshot = yield* store.readRunSnapshot(stored.run.id);
         if (!snapshot) continue;
 
-        const workspacePath = workspacePaths.get(stored.run.id);
+        const workspacePath = yield* readWorkspacePath(stored.run.id);
         if (!workspacePath) {
-          // Started before a restart. Its nodes cannot be run without knowing
-          // where, so it is left alone rather than executed somewhere arbitrary.
+          // A run whose thread has no materialized workspace yet (a worktree
+          // still being created, say) has nowhere to execute. It is left for a
+          // later tick rather than run somewhere arbitrary.
           continue;
         }
 

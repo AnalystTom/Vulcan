@@ -46,6 +46,7 @@ import { ServerEnvironmentLive } from "./environment/Layers/ServerEnvironment";
 import { AutomationRepositoryLive } from "./persistence/Layers/AutomationRepository";
 import { ProjectPullRequestPinsLive } from "./persistence/Layers/ProjectPullRequestPins";
 import { FactoryRunnerLive } from "./factory/Layers/FactoryRunner";
+import { FactoryWorkspacesLive } from "./factory/Layers/FactoryWorkspaces";
 import { FactoryStoreLive } from "./persistence/Layers/FactoryStore";
 import { WorkspaceLayoutsLive } from "./persistence/Layers/WorkspaceLayouts";
 import { ProjectionTurnRepositoryLive } from "./persistence/Layers/ProjectionTurns";
@@ -154,7 +155,14 @@ export function makeServerRuntimeServicesLayer(
   );
   // The factory controller needs storage only; it deliberately depends on nothing
   // else, so a run can progress whether or not any provider is reachable.
-  const factoryRunnerLayer = FactoryRunnerLive.pipe(Layer.provideMerge(FactoryStoreLive));
+  // Storage plus the projection read model: the run's workspace is derived from
+  // its thread the same way terminals and checkpoints derive theirs, rather than
+  // copied onto the run where it could disagree.
+  const factoryRunnerLayer = FactoryRunnerLive.pipe(
+    Layer.provideMerge(FactoryStoreLive),
+    Layer.provideMerge(FactoryWorkspacesLive),
+    Layer.provideMerge(runtimeServicesLayer),
+  );
   const automationSchedulerLayer = AutomationSchedulerLive.pipe(
     Layer.provideMerge(automationServiceLayer),
     Layer.provideMerge(AutomationRepositoryLive),

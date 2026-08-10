@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { assert, describe, it } from "@effect/vitest";
-import { WorkItemId } from "@vulcan/contracts";
+import { ThreadId, WorkItemId } from "@vulcan/contracts";
 import { CHECKOUT_VERIFY_WORKFLOW_YAML } from "@vulcan/shared/checkoutVerifyWorkflow";
 import { TRACER_BULLET_WORKFLOW_YAML } from "@vulcan/shared/tracerBulletWorkflow";
 import { parseWorkflowYaml } from "@vulcan/shared/workflowYaml";
@@ -15,6 +15,20 @@ import { FactoryStoreLive } from "../persistence/Layers/FactoryStore.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { FactoryRunnerLive } from "./Layers/FactoryRunner.ts";
 import { FactoryRunner } from "./Services/FactoryRunner.ts";
+import { FactoryWorkspaces } from "./Services/FactoryWorkspaces.ts";
+
+/**
+ * Every thread in a test maps to the temporary checkout named by its id.
+ *
+ * The production resolver walks the projection read model to find a thread's
+ * worktree; here that whole graph collapses to "the id is the path", which is
+ * exactly why the runner depends on this one-method service rather than on the
+ * projections directly.
+ */
+const fixedWorkspaces = Layer.succeed(FactoryWorkspaces)({
+  resolveThreadWorkspacePath: (threadId) =>
+    Effect.succeed(threadId.startsWith("/") ? threadId : null),
+});
 
 /**
  * A fresh database per test.
@@ -26,6 +40,7 @@ import { FactoryRunner } from "./Services/FactoryRunner.ts";
 const freshFactory = () =>
   FactoryRunnerLive.pipe(
     Layer.provideMerge(FactoryStoreLive),
+    Layer.provideMerge(fixedWorkspaces),
     Layer.provideMerge(SqlitePersistenceMemory),
   );
 
@@ -77,10 +92,9 @@ const startAndDrain = (input: {
     const run = yield* runner.startRun({
       definition: input.definition,
       workItemId: WorkItemId.makeUnsafe(`item-${input.workspacePath.slice(-8)}`),
-      workspacePath: input.workspacePath,
       workspaceId: null,
       projectId: null,
-      threadId: null,
+      threadId: ThreadId.makeUnsafe(input.workspacePath),
     });
 
     // Tick until the run settles. Each tick dispatches whatever the kernel says
@@ -110,10 +124,9 @@ describe("FactoryRunner", () => {
         runner.startRun({
           definition: verifyDefinition,
           workItemId: WorkItemId.makeUnsafe("item-norepo"),
-          workspacePath: notARepo,
           workspaceId: null,
           projectId: null,
-          threadId: null,
+          threadId: ThreadId.makeUnsafe(notARepo),
         }),
       );
       assert.strictEqual(outcome._tag, "Failure");
@@ -233,10 +246,9 @@ describe("FactoryRunner", () => {
       const run = yield* runner.startRun({
         definition: definitionWithCommand("exit 0"),
         workItemId: WorkItemId.makeUnsafe("item-resume"),
-        workspacePath,
         workspaceId: null,
         projectId: null,
-        threadId: null,
+        threadId: ThreadId.makeUnsafe(workspacePath),
       });
 
       yield* runner.tick();
