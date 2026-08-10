@@ -37,6 +37,7 @@ export type WorkflowYamlResult =
   | { readonly ok: false; readonly problems: readonly WorkflowYamlProblem[] };
 
 const VALID_CAPABILITIES: readonly TargetCapability[] = [
+  "agent",
   "git",
   "shell",
   "node",

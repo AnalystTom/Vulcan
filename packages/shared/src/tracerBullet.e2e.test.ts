@@ -77,7 +77,7 @@ const TARGETS: ExecutionTarget[] = [
   {
     id: "main-server" as ExecutionTargetId,
     label: "main server",
-    capabilities: ["git", "shell", "node", "browser", "lavish"],
+    capabilities: ["agent", "git", "shell", "node", "browser", "lavish"],
     maxConcurrentLeases: 4,
     online: true,
     lastSeenAt: null,
@@ -384,7 +384,9 @@ describe("tracer bullet against a real git repository", () => {
         {
           id: "limited" as ExecutionTargetId,
           label: "limited",
-          capabilities: ["git"],
+          // Reports agent work but not a shell, so the plan node runs and the
+          // test node has nowhere to go.
+          capabilities: ["agent", "git"],
           maxConcurrentLeases: 1,
           online: true,
           lastSeenAt: null,

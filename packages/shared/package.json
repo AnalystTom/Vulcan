@@ -8,6 +8,10 @@
       "types": "./src/workflowYaml.ts",
       "import": "./src/workflowYaml.ts"
     },
+    "./checkoutVerifyWorkflow": {
+      "types": "./src/checkoutVerifyWorkflow.ts",
+      "import": "./src/checkoutVerifyWorkflow.ts"
+    },
     "./tracerBulletWorkflow": {
       "types": "./src/tracerBulletWorkflow.ts",
       "import": "./src/tracerBulletWorkflow.ts"

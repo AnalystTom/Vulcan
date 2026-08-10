@@ -36,7 +36,7 @@ nodes:
     title: Plan the change
     role: plan
     dependsOn: []
-    requiredCapabilities: []
+    requiredCapabilities: [agent]
     promptTemplate: >-
       Read the Work Item and the repository. Produce a plan naming the files to
       change and how the change will be verified. Do not edit any files.
@@ -46,7 +46,7 @@ nodes:
     title: Build the change
     role: build
     dependsOn: [plan]
-    requiredCapabilities: [git, shell]
+    requiredCapabilities: [agent, git, shell]
     promptTemplate: >-
       Implement the plan in the isolated worktree. Commit your work. Report the
       revision you produced.
@@ -75,7 +75,7 @@ nodes:
     kind: review
     title: Independent review
     dependsOn: [test]
-    requiredCapabilities: [git]
+    requiredCapabilities: [agent, git]
     independentOf: [build]
 
   - id: lavish-review

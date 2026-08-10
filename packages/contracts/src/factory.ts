@@ -105,6 +105,8 @@ export const DEFAULT_FACTORY_POLICY: FactoryPolicy = {
  * confirmed is absent -- never inferred from the target being reachable.
  */
 export const TargetCapability = Schema.Literals([
+  /** Can run an agent session against a provider. */
+  "agent",
   "git",
   "shell",
   "node",

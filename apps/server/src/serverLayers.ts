@@ -45,6 +45,7 @@ import { ExternalMcpGatewayLive } from "./externalMcp/Layers/ExternalMcpGateway"
 import { ServerEnvironmentLive } from "./environment/Layers/ServerEnvironment";
 import { AutomationRepositoryLive } from "./persistence/Layers/AutomationRepository";
 import { ProjectPullRequestPinsLive } from "./persistence/Layers/ProjectPullRequestPins";
+import { FactoryRunnerLive } from "./factory/Layers/FactoryRunner";
 import { FactoryStoreLive } from "./persistence/Layers/FactoryStore";
 import { WorkspaceLayoutsLive } from "./persistence/Layers/WorkspaceLayouts";
 import { ProjectionTurnRepositoryLive } from "./persistence/Layers/ProjectionTurns";
@@ -151,6 +152,9 @@ export function makeServerRuntimeServicesLayer(
     Layer.provideMerge(ServerSettingsLive),
     Layer.provideMerge(runtimeServicesLayer),
   );
+  // The factory controller needs storage only; it deliberately depends on nothing
+  // else, so a run can progress whether or not any provider is reachable.
+  const factoryRunnerLayer = FactoryRunnerLive.pipe(Layer.provideMerge(FactoryStoreLive));
   const automationSchedulerLayer = AutomationSchedulerLive.pipe(
     Layer.provideMerge(automationServiceLayer),
     Layer.provideMerge(AutomationRepositoryLive),
@@ -209,6 +213,7 @@ export function makeServerRuntimeServicesLayer(
     ProjectPullRequestPinsLive,
     WorkspaceLayoutsLive,
     FactoryStoreLive,
+    factoryRunnerLayer,
     pullRequestServiceLayer,
     orchestrationReactorLayer,
     providerCommandReactorLayer,
