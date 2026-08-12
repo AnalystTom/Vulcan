@@ -196,13 +196,10 @@ export const WS_METHODS = {
   pullRequestsSetPinned: "pullRequests.setPinned",
 
   // Terminal methods
-  // Software factory
-  factoryListRuns: "factory.listRuns",
-  factoryReadRun: "factory.readRun",
-  factoryStartRun: "factory.startRun",
-  factoryListAttention: "factory.listAttention",
-  factoryResolveAttention: "factory.resolveAttention",
-  factoryListWorkflows: "factory.listWorkflows",
+  // Software factory trace (read-only; the factory itself is an external ADW runtime)
+  factoryTraceStatus: "factoryTrace.status",
+  factoryTraceListSessions: "factoryTrace.listSessions",
+  factoryTraceReadSession: "factoryTrace.readSession",
 
   // Workspace pane layout
   workspaceLayoutRead: "workspace.layout.read",

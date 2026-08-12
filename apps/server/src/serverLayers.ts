@@ -45,9 +45,9 @@ import { ExternalMcpGatewayLive } from "./externalMcp/Layers/ExternalMcpGateway"
 import { ServerEnvironmentLive } from "./environment/Layers/ServerEnvironment";
 import { AutomationRepositoryLive } from "./persistence/Layers/AutomationRepository";
 import { ProjectPullRequestPinsLive } from "./persistence/Layers/ProjectPullRequestPins";
-import { FactoryRunnerLive } from "./factory/Layers/FactoryRunner";
-import { FactoryWorkspacesLive } from "./factory/Layers/FactoryWorkspaces";
-import { FactoryStoreLive } from "./persistence/Layers/FactoryStore";
+import { SssfTraceSourceLive } from "./factoryTrace/Layers/SssfTraceSource";
+import { SssfTraceWriterLive } from "./factoryTrace/Layers/SssfTraceWriter";
+import { TraceWorkspacesLive } from "./factoryTrace/Layers/TraceWorkspaces";
 import { WorkspaceLayoutsLive } from "./persistence/Layers/WorkspaceLayouts";
 import { ProjectionTurnRepositoryLive } from "./persistence/Layers/ProjectionTurns";
 import { OrchestrationEventDeliveryRepositoryLive } from "./persistence/Layers/OrchestrationEventDeliveries";
@@ -107,6 +107,10 @@ export function makeServerRuntimeServicesLayer(
   const checkpointReactorLayer = CheckpointReactorLive.pipe(
     Layer.provideMerge(runtimeServicesLayer),
   );
+  const factoryTraceWriterLayer = SssfTraceWriterLive.pipe(
+    Layer.provideMerge(TraceWorkspacesLive),
+    Layer.provideMerge(runtimeServicesLayer),
+  );
   const profileStatsArchiveLayer = ProfileStatsArchiveLive.pipe(
     Layer.provideMerge(checkpointStoreLayer),
   );
@@ -116,6 +120,7 @@ export function makeServerRuntimeServicesLayer(
     Layer.provideMerge(checkpointReactorLayer),
     Layer.provideMerge(studioOutputReactorLayer),
     Layer.provideMerge(threadGitMetadataReactorLayer),
+    Layer.provideMerge(factoryTraceWriterLayer),
   );
   const threadDeletionReactorLayer = ThreadDeletionReactorLive.pipe(
     Layer.provideMerge(profileStatsArchiveLayer),
@@ -153,14 +158,13 @@ export function makeServerRuntimeServicesLayer(
     Layer.provideMerge(ServerSettingsLive),
     Layer.provideMerge(runtimeServicesLayer),
   );
-  // The factory controller needs storage only; it deliberately depends on nothing
-  // else, so a run can progress whether or not any provider is reachable.
-  // Storage plus the projection read model: the run's workspace is derived from
-  // its thread the same way terminals and checkpoints derive theirs, rather than
-  // copied onto the run where it could disagree.
-  const factoryRunnerLayer = FactoryRunnerLive.pipe(
-    Layer.provideMerge(FactoryStoreLive),
-    Layer.provideMerge(FactoryWorkspacesLive),
+  // Reading the software factory's trace needs the projection read model and
+  // nothing else: the factory is an external process, so there is no runtime to
+  // depend on and nothing to keep alive between reads. The trace's location is
+  // derived from the thread's workspace the same way terminals and checkpoints
+  // derive theirs.
+  const factoryTraceLayer = SssfTraceSourceLive.pipe(
+    Layer.provideMerge(TraceWorkspacesLive),
     Layer.provideMerge(runtimeServicesLayer),
   );
   const automationSchedulerLayer = AutomationSchedulerLive.pipe(
@@ -220,8 +224,8 @@ export function makeServerRuntimeServicesLayer(
     providerHealthLayer,
     ProjectPullRequestPinsLive,
     WorkspaceLayoutsLive,
-    FactoryStoreLive,
-    factoryRunnerLayer,
+    factoryTraceLayer,
+    factoryTraceWriterLayer,
     pullRequestServiceLayer,
     orchestrationReactorLayer,
     providerCommandReactorLayer,

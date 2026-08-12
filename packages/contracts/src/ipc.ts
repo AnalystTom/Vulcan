@@ -1,13 +1,10 @@
 import { Schema } from "effect";
 import type {
-  AttentionItem,
-  FactoryResolveAttentionInput,
-  FactoryRunDetail,
-  FactoryRunSummary,
-  FactoryStartRunInput,
-  FactoryStartRunResult,
-  WorkflowRunId,
-} from "./factory";
+  AdwId,
+  TraceSessionDetail,
+  TraceSessionSummary,
+  TraceSourceStatus,
+} from "./factoryTrace";
 import type { HerdrStatus } from "./herdr";
 import type { ProjectId, WorkspaceId } from "./baseSchemas";
 import type {
@@ -589,22 +586,24 @@ export interface NativeApi {
     }) => Promise<string | null>;
     confirm: (message: string) => Promise<boolean>;
   };
-  factory: {
-    listRuns: () => Promise<ReadonlyArray<FactoryRunSummary>>;
-    readRun: (input: { runId: WorkflowRunId }) => Promise<FactoryRunDetail | null>;
-    startRun: (input: FactoryStartRunInput) => Promise<FactoryStartRunResult>;
-    listAttention: (input: { runId?: WorkflowRunId }) => Promise<ReadonlyArray<AttentionItem>>;
-    resolveAttention: (input: FactoryResolveAttentionInput) => Promise<void>;
-    listWorkflows: () => Promise<
-      ReadonlyArray<{
-        id: string;
-        name: string;
-        description: string;
-        source: string;
-        runnableHere: boolean;
-        missingCapabilities: ReadonlyArray<string>;
-      }>
-    >;
+  /**
+   * The software factory's trace, read-only.
+   *
+   * Vulcan watches a factory it does not run: an external ADW writes the trace
+   * while it works and every method here is a poll of that store, which is why
+   * there is nothing to start, cancel, or acknowledge on this surface.
+   */
+  factoryTrace: {
+    status: (input: { threadId: ThreadId | null }) => Promise<TraceSourceStatus>;
+    listSessions: (input: {
+      threadId: ThreadId | null;
+      limit?: number;
+    }) => Promise<ReadonlyArray<TraceSessionSummary>>;
+    readSession: (input: {
+      threadId: ThreadId | null;
+      adwId: AdwId;
+      after?: number;
+    }) => Promise<TraceSessionDetail | null>;
   };
   workspaceLayouts: {
     read: (input: { workspaceId: WorkspaceId }) => Promise<StoredWorkspaceLayout | null>;

@@ -23,16 +23,8 @@ import {
   AutomationUpdateInput,
 } from "./automation";
 import { OpenInEditorInput } from "./editor";
-import { ProjectId, WorkspaceId } from "./baseSchemas";
-import {
-  AttentionItem,
-  FactoryResolveAttentionInput,
-  FactoryRunDetail,
-  FactoryRunSummary,
-  FactoryStartRunInput,
-  FactoryStartRunResult,
-  WorkflowRunId,
-} from "./factory";
+import { ProjectId, ThreadId, WorkspaceId } from "./baseSchemas";
+import { AdwId, TraceSessionDetail, TraceSessionSummary, TraceSourceStatus } from "./factoryTrace";
 import { HerdrStatus } from "./herdr";
 import {
   StoredWorkspaceLayout,
@@ -674,49 +666,35 @@ export const WsGitHandoffThreadRpc = Rpc.make(WS_METHODS.gitHandoffThread, {
  * second client editing the same Workspace produces a rebase rather than a lost
  * layout.
  */
-export const WsFactoryListRunsRpc = Rpc.make(WS_METHODS.factoryListRuns, {
-  payload: Schema.Struct({}),
-  success: Schema.Array(FactoryRunSummary),
+export const WsFactoryTraceStatusRpc = Rpc.make(WS_METHODS.factoryTraceStatus, {
+  payload: Schema.Struct({ threadId: Schema.NullOr(ThreadId) }),
+  success: TraceSourceStatus,
   error: WsRpcError,
 });
 
-export const WsFactoryReadRunRpc = Rpc.make(WS_METHODS.factoryReadRun, {
-  payload: Schema.Struct({ runId: WorkflowRunId }),
-  success: Schema.NullOr(FactoryRunDetail),
+export const WsFactoryTraceListSessionsRpc = Rpc.make(WS_METHODS.factoryTraceListSessions, {
+  payload: Schema.Struct({
+    threadId: Schema.NullOr(ThreadId),
+    limit: Schema.optional(Schema.Number),
+  }),
+  success: Schema.Array(TraceSessionSummary),
   error: WsRpcError,
 });
 
-export const WsFactoryStartRunRpc = Rpc.make(WS_METHODS.factoryStartRun, {
-  payload: FactoryStartRunInput,
-  success: FactoryStartRunResult,
-  error: WsRpcError,
-});
-
-export const WsFactoryListAttentionRpc = Rpc.make(WS_METHODS.factoryListAttention, {
-  payload: Schema.Struct({ runId: Schema.optional(WorkflowRunId) }),
-  success: Schema.Array(AttentionItem),
-  error: WsRpcError,
-});
-
-export const WsFactoryResolveAttentionRpc = Rpc.make(WS_METHODS.factoryResolveAttention, {
-  payload: FactoryResolveAttentionInput,
-  success: Schema.Void,
-  error: WsRpcError,
-});
-
-/** The workflows this server knows about, so the UI can offer them without inventing YAML. */
-export const WsFactoryListWorkflowsRpc = Rpc.make(WS_METHODS.factoryListWorkflows, {
-  payload: Schema.Struct({}),
-  success: Schema.Array(
-    Schema.Struct({
-      id: Schema.String,
-      name: Schema.String,
-      description: Schema.String,
-      source: Schema.String,
-      runnableHere: Schema.Boolean,
-      missingCapabilities: Schema.Array(Schema.String),
-    }),
-  ),
+/**
+ * One session's trace.
+ *
+ * `after` is the rowid cursor from the previous read, so a live pane asks only
+ * for what it has not seen -- the same single query serves live and history,
+ * which is why there is no push channel and no replay path.
+ */
+export const WsFactoryTraceReadSessionRpc = Rpc.make(WS_METHODS.factoryTraceReadSession, {
+  payload: Schema.Struct({
+    threadId: Schema.NullOr(ThreadId),
+    adwId: AdwId,
+    after: Schema.optional(Schema.Number),
+  }),
+  success: Schema.NullOr(TraceSessionDetail),
   error: WsRpcError,
 });
 
@@ -1180,12 +1158,9 @@ export const WsFeatureRpcGroup = RpcGroup.make(
   WsGitStageFilesRpc,
   WsGitUnstageFilesRpc,
   WsGitHandoffThreadRpc,
-  WsFactoryListRunsRpc,
-  WsFactoryReadRunRpc,
-  WsFactoryStartRunRpc,
-  WsFactoryListAttentionRpc,
-  WsFactoryResolveAttentionRpc,
-  WsFactoryListWorkflowsRpc,
+  WsFactoryTraceStatusRpc,
+  WsFactoryTraceListSessionsRpc,
+  WsFactoryTraceReadSessionRpc,
   WsWorkspaceLayoutReadRpc,
   WsWorkspaceLayoutListRpc,
   WsWorkspaceLayoutWriteRpc,

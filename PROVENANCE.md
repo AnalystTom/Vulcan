@@ -68,3 +68,40 @@ identity — `Synara`, or the identities Synara itself retired (`T3 Code`, `T3 T
 enumerated in that script: the `LICENSE` copyright notices, the `## Origins` section of `README.md`,
 and this file. Adding a new occurrence requires adding it to that allow list, which makes every
 attribution change an explicit, reviewed act.
+
+## Third-party design: the software factory trace
+
+Vulcan's factory monitor is built against the
+[Super Simple Software Factory](https://github.com/disler/super-simple-software-factory)
+(MIT, © 2026 IndyDevDan), which Vulcan does **not** vendor, fork, or bundle.
+
+| Field           | Value                                                                |
+| --------------- | -------------------------------------------------------------------- |
+| Upstream        | `disler/super-simple-software-factory`                               |
+| Upstream branch | the skill branch (`.claude/skills/sssf/`)                            |
+| Read on         | 2026-08-10                                                           |
+| Licence         | MIT                                                                  |
+| Method          | schema and design followed; **no files copied into this repository** |
+
+What is derived, and from where:
+
+| Vulcan                                                   | Derived from                                                                   |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `packages/contracts/src/factoryTrace.ts`                 | their SQLite schema, table for table (`references/observability.md`)           |
+| `apps/server/src/factoryTrace/Layers/SssfTraceSource.ts` | their read-only reader and its queries (`apps/visualizer/server/db.ts`)        |
+| `apps/server/src/factoryTrace/Layers/SssfTraceWriter.ts` | their append-only SQLite trace contract (`references/observability.md`)        |
+| `apps/server/src/factoryTrace/sssfSchema.ts`             | their seven authoritative `CREATE TABLE` statements, table for table           |
+| `packages/shared/src/factoryTraceTimeline.ts`            | the lane/waterfall layout of `apps/visualizer/src/components/SessionTrace.vue` |
+| `apps/web/src/components/workspace/factoryTrace/`        | the same component's visual structure, rewritten in React                      |
+
+Their visualizer is Vue 3 served by Bun; Vulcan's is React inside the existing app, so the components
+are a reimplementation rather than a port of source. The parts that are theirs and are followed
+exactly, because interoperating with a file another process writes leaves no room for invention: the
+seven table definitions and their column names, the ten event types, the `rowid > ?` polling contract,
+the WAL and `busy_timeout` connection rules, probing for migration-added columns, and the
+read/written token split derived from `agent_end` payloads.
+
+Vulcan reads and writes the SSSF trace format. It does not run or copy their factory runtime: their
+Python ADW scripts and `pi` coding-agent integration stay outside this repository. Vulcan's writer
+maps its own provider-neutral native sessions into the same tables; the upstream schema and design
+were followed table for table, with no upstream files copied.

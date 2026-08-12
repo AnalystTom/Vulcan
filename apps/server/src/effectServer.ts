@@ -9,7 +9,6 @@ import { agentGatewayRouteLayer } from "./agentGateway/httpRoute";
 import { AgentGatewayCredentials } from "./agentGateway/Services/AgentGatewayCredentials";
 import { AutomationRunReactor } from "./automation/Services/AutomationRunReactor";
 import { AutomationScheduler } from "./automation/Services/AutomationScheduler";
-import { FactoryRunner } from "./factory/Services/FactoryRunner";
 import { AutomationService } from "./automation/Services/AutomationService";
 import {
   clearPersistedServerRuntimeState,
@@ -63,7 +62,6 @@ export interface ServerShape {
     | ManagedAttachmentCleanup
     | AutomationRunReactor
     | AutomationScheduler
-    | FactoryRunner
     | AutomationService
     | ServerLifecycleEvents
     | OrchestrationEngineService
@@ -124,7 +122,6 @@ export const createEffectServer = Effect.fn(function* (
   const agentGatewayCredentials = yield* AgentGatewayCredentials;
   const automationRunReactor = yield* AutomationRunReactor;
   const automationScheduler = yield* AutomationScheduler;
-  const factoryRunner = yield* FactoryRunner;
   const keybindings = yield* Keybindings;
   const managedAttachmentCleanup = yield* ManagedAttachmentCleanup;
   const lifecycleEvents = yield* ServerLifecycleEvents;
@@ -210,7 +207,6 @@ export const createEffectServer = Effect.fn(function* (
   yield* Scope.provide(threadDeletionReactor.start(), subscriptionsScope);
   yield* Scope.provide(providerSessionReaper.start(), subscriptionsScope);
   yield* Scope.provide(providerRuntimeReconciler.start(), subscriptionsScope);
-  yield* Scope.provide(factoryRunner.start(), subscriptionsScope);
   yield* readiness.markOrchestrationSubscriptionsReady;
   yield* readiness.markTerminalSubscriptionsReady;
   // Heal turns orphaned by the previous process exit (their in-memory runtimes

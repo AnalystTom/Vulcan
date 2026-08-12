@@ -51,95 +51,73 @@ acceptable command and no shell candidates. A Herdr pane fails visibly instead o
 plain shell wearing Herdr's name. When the operator opts into the built-in terminal, the pane header
 says so and the choice is recorded as a `fallbackTerminalId`, never as a session name.
 
-### Software Factory kernel (`packages/shared/src/factoryKernel.ts`)
+### Reading and writing software factory traces (`apps/server/src/factoryTrace/`)
 
-Pure decisions over run state, with `now` passed in, so a controller crash and replay cannot produce a
-different schedule than the first pass. Four rules are structural rather than conventional:
+Vulcan does not run an external software factory; it monitors one. An external ADW process
+(the [Super Simple Software Factory](https://github.com/disler/super-simple-software-factory),
+MIT) owns sequencing, retries, and acceptance, and writes its trace to SQLite
+beside the checkout while it works. Vulcan reads that trace and draws it. Native Vulcan agent
+sessions also append the same SSSF rows, so the Factory pane and external SSSF tooling see one
+interoperable history across all providers.
 
-- **Success is only reachable through verification.** `running` has no edge to `succeeded`.
-  Acceptance comes from tests and gates over evidence, never from a clean exit code.
-- **Absence of evidence is never a pass.** A gate check with no admissible artifact fails.
-- **Waiting always says what it is waiting for.** Every waiting state carries a typed reason, enforced
-  at the transition.
-- **The recovery ladder is bounded and always ends at a person.** Resume, retry, reassign, handoff,
-  attention — skipping reassignment for an attempt that never held a target, and short-circuiting when
-  the attempt budget is spent.
+The whole transport is their contract, followed exactly: **agents write to
+SQLite, readers poll SQLite**. There is no ingest endpoint, no push channel, and
+no replay path — live and history are the same `rowid > ?` query at different
+cadence, so a poll asks only for what it has not seen. Read connections remain read-only. The native
+writer subscribes once to the provider-neutral runtime event stream, queues work through a bounded
+drainable worker, and applies `busy_timeout` so SQLite contention never enters turn processing.
 
-Revision pinning distinguishes verification from production. A test, browser check, review, or gate is
-only satisfied at the current revision; production work is satisfied by any success. Invalidating
-production work would make every build invalidate itself, since committing moves the revision.
+`FactoryTraceSource` remains the read seam. `FactoryTraceWriter` is the independent lifecycle seam
+that turns a thread into a session, turns into agent phases, and completed tool items into events.
+The SQLite reader is one implementation, and the pane never learns what a `sssf.db` is, so a
+different factory — or a remote one — is a new layer and nothing else. The
+database is located from the thread's workspace through the same
+`resolveThreadWorkspaceCwd` helper terminals and checkpoints use, or from
+`VULCAN_FACTORY_TRACE_DB` when the trace lives elsewhere.
 
-### Canonical workflow YAML (`packages/shared/src/workflowYaml.ts`)
+Being handed someone else's file is the normal case, and the reader is built for
+it: columns their tracer added by migration are probed and substituted with NULL
+rather than selected blindly, a payload that does not parse costs its own detail
+and never the read, and an absent database is reported as _absent_ rather than as
+an error — most repos have no factory stamped into them.
 
-Workflow Definitions are immutable, versioned, and parsed from typed YAML that is the canonical graph.
-Parsing is strict and total: a definition or every problem with its path. A definition that does not
-validate is never persisted, so the rest of the kernel can assume the stored plan is executable.
+The writer creates the upstream seven-table schema and enables WAL only when the file is absent.
+For existing databases it probes columns and omits unavailable optional fields without migrating the
+file. Process-local ownership fencing allows status and usage updates only for session rows Vulcan
+inserted itself; external rows are append-only from Vulcan's perspective.
 
-### Kanban and Factory projections (`packages/shared/src/workItemProjection.ts`)
+### Trace projection (`packages/shared/src/factoryTraceTimeline.ts`)
 
-Two views over one set of facts, neither holding state. `done` is derived from the configured delivery
-gate having passed at the current revision — nothing reads a stored column, so there is no way to put
-a card in done by moving it.
+A phase's `kind` plus `owner` **is** the lane, which is what keeps the engineer,
+each deterministic code step, and each agent visually separate. Nothing is
+stored: durations, positions, and lane membership are derived from the trace's
+own timestamps on every render, so the picture cannot disagree with the rows it
+came from. Layout never invents time — the only cosmetic liberty is a minimum
+block width, and it is confined to the lane it happens in so two lanes at the
+same x stay comparable.
 
-### Tracer bullet (`packages/shared/src/factoryController.ts`, `tracerBullet.e2e.test.ts`)
+### Factory pane (`apps/web/src/components/workspace/FactoryTracePane.tsx`)
 
-The controller drives a run against injected executors, a clock, and id factories, so the same loop
-runs against real agents in production and deterministic executors in a test with no branch saying
-which. The end-to-end test runs the tracer-bullet workflow against a **real temporary git
-repository**: the build node makes a real commit, so revision pinning and evidence invalidation are
-exercised against git rather than a fixture. It asserts the PR-ready Gate Result cites evidence at a
-real 40-character SHA, that a later commit invalidates the pass, that a retry stays within budget, and
-that an exhausted budget produces exactly one Attention Item.
-
-### Running the factory (`apps/server/src/factory/`)
-
-Migration 091 persists definitions, runs, attempts, artifacts, gate verdicts,
-attention items, targets, and leases. `readRunSnapshot` rebuilds the exact value
-the kernel consumes, so a controller that restarts resumes with nothing lost.
-
-A polling controller ticks every two seconds: it reclaims expired leases, sweeps
-in-flight attempts for stalls, dispatches whatever the kernel says is ready, and
-derives the run's state. It holds no state between ticks, so a restart is
-indistinguishable from a slow tick. This is where `detectStall` and the recovery
-ladder finally take effect, with spent rungs stored on the attempt so a restart
-cannot restart the ladder.
-
-Work the server cannot do is refused by capability routing rather than faked. The
-local target reports `git`, `shell`, `node` and nothing else, so a node needing
-`agent`, `browser`, or `lavish` produces an Attention Item naming the missing
-capability. `checkout-verify` ships as a workflow that runs today; the tracer
-bullet correctly reports that it cannot.
-
-A run's working directory is derived from its thread through the same
-`resolveThreadWorkspaceCwd` helper terminals and checkpoints use, so a factory run
-and an Agent Pane on the same thread cannot disagree about which checkout they are
-in.
-
-### Factory pane (`apps/web/src/components/workspace/FactoryPane.tsx`)
-
-Renders the whole graph including nodes that have not run, an activity summary,
-per-node evidence drill-down with artifact output and gate checks, and the
-Attention Inbox with the recovery rungs already tried. The view is derived on the
-client by the same shared projections the kernel's tests cover, so it cannot show
-one thing while the kernel believes another. Its empty state lists the built-in
-workflows and says, per workflow, whether it can run here and which capabilities
-are missing if not.
+One swim lane per worker on a shared time axis: each phase a block, each tool
+call a mark inside it, each agent lane carrying the model it ran on and how full
+its context window got. Clicking a phase shows its evidence — the envelope it
+produced, and each gate with the `{item, ok, note}` checks behind its verdict, so
+a green gate says _what_ it verified. A gate whose trace predates recorded checks
+says so rather than rendering as though it checked nothing.
 
 ## Specified, not yet implemented
 
-| Area                                                     | Status                                                                                                                                                                        |
-| -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Pane modes: Browser, Diff, Trace, Lavish Review | Declared in the registry so layout, persistence, and automation share one taxonomy. They render an explicit "not available yet" surface and are kept out of the mode picker.  |
-| Work Item registry and RPC surface                       | Contract and projections exist; there is no persistence, no intake, and no board UI yet.                                                                                      |
-| Factory view UI                                          | Waterfall and activity board are computed and tested; nothing renders them.                                                                                                   |
-| Real agent/browser/Lavish executors                      | Not wired. Those capabilities are deliberately not reported by the local target, so routing refuses their nodes and raises an Attention Item naming what is missing.          |
-| Execution target enrolment                               | The local target registers itself and routing works. There is no remote worker, heartbeat, or enrolment flow, so "execute on the always-on server" is modelled but not built. |
-| Execution targets and leases                             | Modelled and routed over in the kernel. No enrolment, heartbeat, or remote worker exists.                                                                                     |
-| Real agent, browser, and Lavish executors                | The tracer bullet uses deterministic stand-ins. No provider adapter, Playwright harness, or Lavish sidecar is wired to a node.                                                |
-| Excalidraw workflow editor                               | The canonical YAML representation it would read and emit exists; the editor does not.                                                                                         |
-| Linear, Hermes, mobile intake                            | Work Item sources are modelled. No integration exists.                                                                                                                        |
-| Tapes, Skill Proposals, optimization experiments         | Not started. Explicitly downstream of the tracer bullet being trustworthy.                                                                                                    |
-| Packaged-app end-to-end verification                     | The issue's primary seam runs through the packaged desktop app; the current end-to-end test runs at the kernel seam.                                                          |
+| Area                                             | Status                                                                                                                                                                       |
+| ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Pane modes: Browser, Diff, Trace, Lavish Review  | Declared in the registry so layout, persistence, and automation share one taxonomy. They render an explicit "not available yet" surface and are kept out of the mode picker. |
+| Work Item registry and RPC surface               | Not implemented after the factory-kernel pivot; there is no persistence, intake, RPC surface, or board UI.                                                                   |
+| Factory activity board and run controls          | Not implemented. The current Factory pane is a read/write SSSF trace monitor, not a workflow runner.                                                                         |
+| Real browser and Lavish workflow executors       | Not implemented as factory workflow nodes. Existing app integrations are separate from a factory execution graph.                                                            |
+| Execution target enrolment and leases            | Not implemented; there is no factory target registry, remote-worker heartbeat, enrolment flow, or lease coordinator.                                                         |
+| Excalidraw workflow editor                       | Not implemented; no canonical factory-workflow YAML model remains after the pivot.                                                                                           |
+| Linear, Hermes, mobile intake                    | Not implemented as factory Work Item sources.                                                                                                                                |
+| Tapes, Skill Proposals, optimization experiments | Not started.                                                                                                                                                                 |
+| Packaged-app factory execution verification      | Not implemented because Vulcan no longer contains the proposed factory execution kernel; trace reader/writer behavior is covered at its SQLite service seams.                |
 
 ## Conventions worth knowing
 

@@ -1,5 +1,7 @@
 import { Effect, Layer } from "effect";
 
+import { FactoryTraceWriter } from "../../factoryTrace/Services/FactoryTraceWriter.ts";
+
 import {
   OrchestrationReactor,
   type OrchestrationReactorShape,
@@ -16,15 +18,18 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
   const checkpointReactor = yield* CheckpointReactor;
   const studioOutputReactor = yield* StudioOutputReactor;
   const threadGitMetadataReactor = yield* ThreadGitMetadataReactor;
+  const factoryTraceWriter = yield* FactoryTraceWriter;
 
   const start: OrchestrationReactorShape["start"] = Effect.gen(function* () {
+    yield* factoryTraceWriter.start;
     yield* studioOutputReactor.start;
     yield* checkpointReactor.start;
     yield* threadGitMetadataReactor.start;
     yield* providerRuntimeIngestion.start;
     // Install every runtime observer before provider command dispatch can
     // begin. Reverse-order finalization then drains provider commands first,
-    // runtime ingestion second, Git metadata third, checkpoints fourth, and Studio output last.
+    // runtime ingestion second, Git metadata third, checkpoints fourth, Studio
+    // output fifth, and the factory trace writer last.
     yield* providerCommandReactor.start;
   });
 

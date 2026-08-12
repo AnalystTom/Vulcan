@@ -500,13 +500,10 @@ export function createWsNativeApi(): NativeApi {
         return showConfirmDialogFallback(message);
       },
     },
-    factory: {
-      listRuns: () => transport.request(WS_METHODS.factoryListRuns, {}),
-      readRun: (input) => transport.request(WS_METHODS.factoryReadRun, input),
-      startRun: (input) => transport.request(WS_METHODS.factoryStartRun, input),
-      listAttention: (input) => transport.request(WS_METHODS.factoryListAttention, input),
-      resolveAttention: (input) => transport.request(WS_METHODS.factoryResolveAttention, input),
-      listWorkflows: () => transport.request(WS_METHODS.factoryListWorkflows, {}),
+    factoryTrace: {
+      status: (input) => transport.request(WS_METHODS.factoryTraceStatus, input),
+      listSessions: (input) => transport.request(WS_METHODS.factoryTraceListSessions, input),
+      readSession: (input) => transport.request(WS_METHODS.factoryTraceReadSession, input),
     },
     workspaceLayouts: {
       read: (input) => transport.request(WS_METHODS.workspaceLayoutRead, input),

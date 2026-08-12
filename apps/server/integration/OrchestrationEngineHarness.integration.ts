@@ -24,6 +24,7 @@ import {
 } from "effect";
 
 import { CheckpointStoreLive } from "../src/checkpointing/Layers/CheckpointStore.ts";
+import { FactoryTraceWriter } from "../src/factoryTrace/Services/FactoryTraceWriter.ts";
 import { CheckpointStore } from "../src/checkpointing/Services/CheckpointStore.ts";
 import { GitCoreLive } from "../src/git/Layers/GitCore.ts";
 import { GitCore, type GitCoreShape } from "../src/git/Services/GitCore.ts";
@@ -331,12 +332,18 @@ export const makeOrchestrationIntegrationHarness = (
       start: Effect.void,
       drain: Effect.void,
     });
+    const factoryTraceWriterLayer = Layer.succeed(FactoryTraceWriter, {
+      append: () => Effect.void,
+      start: Effect.void,
+      drain: Effect.void,
+    });
     const orchestrationReactorLayer = OrchestrationReactorLive.pipe(
       Layer.provideMerge(runtimeIngestionLayer),
       Layer.provideMerge(providerCommandReactorLayer),
       Layer.provideMerge(checkpointReactorLayer),
       Layer.provideMerge(studioOutputReactorLayer),
       Layer.provideMerge(threadGitMetadataReactorLayer),
+      Layer.provideMerge(factoryTraceWriterLayer),
     );
     const layer = orchestrationReactorLayer.pipe(
       Layer.provide(persistenceLayer),

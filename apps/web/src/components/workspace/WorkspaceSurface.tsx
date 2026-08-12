@@ -31,7 +31,7 @@ import {
   useWorkspaceLayoutStore,
 } from "~/workspaceLayoutStore";
 
-import { FactoryPane } from "./FactoryPane";
+import { FactoryTracePane } from "./FactoryTracePane";
 import { useIsMobile } from "~/hooks/useMediaQuery";
 import { ensureNativeApi } from "~/nativeApi";
 
@@ -136,36 +136,6 @@ export function WorkspaceSurface({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [layout, store, workspaceId]);
 
-  /**
-   * Factory automation asking for a surface.
-   *
-   * When a run raises an Attention Item, the Factory pane is where the operator
-   * can act on it, so automation requests one. It goes through the store's
-   * `requestPaneForMode`, which applies the kernel's placement policy: focus a
-   * Pane already in that mode, otherwise repurpose an unpinned one, otherwise add
-   * one, and refuse rather than ever take a pinned Pane. That refusal is what
-   * makes pinning a promise the product keeps.
-   */
-  useEffect(() => {
-    if (!layout) return;
-    let cancelled = false;
-    const check = async () => {
-      try {
-        const open = await ensureNativeApi().factory.listAttention({});
-        if (cancelled || open.length === 0) return;
-        await store.requestPaneForMode(workspaceId, "factory");
-      } catch {
-        // A factory that cannot be reached must not disturb the layout.
-      }
-    };
-    void check();
-    const timer = window.setInterval(() => void check(), 10_000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [layout, store, workspaceId]);
-
   const renderPane = useCallback(
     (pane: WorkspacePane, context: { isFocused: boolean }) => {
       switch (pane.mode) {
@@ -195,7 +165,7 @@ export function WorkspaceSurface({
             />
           );
         case "factory":
-          return <FactoryPane isVisible threadId={threadId} />;
+          return <FactoryTracePane isVisible threadId={threadId} />;
         default: {
           const descriptor = describePaneMode(pane.mode);
           return (

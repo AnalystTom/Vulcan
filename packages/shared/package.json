@@ -4,34 +4,6 @@
   "private": true,
   "type": "module",
   "exports": {
-    "./workflowYaml": {
-      "types": "./src/workflowYaml.ts",
-      "import": "./src/workflowYaml.ts"
-    },
-    "./checkoutVerifyWorkflow": {
-      "types": "./src/checkoutVerifyWorkflow.ts",
-      "import": "./src/checkoutVerifyWorkflow.ts"
-    },
-    "./tracerBulletWorkflow": {
-      "types": "./src/tracerBulletWorkflow.ts",
-      "import": "./src/tracerBulletWorkflow.ts"
-    },
-    "./workItemProjection": {
-      "types": "./src/workItemProjection.ts",
-      "import": "./src/workItemProjection.ts"
-    },
-    "./factoryTimeline": {
-      "types": "./src/factoryTimeline.ts",
-      "import": "./src/factoryTimeline.ts"
-    },
-    "./factoryController": {
-      "types": "./src/factoryController.ts",
-      "import": "./src/factoryController.ts"
-    },
-    "./factoryKernel": {
-      "types": "./src/factoryKernel.ts",
-      "import": "./src/factoryKernel.ts"
-    },
     "./workspaceLayout": {
       "types": "./src/workspaceLayout.ts",
       "import": "./src/workspaceLayout.ts"
@@ -303,6 +275,10 @@
     "./browserAnnotations": {
       "types": "./src/browserAnnotations.ts",
       "import": "./src/browserAnnotations.ts"
+    },
+    "./factoryTraceTimeline": {
+      "types": "./src/factoryTraceTimeline.ts",
+      "import": "./src/factoryTraceTimeline.ts"
     }
   },
   "scripts": {

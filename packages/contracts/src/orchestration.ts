@@ -53,7 +53,14 @@ export const ORCHESTRATION_WS_CHANNELS = {
   threadEvent: "orchestration.threadEvent",
 } as const;
 
-export const ProviderKind = Schema.Literals([
+/**
+ * Every provider, as a plain list.
+ *
+ * Exported alongside the schema because callers that validate free-form input --
+ * workflow YAML, CLI flags -- need to test membership and name the options in an
+ * error, and re-typing the list somewhere else is how the two drift apart.
+ */
+export const PROVIDER_KINDS = [
   "codex",
   "claudeAgent",
   "cursor",
@@ -63,7 +70,9 @@ export const ProviderKind = Schema.Literals([
   "kilo",
   "opencode",
   "pi",
-]);
+] as const;
+
+export const ProviderKind = Schema.Literals(PROVIDER_KINDS);
 export type ProviderKind = typeof ProviderKind.Type;
 export const ProviderApprovalPolicy = Schema.Literals([
   "untrusted",
