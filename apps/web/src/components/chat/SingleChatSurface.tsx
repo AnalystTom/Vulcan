@@ -84,6 +84,7 @@ import {
   LazyDiffPanel,
   noopChatSurfaceAction,
 } from "./ChatThreadSurfacePrimitives";
+import { FactoryTracePane } from "../workspace/FactoryTracePane";
 import { PanelStateMessage } from "./PanelStateMessage";
 import { RightDock } from "./RightDock";
 import { getRightDockPaneMeta, resolveRightDockLauncherItems } from "./rightDockPaneMeta";
@@ -836,6 +837,10 @@ export function SingleChatSurface(props: {
             />
           </Suspense>
         );
+      case "factory":
+        // The trace pane owns its own polling and pauses it while hidden, so it
+        // can stay mounted like the other dock panes without background cost.
+        return <FactoryTracePane threadId={props.threadId} isVisible={context.isVisible} />;
       case "sidechat":
         if (!pane.threadId) {
           return <RightDockPanePlaceholder kind="sidechat" />;

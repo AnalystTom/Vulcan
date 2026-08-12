@@ -16,6 +16,7 @@ import {
   InfoIcon,
   MessageCircleIcon,
   TerminalIcon,
+  WorkflowIcon,
 } from "~/lib/icons";
 import {
   RIGHT_DOCK_PANE_KINDS,
@@ -43,6 +44,7 @@ export const RIGHT_DOCK_PANE_META: Record<RightDockPaneKind, RightDockPaneMeta> 
   sidechat: { label: "Side chats", Icon: MessageCircleIcon },
   git: { label: "Git", Icon: GitCommitIcon },
   pullRequest: { label: "Pull request", Icon: GitPullRequestIcon },
+  factory: { label: "Factory", Icon: WorkflowIcon },
 };
 
 // Neutral fallback for any pane kind we no longer recognize (e.g. stale
@@ -79,6 +81,7 @@ const RIGHT_DOCK_LAUNCHER_ORDER: readonly RightDockPaneKind[] = [
   "explorer",
   "sidechat",
   "git",
+  "factory",
 ];
 
 const RIGHT_DOCK_LAUNCHER_LABELS: Partial<Record<RightDockPaneKind, string>> = {
@@ -101,6 +104,12 @@ export function resolveRightDockLauncherItems(input: {
       return [];
     }
     if (kind === "explorer" && !input.hasWorkspace) {
+      return [];
+    }
+    // The factory trace lives in the thread's workspace checkout; without a
+    // workspace there is no sssf.db to read, so the launcher hides the entry
+    // rather than offering a pane that can only say "no workspace".
+    if (kind === "factory" && !input.hasWorkspace) {
       return [];
     }
     const meta = getRightDockPaneMeta(kind);
