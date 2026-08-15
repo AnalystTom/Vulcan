@@ -187,6 +187,7 @@ import {
   createThreadHoverCardAnchor,
 } from "./sidebarHoverCardAnchors";
 import { PreviewCard, PreviewCardPopup, PreviewCardTrigger } from "./ui/preview-card";
+import { ActiveAgentPanel } from "./ActiveAgentPanel";
 import { hasUnreadActivity as hasUnreadActivityOutsideActiveThread } from "./SidebarActivityView.logic";
 import { SidebarActivityView } from "./SidebarActivityView";
 import { SidebarIconButton, sidebarIconButtonSlotClass } from "./SidebarIconButton";
@@ -5906,6 +5907,20 @@ export default function Sidebar() {
                 </SidebarGroup>
               ) : activityViewEnabled ? (
                 <SidebarGroup className="px-1.5 py-1.5">
+                  <ActiveAgentPanel
+                    threads={nonStudioSidebarThreads}
+                    projectById={projectById}
+                    activeThreadId={visualActiveSidebarThreadId}
+                    threadsHydrated={threadsHydrated}
+                    onOpenThread={activateThreadFromSidebarIntent}
+                    renderThreadHoverCard={(thread, anchorId) =>
+                      renderThreadHoverCardPopup(
+                        thread,
+                        anchorId,
+                        visualActiveSidebarThreadId === thread.id,
+                      )
+                    }
+                  />
                   <SidebarActivityView
                     threads={nonStudioSidebarThreads}
                     projectById={projectById}
@@ -5958,6 +5973,20 @@ export default function Sidebar() {
                       void handleMoveProjectToSpace(projectId, spaceId)
                     }
                     jumpShortcutLabelForTab={jumpShortcutLabelForSpaceTab}
+                  />
+                  <ActiveAgentPanel
+                    threads={nonStudioSidebarThreads}
+                    projectById={projectById}
+                    activeThreadId={visualActiveSidebarThreadId}
+                    threadsHydrated={threadsHydrated}
+                    onOpenThread={activateThreadFromSidebarIntent}
+                    renderThreadHoverCard={(thread, anchorId) =>
+                      renderThreadHoverCardPopup(
+                        thread,
+                        anchorId,
+                        visualActiveSidebarThreadId === thread.id,
+                      )
+                    }
                   />
                   {renderPinnedThreadsSection()}
                   {renderListSectionHeader(
