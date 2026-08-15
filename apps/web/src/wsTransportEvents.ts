@@ -5,7 +5,13 @@
 
 import type { WsCompatibilityError } from "@vulcan/contracts";
 
-export type WsTransportState = "connecting" | "open" | "closed" | "incompatible" | "disposed";
+export type WsTransportState =
+  | "connecting"
+  | "open"
+  | "closed"
+  | "unauthenticated"
+  | "incompatible"
+  | "disposed";
 
 export const VULCAN_WS_TRANSPORT_STATE_EVENT = "vulcan:ws-transport-state";
 export const VULCAN_WS_COMPATIBILITY_ISSUE_EVENT = "vulcan:ws-compatibility-issue";

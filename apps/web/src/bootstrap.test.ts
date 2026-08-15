@@ -12,11 +12,15 @@ describe("renderer bootstrap ordering", () => {
   it("migrates desktop storage before loading modules that hydrate app stores", () => {
     expect(INDEX_SOURCE).toContain('<script type="module" src="/src/bootstrap.ts"></script>');
 
+    const pairingCaptureImportIndex = BOOTSTRAP_SOURCE.indexOf('import "./pairingHashCapture";');
     const migrationImportIndex = BOOTSTRAP_SOURCE.indexOf('import "./storageOriginMigration";');
     const signedOutBootstrapIndex = BOOTSTRAP_SOURCE.indexOf("bootstrapSignedOutScreen()");
     const pairingBootstrapIndex = BOOTSTRAP_SOURCE.indexOf("bootstrapPairingSession()");
     const appImportIndex = BOOTSTRAP_SOURCE.indexOf('import("./main")');
-    expect(migrationImportIndex).toBeGreaterThanOrEqual(0);
+    // The pairing fragment must be captured before any other module can normalize
+    // the URL and drop the one-time token — so its import comes first of all.
+    expect(pairingCaptureImportIndex).toBeGreaterThanOrEqual(0);
+    expect(migrationImportIndex).toBeGreaterThan(pairingCaptureImportIndex);
     expect(signedOutBootstrapIndex).toBeGreaterThan(migrationImportIndex);
     expect(pairingBootstrapIndex).toBeGreaterThan(migrationImportIndex);
     expect(pairingBootstrapIndex).toBeGreaterThan(signedOutBootstrapIndex);

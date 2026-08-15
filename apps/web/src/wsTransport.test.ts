@@ -991,6 +991,116 @@ describe("WsTransport", () => {
     await transport.dispose();
   });
 
+  it("reports an in-flight connect as unauthenticated once a probe confirms no session", () => {
+    const transport = new WsTransport("ws://localhost:3020", {
+      authProbe: async () => false,
+    });
+    const internals = transport as unknown as {
+      authRequired: boolean;
+      connectingState(): "connecting" | "unauthenticated";
+    };
+
+    internals.authRequired = false;
+    expect(internals.connectingState()).toBe("connecting");
+    internals.authRequired = true;
+    expect(internals.connectingState()).toBe("unauthenticated");
+
+    void transport.dispose();
+  });
+
+  it("flips a stalled connect to unauthenticated when the auth probe reports no session", async () => {
+    const transport = new WsTransport("ws://localhost:3020", {
+      authProbe: async () => false,
+    });
+    const internals = transport as unknown as {
+      setState(state: string): void;
+      refreshAuthRequirement(): Promise<void>;
+    };
+
+    internals.setState("closed");
+    await internals.refreshAuthRequirement();
+    expect(transport.getState()).toBe("unauthenticated");
+
+    await transport.dispose();
+  });
+
+  it("keeps an unreachable server as a reconnect case, not a re-pair case", async () => {
+    // A null probe is "unknown" — the server is merely unreachable, so the
+    // transport must stay in its reconnecting state and never claim the user is
+    // signed out.
+    const transport = new WsTransport("ws://localhost:3020", {
+      authProbe: async () => null,
+    });
+    const internals = transport as unknown as {
+      setState(state: string): void;
+      refreshAuthRequirement(): Promise<void>;
+    };
+
+    internals.setState("closed");
+    await internals.refreshAuthRequirement();
+    expect(transport.getState()).toBe("closed");
+
+    await transport.dispose();
+  });
+
+  it("keeps the sign-in surface sticky when a later probe is inconclusive", async () => {
+    // Regression: after a probe confirmed the browser is signed out, a single
+    // inconclusive probe during the reconnect storm reset authRequired to false
+    // and swapped the sign-in surface for the loading shell (which then hung
+    // forever, unauthenticated). Once classified signed out, the transport must
+    // stay unauthenticated until a session actually opens — an unknown probe
+    // must neither clear the classification nor reveal the loading shell.
+    let authAnswer: boolean | null = false;
+    const transport = new WsTransport("ws://localhost:3020", {
+      authProbe: async () => authAnswer,
+    });
+    const internals = transport as unknown as {
+      setState(state: string): void;
+      refreshAuthRequirement(): Promise<void>;
+      authRequired: boolean;
+    };
+
+    internals.setState("closed");
+    await internals.refreshAuthRequirement();
+    expect(transport.getState()).toBe("unauthenticated");
+    expect(internals.authRequired).toBe(true);
+
+    // A transient reconnect failure momentarily lands on "closed", and the next
+    // probe comes back unknown (server unreachable). The classification must
+    // hold and the sign-in surface must be re-asserted rather than reverted.
+    authAnswer = null;
+    internals.setState("closed");
+    await internals.refreshAuthRequirement();
+    expect(internals.authRequired).toBe(true);
+    expect(transport.getState()).toBe("unauthenticated");
+
+    await transport.dispose();
+  });
+
+  it("clears the auth requirement once a session opens", async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(jsonResponse(200, NEGOTIATION_RESULT)));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const transport = new WsTransport("ws://localhost:3020", {
+      authProbe: async () => false,
+    });
+    const internals = transport as unknown as {
+      createSession(): { clientPromise: Promise<unknown> };
+      probeFeatureConnection: (...args: unknown[]) => Promise<void>;
+      authRequired: boolean;
+    };
+    await waitForSockets(1);
+
+    internals.probeFeatureConnection = vi.fn(async () => undefined);
+    internals.authRequired = true;
+    await internals.createSession().clientPromise;
+
+    expect(internals.authRequired).toBe(false);
+    expect(transport.getState()).toBe("open");
+
+    await transport.dispose();
+  });
+
   it("detects a server identity change across a failed reconnect", () => {
     // The negotiated compatibility is cleared on every failed reconnect, so
     // the comparison must use the last identity actually reached — otherwise a

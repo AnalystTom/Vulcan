@@ -64,6 +64,7 @@ import {
   resetThreadDetailResumeCursors,
 } from "./threadDetailResumeCursors";
 import type { WsTransportState } from "./wsTransportEvents";
+import { probeAuthenticated } from "./lib/authClient";
 
 type PushListener<C extends WsPushChannel> = (message: WsPushMessage<C>) => void;
 
@@ -616,9 +617,16 @@ export class WsTransport {
   // reconnects still reset replayed push state even after the negotiation
   // cache was cleared by an intervening failure.
   private lastServerInstanceId: string | null = null;
+  // True once an auth probe confirms the server has no session for this
+  // browser. While set, "connecting" is reported as "unauthenticated" so the UI
+  // can offer a sign-in surface instead of spinning through a doomed reconnect
+  // loop (a browser WebSocket cannot read the 401 that closed the /ws upgrade).
+  private authRequired = false;
+  private readonly authProbe: () => Promise<boolean | null>;
 
-  constructor(url?: string) {
+  constructor(url?: string, options?: { authProbe?: () => Promise<boolean | null> }) {
     this.explicitUrl = url ?? null;
+    this.authProbe = options?.authProbe ?? (() => probeAuthenticated());
     this.clientPromise = this.createSession().clientPromise;
     void this.clientPromise.catch((error) => {
       if (this.disposed || isTerminalCompatibilityFailure(error)) return;
@@ -961,6 +969,7 @@ export class WsTransport {
         await this.probeFeatureConnection(client, featureRuntime);
       }
       if (!this.disposed && this.sessionVersion === sessionVersion) {
+        this.authRequired = false;
         this.adoptNegotiation(compatibility);
         this.setState("open");
       }
@@ -973,7 +982,12 @@ export class WsTransport {
           this.setCompatibilityIssue(compatibilityError);
           this.setState("incompatible");
         } else {
-          this.setState("closed");
+          // Once a probe has classified this browser as signed out, a later
+          // connect failure must keep surfacing the sign-in surface rather than
+          // flashing the loading shell for the reconnect window: the sign-in
+          // state is sticky until an authenticated session actually opens.
+          this.setState(this.authRequired ? "unauthenticated" : "closed");
+          void this.refreshAuthRequirement();
         }
       }
       throw error;
@@ -1039,7 +1053,7 @@ export class WsTransport {
     this.streamCleanups.clear();
     this.activeThreadStreamInputs.clear();
 
-    this.setState("connecting");
+    this.setState(this.connectingState());
 
     if (oldResources) void this.closeRuntime(oldResources);
 
@@ -1047,6 +1061,46 @@ export class WsTransport {
       this.reconnectPromise = null;
     });
     return this.reconnectPromise;
+  }
+
+  // "connecting" while an in-flight attempt has no reason to suspect auth, but
+  // "unauthenticated" once a probe has confirmed the server rejects this
+  // browser — so a reconnect that keeps retrying still surfaces the sign-in
+  // surface rather than an indefinite spinner.
+  private connectingState(): WsTransportState {
+    return this.authRequired ? "unauthenticated" : "connecting";
+  }
+
+  // Probes the HTTP auth endpoint (the WebSocket 401 is invisible to the
+  // browser) to decide whether the current stall is a sign-in problem. A `null`
+  // probe is "unknown" — the server is unreachable, which is a reconnect case,
+  // not a re-pair case — so it never flips the transport to unauthenticated.
+  //
+  // The classification is sticky: an unknown probe never *clears* a confirmed
+  // "signed out" verdict. Otherwise a single inconclusive probe during the
+  // reconnect storm would reset authRequired to false, drop the sign-in surface,
+  // and reveal the loading shell — the exact flip-flop this guards against. Only
+  // a probe that positively confirms a session (`true`) or an actually-opened
+  // authenticated socket resets it.
+  private async refreshAuthRequirement(): Promise<void> {
+    const authenticated = await this.authProbe().catch(() => null);
+    if (this.disposed) return;
+    if (authenticated === null) {
+      // Re-assert the sticky sign-in surface in case a transient failure state
+      // slipped in between the classification and this inconclusive probe.
+      if (this.authRequired && (this.state === "connecting" || this.state === "closed")) {
+        this.setState("unauthenticated");
+      }
+      return;
+    }
+    this.authRequired = authenticated === false;
+    if (
+      this.state === "connecting" ||
+      this.state === "closed" ||
+      this.state === "unauthenticated"
+    ) {
+      this.setState(this.authRequired ? "unauthenticated" : "closed");
+    }
   }
 
   private setState(state: WsTransportState): void {
@@ -1179,7 +1233,7 @@ export class WsTransport {
   private async openReconnectSession(): Promise<RpcClientInstance> {
     for (;;) {
       if (this.disposed) throw new Error("Transport disposed");
-      this.setState("connecting");
+      this.setState(this.connectingState());
       const delayMs = getReconnectRetryDelayMs(this.reconnectFailures);
       this.reconnectFailures += 1;
       await delayWithAbort(delayMs, this.lifetime.signal);

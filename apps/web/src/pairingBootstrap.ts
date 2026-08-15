@@ -1,12 +1,14 @@
 // FILE: pairingBootstrap.ts
 // Purpose: Exchanges one-time remote pairing links before the application opens a WebSocket.
 
+import { exchangePairingCredential, extractPairingCredential } from "./lib/authClient";
+import { capturedPairingHash } from "./pairingHashCapture";
+
 const PAIRING_PATH = "/pair";
 
 interface PairingLocation {
   readonly pathname: string;
   readonly search: string;
-  readonly hash: string;
   replace(url: string): void;
 }
 
@@ -19,6 +21,10 @@ interface PairingBootstrapDependencies {
   readonly history: PairingHistory;
   readonly fetch: typeof globalThis.fetch;
   readonly renderFailure: () => void;
+  // The pairing fragment as captured at document load, NOT read live from
+  // location.hash. The token lives only in the fragment and must be parsed from
+  // the value snapshotted before any boot module could normalize the URL.
+  readonly capturedHash: string;
 }
 
 export type PairingBootstrapResult = "not-pairing" | "redirecting" | "failed";
@@ -45,13 +51,14 @@ export async function bootstrapPairingSession(
     history: window.history,
     fetch: globalThis.fetch,
     renderFailure: renderPairingFailure,
+    capturedHash: capturedPairingHash,
   },
 ): Promise<PairingBootstrapResult> {
   if (dependencies.location.pathname !== PAIRING_PATH) {
     return "not-pairing";
   }
 
-  const credential = new URLSearchParams(dependencies.location.hash.slice(1)).get("token");
+  const credential = extractPairingCredential(dependencies.capturedHash);
   dependencies.history.replaceState(
     null,
     "",
@@ -63,18 +70,8 @@ export async function bootstrapPairingSession(
     return "failed";
   }
 
-  try {
-    const response = await dependencies.fetch("/api/auth/bootstrap", {
-      method: "POST",
-      credentials: "same-origin",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ credential }),
-    });
-    if (!response.ok) {
-      dependencies.renderFailure();
-      return "failed";
-    }
-  } catch {
+  const exchange = await exchangePairingCredential(credential, dependencies.fetch);
+  if (!exchange.ok) {
     dependencies.renderFailure();
     return "failed";
   }

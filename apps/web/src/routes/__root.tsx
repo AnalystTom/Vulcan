@@ -20,6 +20,7 @@ import {
   useRouterState,
 } from "@tanstack/react-router";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { FormEvent } from "react";
 import { QueryClient, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Throttler } from "@tanstack/react-pacer";
 
@@ -73,6 +74,8 @@ import {
   addWsTransportStateListener,
   readLatestWsCompatibilityIssue,
 } from "../wsTransportEvents";
+import type { WsTransportState } from "../wsTransportEvents";
+import { exchangePairingCredential, extractPairingCredential } from "../lib/authClient";
 import { providerQueryKeys } from "../lib/providerReactQuery";
 import { invalidateProjectFileQueriesForCwds, projectQueryKeys } from "../lib/projectReactQuery";
 import { collectActiveTerminalThreadIds } from "../lib/terminalStateCleanup";
@@ -210,6 +213,8 @@ function RootRouteView() {
       }),
     [],
   );
+  const [transportState, setTransportState] = useState<WsTransportState | null>(null);
+  useEffect(() => addWsTransportStateListener(setTransportState, { replayCurrent: true }), []);
 
   // Single mount point for the Windows caption buttons. The cluster is pinned to the
   // window's top-right corner (frameless Windows shell) and renders nothing on macOS,
@@ -232,6 +237,15 @@ function RootRouteView() {
     return (
       <>
         <TransportCompatibilityView issue={compatibilityIssue} />
+        {desktopWindowControls}
+      </>
+    );
+  }
+
+  if (transportState === "unauthenticated") {
+    return (
+      <>
+        <SignInView />
         {desktopWindowControls}
       </>
     );
@@ -311,6 +325,84 @@ function TransportCompatibilityView({ issue }: { issue: WsCompatibilityError }) 
             Reload app
           </Button>
         </div>
+      </section>
+    </div>
+  );
+}
+
+function SignInView() {
+  const [token, setToken] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
+
+  const handleSubmit = useCallback(
+    async (event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+      if (pending) return;
+      const credential = extractPairingCredential(token);
+      if (!credential) {
+        setError("Paste the pairing link or token from the Vulcan server console.");
+        return;
+      }
+      setPending(true);
+      setError(null);
+      const result = await exchangePairingCredential(credential);
+      if (result.ok) {
+        window.location.reload();
+        return;
+      }
+      setPending(false);
+      setError(result.reason);
+    },
+    [pending, token],
+  );
+
+  return (
+    <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-background px-4 py-10 text-foreground sm:px-6">
+      <div className="pointer-events-none absolute inset-0 opacity-80">
+        <div className="absolute inset-x-0 top-0 h-44 bg-[radial-gradient(44rem_16rem_at_top,color-mix(in_srgb,var(--color-amber-500)_16%,transparent),transparent)]" />
+        <div className="absolute inset-0 bg-[linear-gradient(145deg,color-mix(in_srgb,var(--background)_90%,var(--color-black))_0%,var(--background)_55%)]" />
+      </div>
+      <section className="relative w-full max-w-xl rounded-2xl border border-border/80 bg-card/90 p-6 shadow-2xl shadow-black/20 backdrop-blur-md sm:p-8">
+        <p className="text-[11px] font-semibold text-muted-foreground">{APP_DISPLAY_NAME}</p>
+        <h1 className="mt-3 text-2xl font-semibold sm:text-3xl">Pair this device.</h1>
+        <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
+          This browser isn&apos;t signed in to the {APP_DISPLAY_NAME} server. Generate a pairing
+          link on the server (it prints a <code>/pair#token=…</code> link on startup) and paste it —
+          or just the token — below.
+        </p>
+        <form className="mt-5" onSubmit={handleSubmit}>
+          <label htmlFor="pairing-token" className="sr-only">
+            Pairing link or token
+          </label>
+          <input
+            id="pairing-token"
+            type="text"
+            autoComplete="off"
+            autoCapitalize="off"
+            autoCorrect="off"
+            spellCheck={false}
+            value={token}
+            onChange={(event) => setToken(event.target.value)}
+            placeholder="Paste pairing link or token"
+            className="w-full rounded-lg border border-border/80 bg-background/60 px-3 py-2 text-sm text-foreground outline-none placeholder:text-muted-foreground/70 focus:border-amber-500/60"
+          />
+          {error ? (
+            <p role="alert" className="mt-2 text-sm text-red-400">
+              {error}
+            </p>
+          ) : null}
+          <div className="mt-5">
+            <Button
+              type="submit"
+              size="sm"
+              disabled={pending}
+              className={dialogActionButtonClassName}
+            >
+              {pending ? "Connecting…" : "Connect"}
+            </Button>
+          </div>
+        </form>
       </section>
     </div>
   );
