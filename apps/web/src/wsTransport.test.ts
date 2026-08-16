@@ -1101,6 +1101,33 @@ describe("WsTransport", () => {
     await transport.dispose();
   });
 
+  it("never shows the sign-in surface for a token-authenticated (desktop) socket", async () => {
+    // Regression: the desktop shell connects with ws://127.0.0.1:<port>/?token=…
+    // and the server authenticates the upgrade from that token, so there is no
+    // cookie session. The cookie-only probe of /api/auth/session therefore always
+    // returns authenticated:false, which used to flip the transport to
+    // "unauthenticated" ("Pair this device") while the token socket opened fine
+    // ("open") — the two votes fought and the UI oscillated. A token on the socket
+    // URL means the probe classification must be skipped entirely.
+    const transport = new WsTransport("ws://localhost:3020/?token=desktop-secret", {
+      authProbe: async () => false,
+    });
+    const internals = transport as unknown as {
+      setState(state: string): void;
+      refreshAuthRequirement(): Promise<void>;
+      authRequired: boolean;
+    };
+
+    // Even a definitive signed-out probe must not raise the pairing surface here.
+    internals.setState("closed");
+    await internals.refreshAuthRequirement();
+    expect(internals.authRequired).toBe(false);
+    expect(transport.getState()).not.toBe("unauthenticated");
+    expect(transport.getState()).toBe("closed");
+
+    await transport.dispose();
+  });
+
   it("detects a server identity change across a failed reconnect", () => {
     // The negotiated compatibility is cleared on every failed reconnect, so
     // the comparison must use the last identity actually reached — otherwise a

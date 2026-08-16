@@ -215,6 +215,26 @@ function makeSocketUrl(explicitUrl: string | null, path: string): string {
   return resolveRpcUrl(rawSocketUrl(explicitUrl), path);
 }
 
+/** The query param the desktop shell and server use to carry the WS credential. */
+const WS_AUTH_TOKEN_QUERY = "token";
+
+/**
+ * Whether this transport authenticates by a token on the socket URL rather than a
+ * cookie. The desktop shell connects with `ws://127.0.0.1:<port>/?token=…` and the
+ * server authenticates the upgrade from it, so there is no cookie session and the
+ * pairing/sign-in surface does not apply. A cookie-only probe of `/api/auth/session`
+ * would always report "signed out" on desktop and fight the token-authenticated
+ * socket — the pairing screen and the app window flip-flopping. When a token is
+ * present the probe-driven classification is skipped entirely.
+ */
+function socketUrlCarriesToken(explicitUrl: string | null): boolean {
+  try {
+    return new URL(rawSocketUrl(explicitUrl)).searchParams.has(WS_AUTH_TOKEN_QUERY);
+  } catch {
+    return false;
+  }
+}
+
 export function makeFeatureSocketUrl(
   explicitUrl: string | null,
   compatibility: WsBootstrapNegotiateResult,
@@ -623,9 +643,14 @@ export class WsTransport {
   // loop (a browser WebSocket cannot read the 401 that closed the /ws upgrade).
   private authRequired = false;
   private readonly authProbe: () => Promise<boolean | null>;
+  // True when the socket URL carries a `?token=` credential (desktop shell,
+  // explicit dev URL). Such transports are token-authenticated, so the cookie
+  // sign-in surface never applies and the probe classification is disabled.
+  private readonly tokenAuth: boolean;
 
   constructor(url?: string, options?: { authProbe?: () => Promise<boolean | null> }) {
     this.explicitUrl = url ?? null;
+    this.tokenAuth = socketUrlCarriesToken(this.explicitUrl);
     this.authProbe = options?.authProbe ?? (() => probeAuthenticated());
     this.clientPromise = this.createSession().clientPromise;
     void this.clientPromise.catch((error) => {
@@ -987,7 +1012,7 @@ export class WsTransport {
           // flashing the loading shell for the reconnect window: the sign-in
           // state is sticky until an authenticated session actually opens.
           this.setState(this.authRequired ? "unauthenticated" : "closed");
-          void this.refreshAuthRequirement();
+          if (!this.tokenAuth) void this.refreshAuthRequirement();
         }
       }
       throw error;
@@ -1083,6 +1108,10 @@ export class WsTransport {
   // a probe that positively confirms a session (`true`) or an actually-opened
   // authenticated socket resets it.
   private async refreshAuthRequirement(): Promise<void> {
+    // A token-authenticated transport (desktop shell) has no cookie session; the
+    // probe would always read "signed out" and drive the pairing-screen/app
+    // flip-flop. The sign-in surface is exclusively for the token-less browser.
+    if (this.tokenAuth) return;
     const authenticated = await this.authProbe().catch(() => null);
     if (this.disposed) return;
     if (authenticated === null) {
