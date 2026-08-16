@@ -212,6 +212,23 @@ describe("ProviderModelPicker", () => {
     }
   });
 
+  it("shows external harnesses without presenting them as executable providers", async () => {
+    const mounted = await mountPicker({
+      provider: "claudeAgent",
+      model: "claude-opus-4-6",
+      lockedProvider: null,
+    });
+
+    await page.getByRole("button", { name: /claude opus/i }).click();
+
+    await expect.element(page.getByText("Exo", { exact: true })).toBeVisible();
+    await expect.element(page.getByText("Prime Agent", { exact: true })).toBeVisible();
+    await expect.element(page.getByLabel("Exo: Adapter required")).toBeDisabled();
+    await expect.element(page.getByLabel("Prime Agent: Adapter required")).toBeDisabled();
+
+    await mounted.cleanup();
+  });
+
   it("shows models directly when the provider is locked mid-thread", async () => {
     const mounted = await mountPicker({
       provider: "claudeAgent",
