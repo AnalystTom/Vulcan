@@ -2,6 +2,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { useState } from "react";
 
 import { BotAvatar } from "~/components/bots/BotAvatar";
+import { BotWorkGraph } from "~/components/bots/BotWorkGraph";
 import { NewBotDialog } from "~/components/bots/NewBotDialog";
 import { Button } from "~/components/ui/button";
 import { useBots } from "~/hooks/useBots";
@@ -49,29 +50,32 @@ function BotsIndexRoute() {
             </span>
           </button>
         ) : (
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {bots.data.bots.map((bot) => {
-              const taskCount = bots.data.tasks.filter(
-                (task) => task.botId === bot.id && task.archivedAt === null,
-              ).length;
-              return (
-                <Link
-                  key={bot.id}
-                  to="/bots/$botId"
-                  params={{ botId: bot.id }}
-                  className="group rounded-2xl border border-border p-4 transition-colors hover:bg-muted/40"
-                >
-                  <BotAvatar avatar={bot.avatar} name={bot.name} />
-                  <h2 className="mt-4 truncate font-heading text-base font-semibold">{bot.name}</h2>
-                  <p className="mt-0.5 truncate text-xs text-muted-foreground">
-                    {bot.title || "No role set"}
-                  </p>
-                  <p className="mt-4 text-xs text-muted-foreground">
-                    {taskCount} {taskCount === 1 ? "task" : "tasks"}
-                  </p>
-                </Link>
-              );
-            })}
+          <div className="space-y-7">
+            <BotWorkGraph data={bots.data} />
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {bots.data.bots.map((bot) => {
+                const taskCount = bots.data.tasks.filter(
+                  (task) => task.botId === bot.id && task.archivedAt === null,
+                ).length;
+                return (
+                  <Link
+                    key={bot.id}
+                    to="/bots/$botId"
+                    params={{ botId: bot.id }}
+                    className="group rounded-2xl border border-border p-4 transition-colors hover:bg-muted/40"
+                  >
+                    <BotAvatar avatar={bot.avatar} name={bot.name} />
+                    <h2 className="mt-4 truncate font-heading text-base font-semibold">{bot.name}</h2>
+                    <p className="mt-0.5 truncate text-xs text-muted-foreground">
+                      {bot.title || "No role set"}
+                    </p>
+                    <p className="mt-4 text-xs text-muted-foreground">
+                      {taskCount} {taskCount === 1 ? "task" : "tasks"}
+                    </p>
+                  </Link>
+                );
+              })}
+            </div>
           </div>
         )}
       </div>
