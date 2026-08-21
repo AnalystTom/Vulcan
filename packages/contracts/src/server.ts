@@ -94,6 +94,8 @@ const ServerProviderStatuses = Schema.Array(ServerProviderStatus);
 
 export const ServerConfig = Schema.Struct({
   cwd: TrimmedNonEmptyString,
+  /** HTTPS origin clients should use when pairing another browser to this server. */
+  remoteAccessUrl: Schema.optional(TrimmedNonEmptyString),
   homeDir: Schema.optional(TrimmedNonEmptyString),
   chatWorkspaceRoot: Schema.optional(TrimmedNonEmptyString),
   studioWorkspaceRoot: Schema.optional(TrimmedNonEmptyString),

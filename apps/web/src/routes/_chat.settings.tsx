@@ -7,6 +7,7 @@ import { PROVIDER_DISPLAY_NAMES, type ProviderKind } from "@vulcan/contracts";
 import { PROVIDER_DESCRIPTORS } from "@vulcan/shared/providerMetadata";
 import { sameAppSnapShortcut } from "@vulcan/shared/appSnapShortcut";
 import { createFileRoute, useSearch } from "@tanstack/react-router";
+import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 
 import {
@@ -27,6 +28,7 @@ import {
 } from "../appSettings";
 import { APP_VERSION } from "../branding";
 import { AdvancedSettingsPanel } from "~/components/settings/AdvancedSettingsPanel";
+import { RemoteAccessSettingsPanel } from "~/components/settings/RemoteAccessSettingsPanel";
 import { AppIconPicker } from "~/components/settings/AppIconPicker";
 import {
   ArchivedSettingsPanel,
@@ -85,6 +87,10 @@ import { SidebarHeaderNavigationControls } from "../components/SidebarHeaderNavi
 import { useDesktopTopBarTrafficLightGutterClassName } from "../hooks/useDesktopTopBarGutter";
 import { useTheme } from "../hooks/useTheme";
 import { isUiDensity } from "../lib/appDensity";
+import {
+  serverAuthSessionQueryOptions,
+  serverConfigQueryOptions,
+} from "../lib/serverReactQuery";
 import { isElectron } from "../env";
 import { RotateCcwIcon } from "../lib/icons";
 import { cn, isMacPlatform } from "../lib/utils";
@@ -178,6 +184,8 @@ function SettingsRouteView() {
     setSystemUiFont,
   } = useTheme();
   const { settings, defaults, updateSettings, resetSettings } = useAppSettings();
+  const serverConfigQuery = useQuery(serverConfigQueryOptions());
+  const authSessionQuery = useQuery(serverAuthSessionQueryOptions());
   const desktopTopBarTrafficLightGutterClassName = useDesktopTopBarTrafficLightGutterClassName();
   const [releaseHistoryOpen, setReleaseHistoryOpen] = useState(false);
   const [resetEpoch, setResetEpoch] = useState(0);
@@ -1126,6 +1134,11 @@ function SettingsRouteView() {
                   resetEpoch={resetEpoch}
                 />
                 <ExternalMcpSettingsPanel active={activeSection === "integrations"} />
+                <RemoteAccessSettingsPanel
+                  active={activeSection === "remote-access"}
+                  authSession={authSessionQuery.data}
+                  config={serverConfigQuery.data}
+                />
                 <AdvancedSettingsPanel
                   active={activeSection === "advanced"}
                   onOpenReleaseHistory={() => setReleaseHistoryOpen(true)}

@@ -18,6 +18,7 @@ export const SETTINGS_SECTION_IDS = [
   "skills",
   "usage",
   "integrations",
+  "remote-access",
   "advanced",
 ] as const;
 
@@ -159,6 +160,14 @@ export const SETTINGS_NAV_ITEMS: readonly SettingsNavItem[] = [
     description: "Review and clean up isolated workspaces created by Vulcan.",
     icon: "branch-simple",
     eyebrow: "Workspace management",
+  },
+  {
+    id: "remote-access",
+    group: "system",
+    label: "Remote access",
+    description: "Pair your phone and manage the devices connected to this Vulcan owner.",
+    icon: "devices",
+    eyebrow: "Paired devices",
   },
   {
     id: "advanced",

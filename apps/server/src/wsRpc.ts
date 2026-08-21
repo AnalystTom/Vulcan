@@ -668,6 +668,7 @@ const makeWsRpcHandlersLayer = () =>
         const providerStatuses = yield* providerHealth.getStatuses;
         return {
           cwd: config.cwd,
+          ...(config.publicUrl ? { remoteAccessUrl: config.publicUrl.origin } : {}),
           homeDir: config.homeDir,
           chatWorkspaceRoot: config.chatWorkspaceRoot,
           studioWorkspaceRoot: config.studioWorkspaceRoot,

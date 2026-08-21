@@ -136,6 +136,21 @@ export const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
     keywords: "Show the per-thread notepad in the Environment panel.",
   },
 
+  // ── Remote access ────────────────────────────────────────────────────────────
+  {
+    id: "remote-access:pair-device",
+    section: "remote-access",
+    title: "Pair another device",
+    keywords: "mobile phone tablet child client pairing link remote access tailscale",
+  },
+  {
+    id: "remote-access:connected-devices",
+    section: "remote-access",
+    title: "Connected devices",
+    keywords: "owner client child session mobile phone revoke sign out",
+    target: null,
+  },
+
   // ── Appearance ───────────────────────────────────────────────────────────────
   {
     id: "appearance:theme",
