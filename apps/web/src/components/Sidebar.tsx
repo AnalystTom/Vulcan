@@ -16,6 +16,7 @@ import {
   KanbanIcon,
   KeyboardIcon,
   BellIcon,
+  BotIcon,
   type LucideIcon,
   NewThreadIcon,
   PencilIcon,
@@ -218,6 +219,8 @@ import { useHandleNewStudioChat } from "../hooks/useHandleNewStudioChat";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { useProviderStatusesForLocalConfig } from "../hooks/useProviderStatusesForLocalConfig";
 import { useThreadHandoff } from "../hooks/useThreadHandoff";
+import { useBots } from "../hooks/useBots";
+import { BotAvatar } from "./bots/BotAvatar";
 import { useFeedbackDialogStore } from "../feedbackDialogStore";
 import { openExternalLink } from "~/lib/linkChips";
 import { selectThreadTerminalState, useTerminalStateStore } from "../terminalStateStore";
@@ -312,6 +315,7 @@ import {
   resolveSettingsBackTarget,
   type SettingsBackTarget,
   resolveSidebarNewThreadEnvMode,
+  resolveSidebarSurface,
   resolveThreadHoverCardMetadata,
   resolveThreadProjectLabel,
   resolveThreadRowClassName,
@@ -321,6 +325,7 @@ import {
   type ThreadStatusPill,
   type SidebarDerivedProjectData,
   type SidebarActionBadge,
+  type SidebarSurface,
   type SidebarView,
   shouldShowDebugFeatureFlagsMenu,
   shouldPrunePinnedThreads,
@@ -457,6 +462,7 @@ const GITHUB_CANCEL_RECOVERY_MAX_ATTEMPTS = 40;
 const GITHUB_CANCEL_RECOVERY_DELAY_MS = 250;
 const SIDEBAR_VIEW_LABELS: Record<SidebarView, string> = {
   threads: "Projects",
+  bots: "Bots",
   studio: "Studio",
 };
 /** Snap the optimistic segment selection back if the navigation never lands. */
@@ -1221,6 +1227,7 @@ function SidebarActivityBellButton({
 
 const SIDEBAR_SURFACE_PICKER_COPY: Record<SidebarView, { title: string; description: string }> = {
   threads: { title: "Vulcan", description: "Build, debug, and ship" },
+  bots: { title: "Bots", description: "Your standing team of agents" },
   studio: { title: "Studio", description: "Open-ended agent work" },
 };
 
@@ -1352,10 +1359,7 @@ export default function Sidebar() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const pathname = useLocation({ select: (loc) => loc.pathname });
-  const isOnSettings = useLocation({
-    select: (loc) => loc.pathname === "/settings",
-  });
-  const isOnStudioRoute = pathname.startsWith("/studio");
+  const routeSurface = resolveSidebarSurface(pathname);
   const isOnKanban = pathname.startsWith("/kanban");
   const isOnAutomations = pathname.startsWith("/automations");
   const isOnPullRequests = pathname.startsWith("/pull-requests");
@@ -1410,6 +1414,7 @@ export default function Sidebar() {
   // Projects is always available; Studio and the standalone Chats footer can be hidden
   // independently from Settings.
   const chatsSectionVisible = appSettings.showChatsSection;
+  const botsSectionVisible = appSettings.showBotsSection;
   const studioSectionVisible = appSettings.showStudioSection;
   const { handleNewThread } = useHandleNewThread();
   const { handleNewChat } = useHandleNewChat();
@@ -1816,16 +1821,23 @@ export default function Sidebar() {
   const activeRouteProject = activeRouteProjectId
     ? (projectById.get(activeRouteProjectId) ?? null)
     : null;
+  // An active Studio thread pulls the sidebar onto the Studio surface even from a thread route.
   // Same predicate the Studio collectors use — trusting `kind` alone here would let a drifted
   // studio-kind row (root outside the configured Studio root) activate the Studio segment while
   // every Studio list excludes it, stranding the active thread in neither segment.
-  const isOnStudio =
-    isOnStudioRoute ||
+  const surface: SidebarSurface =
+    routeSurface === "threads" &&
     isStudioContainerProject(activeRouteProject, {
       homeDir,
       chatWorkspaceRoot,
       studioWorkspaceRoot,
-    });
+    })
+      ? "studio"
+      : routeSurface;
+  const isOnStudio = surface === "studio";
+  const isOnBots = surface === "bots";
+  const isOnSettings = surface === "settings";
+  const botRoster = useBots();
   const ordinarySpaceProjects = useMemo(
     () =>
       projects.filter((project) =>
@@ -1861,10 +1873,10 @@ export default function Sidebar() {
   const pinnedThreads = useMemo(
     () =>
       getPinnedThreadsForSidebar(
-        isOnStudio ? studioSidebarTreeThreads : activeSpaceNonStudioSidebarTreeThreads,
+        surface === "studio" ? studioSidebarTreeThreads : activeSpaceNonStudioSidebarTreeThreads,
         pinnedThreadIds,
       ),
-    [activeSpaceNonStudioSidebarTreeThreads, isOnStudio, pinnedThreadIds, studioSidebarTreeThreads],
+    [activeSpaceNonStudioSidebarTreeThreads, pinnedThreadIds, studioSidebarTreeThreads, surface],
   );
   const openPrLink = useCallback((event: MouseEvent<HTMLElement>, prUrl: string) => {
     event.preventDefault();
@@ -2354,11 +2366,11 @@ export default function Sidebar() {
   // *same* segment's latest thread instead of the globally most-recent thread.
   const lastActiveSidebarSegmentRef = useRef<"studio" | "threads">("threads");
   useEffect(() => {
-    if (isOnSettings) {
+    if (surface === "settings") {
       return;
     }
-    lastActiveSidebarSegmentRef.current = isOnStudio ? "studio" : "threads";
-  }, [isOnSettings, isOnStudio]);
+    lastActiveSidebarSegmentRef.current = surface === "studio" ? "studio" : "threads";
+  }, [surface]);
 
   // Shared Studio fallback: reopen/create via handleNewStudioChat and, on failure, land on
   // /studio — its splash already displays the error with a retry. Swallowing the result here
@@ -2396,6 +2408,10 @@ export default function Sidebar() {
 
   const handleSidebarViewChange = useCallback(
     (view: SidebarView) => {
+      if (view === "bots") {
+        void navigate({ to: "/bots" });
+        return;
+      }
       if (view === "studio") {
         // Remembered route first — it already treats the stored Studio draft as a valid target
         // (resolveBackToStudioTarget includes studioDraftThreadIds), so switching back to Studio
@@ -2416,6 +2432,7 @@ export default function Sidebar() {
     },
     [
       handleNewChat,
+      navigate,
       navigateToBackTarget,
       openStudioChatFallback,
       resolveBackToStudioTarget,
@@ -2427,14 +2444,17 @@ export default function Sidebar() {
   // (e.g. via a bookmark/deep link) jumps back to the always-visible Threads tab.
   // Settings is its own route and is never redirected.
   useEffect(() => {
-    if (isOnSettings) {
+    if (surface === "settings") {
       return;
     }
-    if (isOnStudio && !studioSectionVisible) {
+    if (surface === "studio" && !studioSectionVisible) {
       handleSidebarViewChange("threads");
       return;
     }
-  }, [handleSidebarViewChange, isOnSettings, isOnStudio, studioSectionVisible]);
+    if (surface === "bots" && !botsSectionVisible) {
+      handleSidebarViewChange("threads");
+    }
+  }, [botsSectionVisible, handleSidebarViewChange, studioSectionVisible, surface]);
 
   useEffect(() => {
     // Same hydration gate as the Studio prewarm below: persisted paths make homeDir truthy
@@ -2835,6 +2855,7 @@ export default function Sidebar() {
   // in after a subscribe round-trip once the route has already swapped.
   const prewarmSidebarViewTarget = useCallback(
     (view: SidebarView) => {
+      if (view === "bots") return;
       if (view !== "studio" && view !== "threads") {
         return;
       }
@@ -3690,7 +3711,7 @@ export default function Sidebar() {
   // Pinned threads are hidden here the same way `deriveSidebarProjectData` hides them from
   // per-project lists, so a pinned Studio chat only ever renders once, inside the Pinned block.
   const studioChatThreadRows = useMemo(() => {
-    if (!isOnStudio) {
+    if (surface !== "studio") {
       return [];
     }
     return buildProjectThreadTree({
@@ -3708,10 +3729,10 @@ export default function Sidebar() {
   }, [
     activeSidebarThreadId,
     appSettings.sidebarThreadSortOrder,
-    isOnStudio,
     pinnedThreadIds,
     sortedSidebarThreadsByProjectId,
     studioProjects,
+    surface,
   ]);
   const studioChatThreadIds = useMemo(
     () => studioChatThreadRows.map((row) => row.thread.id),
@@ -3840,9 +3861,9 @@ export default function Sidebar() {
   >(() => {
     // Off-Studio this map is unused (surfaceProjectSidebarDataById picks the
     // standard one), so skip the derivation instead of recomputing it on every
-    // Projects-side store change. Mirrors the isOnStudio gate on
+    // Projects-side store change. Mirrors the surface gate on
     // studioChatThreadRows.
-    if (!isOnStudio) {
+    if (surface !== "studio") {
       return EMPTY_PROJECT_SIDEBAR_DATA;
     }
     return deriveSidebarProjectData({
@@ -3858,17 +3879,16 @@ export default function Sidebar() {
     });
   }, [
     activeSidebarThreadId,
-    isOnStudio,
+    surface,
     threadListExtraPagesByProjectCwd,
     pinnedThreadIds,
     sortedSidebarThreadsByProjectId,
     studioProjects,
     resolveThreadStatusForSidebar,
   ]);
-  const surfaceProjects = isOnStudio ? studioProjects : standardProjects;
-  const surfaceProjectSidebarDataById = isOnStudio
-    ? studioProjectSidebarDataById
-    : standardProjectSidebarDataById;
+  const surfaceProjects = surface === "studio" ? studioProjects : standardProjects;
+  const surfaceProjectSidebarDataById =
+    surface === "studio" ? studioProjectSidebarDataById : standardProjectSidebarDataById;
   const allProjectsExpanded = useMemo(
     () => standardProjects.length > 0 && standardProjects.every((project) => project.expanded),
     [standardProjects],
@@ -3930,7 +3950,7 @@ export default function Sidebar() {
   ]);
 
   useEffect(() => {
-    if (isOnSettings || routeThreadId === null) {
+    if (surface === "settings" || routeThreadId === null) {
       return;
     }
 
@@ -3950,7 +3970,7 @@ export default function Sidebar() {
       });
     }, 0);
     return () => window.clearTimeout(settle);
-  }, [isOnSettings, routeSearch.splitViewId, routeThreadId]);
+  }, [surface, routeSearch.splitViewId, routeThreadId]);
 
   const handleThreadClick = useCallback(
     (event: MouseEvent, threadId: ThreadId, orderedProjectThreadIds: readonly ThreadId[]) => {
@@ -5091,7 +5111,7 @@ export default function Sidebar() {
         return;
       }
       if (command === "space.previous" || command === "space.next") {
-        if (!isProjectsSidebarSurface({ isOnSettings, isOnStudio })) return;
+        if (!isProjectsSidebarSurface(surface)) return;
         event.preventDefault();
         event.stopPropagation();
         const orderedSpaceIds: ReadonlyArray<SpaceId | null> = [
@@ -5106,7 +5126,7 @@ export default function Sidebar() {
       }
       const spaceJumpIndex = spaceJumpIndexFromCommand(command ?? "");
       if (spaceJumpIndex !== null) {
-        if (!isProjectsSidebarSurface({ isOnSettings, isOnStudio })) return;
+        if (!isProjectsSidebarSurface(surface)) return;
         // Index 0 is Void, then spaces in strip order — the chord addresses what you see.
         const orderedSpaceIds: ReadonlyArray<SpaceId | null> = [
           null,
@@ -5781,8 +5801,12 @@ export default function Sidebar() {
           <>
             <div className="flex items-center gap-1 pt-0 pb-1 pr-2.5 pl-1.5">
               <SidebarSurfacePicker
-                views={["threads", ...(studioSectionVisible ? (["studio"] as const) : [])]}
-                activeView={isOnStudio ? "studio" : "threads"}
+                views={[
+                  "threads",
+                  ...(botsSectionVisible ? (["bots"] as const) : []),
+                  ...(studioSectionVisible ? (["studio"] as const) : []),
+                ]}
+                activeView={isOnBots ? "bots" : isOnStudio ? "studio" : "threads"}
                 onSelectView={handleSidebarViewChange}
                 onPrewarmView={prewarmSidebarViewTarget}
               />
@@ -5798,7 +5822,7 @@ export default function Sidebar() {
                     setSearchPaletteOpen(true);
                   }}
                 />
-                {!isOnStudio ? (
+                {!isOnStudio && !isOnBots ? (
                   <SidebarActivityBellButton
                     active={activityViewEnabled}
                     showUnreadDot={hasUnreadActivity}
@@ -5811,13 +5835,27 @@ export default function Sidebar() {
             {/* The keyed content remounts with a short enter animation while the picker
                 stays mounted so its thumb can glide between Projects and Studio. */}
             <div
-              key={isOnStudio ? "studio" : activityViewEnabled ? "activity" : "threads"}
+              key={
+                isOnBots
+                  ? "bots"
+                  : isOnStudio
+                    ? "studio"
+                    : activityViewEnabled
+                      ? "activity"
+                      : "threads"
+              }
               className="sidebar-surface-enter"
             >
               {/* Primary sidebar actions stay limited to features we currently ship. */}
               <SidebarGroup className="px-1.5 pt-1 pb-1.5">
                 <SidebarMenu className="gap-0.5">
-                  {isOnStudio ? (
+                  {isOnBots ? (
+                    <SidebarPrimaryAction
+                      icon={BotIcon}
+                      label="New agent"
+                      onClick={() => void navigate({ to: "/bots" })}
+                    />
+                  ) : isOnStudio ? (
                     <>
                       <SidebarPrimaryAction
                         icon={NewThreadIcon}
@@ -5870,7 +5908,39 @@ export default function Sidebar() {
                 </SidebarMenu>
               </SidebarGroup>
 
-              {isOnStudio ? (
+              {isOnBots ? (
+                <SidebarGroup className="px-1.5 py-1.5">
+                  {renderListSectionHeader("Agents", null)}
+                  <SidebarMenu className="gap-1">
+                    {botRoster.isLoading ? (
+                      <div className="px-2 pt-4 text-center text-xs text-muted-foreground">
+                        Loading agents…
+                      </div>
+                    ) : botRoster.data.bots.length === 0 ? (
+                      <div className="px-2 pt-4 text-center text-xs text-muted-foreground">
+                        No agents yet
+                      </div>
+                    ) : (
+                      botRoster.data.bots.map((bot) => (
+                        <SidebarMenuButton
+                          key={bot.id}
+                          isActive={pathname === `/bots/${bot.id}`}
+                          onClick={() =>
+                            void navigate({ to: "/bots/$botId", params: { botId: bot.id } })
+                          }
+                        >
+                          <BotAvatar
+                            avatar={bot.avatar}
+                            name={bot.name}
+                            className="size-6 text-[10px]"
+                          />
+                          <span className="min-w-0 flex-1 truncate">{bot.name}</span>
+                        </SidebarMenuButton>
+                      ))
+                    )}
+                  </SidebarMenu>
+                </SidebarGroup>
+              ) : isOnStudio ? (
                 // Studio is "just chats": a labeled Studio block holding a flat list of threads
                 // rooted at the Studio workspace (no project-folder chrome).
                 <SidebarGroup className="px-1.5 py-1.5">
@@ -6097,7 +6167,11 @@ export default function Sidebar() {
             </div>
           </>
         )}
-        {!isOnSettings && !isOnStudio && !activityViewEnabled && chatsSectionVisible ? (
+        {!isOnSettings &&
+        !isOnStudio &&
+        !isOnBots &&
+        !activityViewEnabled &&
+        chatsSectionVisible ? (
           // sidebar-surface-enter: mounts on the Studio -> Projects switch, so it
           // animates in step with the keyed surface wrapper above.
           <SidebarGroup className="sidebar-surface-enter px-1.5 pt-1 pb-2">

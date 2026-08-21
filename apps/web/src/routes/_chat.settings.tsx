@@ -220,6 +220,7 @@ function SettingsRouteView() {
       ? ["Thread sort order"]
       : []),
     ...(settings.showChatsSection !== defaults.showChatsSection ? ["Chats section"] : []),
+    ...(settings.showBotsSection !== defaults.showBotsSection ? ["Bots section"] : []),
     ...(settings.showStudioSection !== defaults.showStudioSection ? ["Studio section"] : []),
     ...(settings.uiDensity !== defaults.uiDensity ? ["UI density"] : []),
     ...(settings.desktopAppIcon !== defaults.desktopAppIcon ? ["App icon"] : []),
@@ -503,6 +504,14 @@ function SettingsRouteView() {
             "Show the standalone Chats list in the sidebar footer (chats not tied to a project).",
           resetLabel: "chats section",
           ariaLabel: "Show the Chats section in the sidebar",
+        })}
+
+        {renderBooleanSettingRow({
+          settingKey: "showBotsSection",
+          title: "Bots",
+          description: "Show the Bots tab in the sidebar switcher.",
+          resetLabel: "bots section",
+          ariaLabel: "Show the Bots section in the sidebar",
         })}
 
         {renderBooleanSettingRow({

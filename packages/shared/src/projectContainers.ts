@@ -13,6 +13,21 @@ import {
   type NormalizeWorkspaceRootForComparisonOptions,
 } from "./threadWorkspace";
 
+/**
+ * Container kinds that exclusively own their configured workspace root and whose threads
+ * always run locally against a plain directory: no branches, worktrees, or associated
+ * worktree metadata. Studio and Bots share this behavior; chat containers are excluded
+ * because their placeholder roots legitimately coexist with real projects.
+ */
+export const LOCAL_ONLY_CONTAINER_PROJECT_KINDS: ReadonlySet<ProjectKind> = new Set<ProjectKind>([
+  "studio",
+  "bots",
+]);
+
+export function isLocalOnlyContainerProjectKind(kind: ProjectKind | undefined): boolean {
+  return kind !== undefined && LOCAL_ONLY_CONTAINER_PROJECT_KINDS.has(kind);
+}
+
 export interface ProjectContainerWorkspacePaths {
   readonly homeDir: string | null | undefined;
   readonly chatWorkspaceRoot?: string | null | undefined;

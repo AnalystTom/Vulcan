@@ -14,6 +14,7 @@ import {
   JSON_RPC_METHOD_NOT_FOUND,
   mcpToolResultError,
   parseMcpMessage,
+  type McpToolCallResult,
   type JsonRpcId,
   type JsonRpcRequest,
 } from "./protocol.ts";
@@ -66,6 +67,16 @@ export function makeAgentGatewayMcpTransport(input: {
   readonly requireThreadShell: (
     threadId: string,
   ) => Effect.Effect<OrchestrationThreadShell, unknown>;
+  readonly authorizeTool?: (input: {
+    readonly tool: ToolEntry;
+    readonly args: Record<string, unknown>;
+    readonly context: ToolContext;
+  }) => Effect.Effect<McpToolCallResult | null>;
+  readonly observeToolResult?: (input: {
+    readonly tool: ToolEntry;
+    readonly context: ToolContext;
+    readonly result: McpToolCallResult;
+  }) => Effect.Effect<void>;
 }): AgentGatewayShape["handleMcpPost"] {
   const toolsByName = new Map(input.tools.map((tool) => [tool.definition.name, tool]));
   const handleRequest = (request: JsonRpcRequest, context: Omit<ToolContext, "jsonRpcRequestId">) =>
@@ -125,9 +136,20 @@ export function makeAgentGatewayMcpTransport(input: {
               return jsonRpcResult(request.id, gatewayToolErrorResult(authorityError));
             }
           }
+          if (input.authorizeTool) {
+            const rejection = yield* input.authorizeTool({
+              tool,
+              args,
+              context: invocationContext,
+            });
+            if (rejection) return jsonRpcResult(request.id, rejection);
+          }
           const result = yield* Effect.suspend(() => tool.handler(args, invocationContext)).pipe(
             Effect.catchDefect((defect) => Effect.succeed(mcpToolResultError(errorText(defect)))),
           );
+          if (input.observeToolResult) {
+            yield* input.observeToolResult({ tool, context: invocationContext, result });
+          }
           return jsonRpcResult(request.id, result);
         }
         default:

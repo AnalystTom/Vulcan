@@ -55,6 +55,7 @@ import {
   type ServerShutdownController,
 } from "./serverShutdown";
 import { resolveFavicon, tryParseHost } from "./siteFaviconCache";
+import { readLocalTapesApiUrl } from "./tapesCapture";
 import {
   ifNoneMatchSatisfies,
   isSidecarRequestPath,
@@ -202,6 +203,7 @@ export function makeEffectHttpRouteLayer(
     localImageEffectRouteLayer,
     binaryUploadEffectRouteLayer,
     attachmentsEffectRouteLayer,
+    tapesTraceEffectRouteLayer,
     staticAndDevEffectRouteLayer,
   );
 }
@@ -581,6 +583,50 @@ export const authEffectRouteLayer = HttpRouter.add(
       ),
     ),
   ),
+);
+
+/** Proxies Tapes' dynamic loopback port so the renderer cannot expose it. */
+export const tapesTraceEffectRouteLayer = HttpRouter.add(
+  "GET",
+  "/api/tapes/*",
+  Effect.gen(function* () {
+    const request = yield* HttpServerRequest.HttpServerRequest;
+    const url = HttpServerRequest.toURL(request);
+    if (!url) return HttpServerResponse.text("Bad Request", { status: 400 });
+    const config = yield* ServerConfig;
+    if (!isLegacyTokenAuthorized({ config, url })) {
+      yield* requireAuthenticatedRequest;
+    }
+    const corsHeaders = localPreviewCorsHeaders({ config, request, url });
+    const baseUrl = yield* Effect.promise(readLocalTapesApiUrl);
+    if (!baseUrl)
+      return HttpServerResponse.text("Tapes is not running locally.", {
+        status: 503,
+        headers: corsHeaders,
+      });
+    const match = /^\/api\/tapes\/sessions(?:\/([a-zA-Z0-9_-]{1,200})\/traces)?$/.exec(
+      url.pathname,
+    );
+    if (!match) return HttpServerResponse.text("Not Found", { status: 404, headers: corsHeaders });
+    const target = new URL(match[1] ? `/v1/sessions/${match[1]}/traces` : "/v1/sessions", baseUrl);
+    if (!match[1]) target.searchParams.set("limit", "50");
+    const response = yield* Effect.tryPromise(() => fetch(target)).pipe(
+      Effect.catch(() => Effect.succeed(null)),
+    );
+    if (!response)
+      return HttpServerResponse.text("Tapes did not respond.", {
+        status: 503,
+        headers: corsHeaders,
+      });
+    const body = yield* Effect.tryPromise(() => response.text()).pipe(
+      Effect.catch(() => Effect.succeed("")),
+    );
+    return HttpServerResponse.text(body, {
+      status: response.status,
+      contentType: "application/json",
+      headers: { "Cache-Control": "no-store", ...corsHeaders },
+    });
+  }).pipe(Effect.catchTag("AuthError", (error) => Effect.succeed(authErrorResponse(error)))),
 );
 
 export const projectFaviconEffectRouteLayer = HttpRouter.add(

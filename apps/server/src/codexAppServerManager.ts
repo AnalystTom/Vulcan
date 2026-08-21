@@ -60,6 +60,7 @@ import { isNonFatalCodexErrorMessage } from "./codexErrorClassification.ts";
 import { buildCodexProcessEnv } from "./codexProcessEnv.ts";
 import { assertCodexWorkingDirectoryExists } from "./codexWorkingDirectory.ts";
 import { executableIdentity, resolveExecutable } from "./executableLookup.ts";
+import { tapesCodexAppServerCommand } from "./tapesCapture.ts";
 import {
   teardownChildProcessTree,
   teardownProviderProcessTree,
@@ -662,7 +663,8 @@ function spawnCodexAppServer(input: {
   readonly cwd: string;
   readonly env: NodeJS.ProcessEnv;
 }): ChildProcessWithoutNullStreams {
-  const prepared = prepareWindowsSafeProcess(input.binaryPath, ["app-server"], {
+  const tapesCommand = tapesCodexAppServerCommand(input.binaryPath);
+  const prepared = prepareWindowsSafeProcess(tapesCommand.command, [...tapesCommand.args], {
     cwd: input.cwd,
     env: input.env,
   });

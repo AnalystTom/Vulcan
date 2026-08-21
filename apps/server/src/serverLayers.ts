@@ -43,7 +43,10 @@ import { ExternalMcpRepositoryLive } from "./externalMcp/Layers/ExternalMcpRepos
 import { ExternalMcpServiceLive } from "./externalMcp/Layers/ExternalMcpService";
 import { ExternalMcpGatewayLive } from "./externalMcp/Layers/ExternalMcpGateway";
 import { ServerEnvironmentLive } from "./environment/Layers/ServerEnvironment";
+import { BotServiceLive } from "./bots/Layers/BotService";
+import { BotThreadReconcilerLive } from "./bots/Layers/BotThreadReconciler";
 import { AutomationRepositoryLive } from "./persistence/Layers/AutomationRepository";
+import { BotRepositoryLive } from "./persistence/Layers/BotRepository";
 import { ProjectPullRequestPinsLive } from "./persistence/Layers/ProjectPullRequestPins";
 import { SssfTraceSourceLive } from "./factoryTrace/Layers/SssfTraceSource";
 import { SssfTraceWriterLive } from "./factoryTrace/Layers/SssfTraceWriter";
@@ -87,6 +90,7 @@ export function makeServerRuntimeServicesLayer(
   );
   const runtimeIngestionLayer = ProviderRuntimeIngestionLive.pipe(
     Layer.provideMerge(runtimeServicesLayer),
+    Layer.provideMerge(BotRepositoryLive),
   );
   const studioOutputReactorLayer = StudioOutputReactorLive.pipe(
     Layer.provideMerge(runtimeServicesLayer),
@@ -103,6 +107,7 @@ export function makeServerRuntimeServicesLayer(
     Layer.provideMerge(TextGenerationLayerLive),
     Layer.provideMerge(ServerSettingsLive),
     Layer.provideMerge(AgentGatewayOperationRepositoryLive),
+    Layer.provideMerge(BotRepositoryLive),
   );
   const checkpointReactorLayer = CheckpointReactorLive.pipe(
     Layer.provideMerge(runtimeServicesLayer),
@@ -174,6 +179,14 @@ export function makeServerRuntimeServicesLayer(
   const automationRunReactorLayer = AutomationRunReactorLive.pipe(
     Layer.provideMerge(automationServiceLayer),
   );
+  const botServiceLayer = BotServiceLive.pipe(
+    Layer.provideMerge(BotRepositoryLive),
+    Layer.provideMerge(GitCoreLive),
+    Layer.provideMerge(runtimeServicesLayer),
+  );
+  const botThreadReconcilerLayer = BotThreadReconcilerLive.pipe(
+    Layer.provideMerge(botServiceLayer),
+  );
   const externalMcpServiceLayer = ExternalMcpServiceLive.pipe(
     Layer.provideMerge(ExternalMcpRepositoryLive),
     Layer.provideMerge(runtimeServicesLayer),
@@ -201,6 +214,7 @@ export function makeServerRuntimeServicesLayer(
     Layer.provideMerge(ServerSettingsLive),
     Layer.provideMerge(providerHealthLayer),
     Layer.provideMerge(BrowserAutomationHostLive),
+    Layer.provideMerge(BotRepositoryLive),
   );
   const pullRequestServiceLayer = PullRequestServiceLive.pipe(
     Layer.provideMerge(GitLayerLive),
@@ -215,8 +229,11 @@ export function makeServerRuntimeServicesLayer(
     automationServiceLayer,
     automationSchedulerLayer,
     automationRunReactorLayer,
+    botServiceLayer,
+    botThreadReconcilerLayer,
     managedAttachmentCleanupLayer,
     AutomationRepositoryLive,
+    BotRepositoryLive,
     AgentGatewayOperationRepositoryLive,
     ExternalMcpRepositoryLive,
     externalMcpServiceLayer,

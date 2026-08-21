@@ -32,6 +32,7 @@ import {
 } from "~/workspaceLayoutStore";
 
 import { FactoryTracePane } from "./FactoryTracePane";
+import { TapesTracePane } from "./TapesTracePane";
 import { useIsMobile } from "~/hooks/useMediaQuery";
 import { ensureNativeApi } from "~/nativeApi";
 
@@ -166,6 +167,8 @@ export function WorkspaceSurface({
           );
         case "factory":
           return <FactoryTracePane isVisible threadId={threadId} />;
+        case "trace":
+          return <TapesTracePane isVisible />;
         default: {
           const descriptor = describePaneMode(pane.mode);
           return (

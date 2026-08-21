@@ -19,6 +19,7 @@ export const RIGHT_DOCK_PANE_KINDS = [
   "git",
   "pullRequest",
   "factory",
+  "trace",
 ] as const;
 
 export type RightDockPaneKind = (typeof RIGHT_DOCK_PANE_KINDS)[number];

@@ -108,6 +108,8 @@ import Migration0089 from "./Migrations/089_RecoverRetentionHiddenThreads.ts";
 import Migration0090 from "./Migrations/090_WorkspaceLayouts.ts";
 import Migration0091 from "./Migrations/091_FactoryRuns.ts";
 import Migration0092 from "./Migrations/092_DropFactoryRuns.ts";
+import Migration0093 from "./Migrations/093_Bots.ts";
+import Migration0094 from "./Migrations/094_BotAutonomyControlPlane.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -215,6 +217,8 @@ export const migrationEntries = [
   [90, "WorkspaceLayouts", Migration0090],
   [91, "FactoryRuns", Migration0091],
   [92, "DropFactoryRuns", Migration0092],
+  [93, "Bots", Migration0093],
+  [94, "BotAutonomyControlPlane", Migration0094],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

@@ -10,6 +10,12 @@
 // never rendered as though it checked nothing.
 
 import type { TraceEnvelope, TraceEvent, TraceGateResult, TracePhase } from "@vulcan/contracts";
+import {
+  parseAgentSpawn,
+  parseEventMessage,
+  parsePhaseUsage,
+  parseToolCall,
+} from "@vulcan/shared/factoryTracePayload";
 import { IconX } from "@tabler/icons-react";
 import { useState } from "react";
 
@@ -20,6 +26,8 @@ import { formatClockDuration } from "~/session-logic";
 import { cn } from "~/lib/utils";
 
 import { PHASE_STATUS_LABEL, PHASE_STATUS_TONE } from "./traceTheme";
+
+const COMPACT = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 });
 
 export function FactoryPhaseDetail({
   phase,
@@ -42,6 +50,10 @@ export function FactoryPhaseDetail({
   const startedMs = phase.startedAt === null ? Number.NaN : Date.parse(phase.startedAt);
   const endedMs = phase.endedAt === null ? Number.NaN : Date.parse(phase.endedAt);
   const toolCalls = phaseEvents.filter((event) => event.type === "tool_call");
+  // Receipts for how this phase's worker was spawned and what it spent, read
+  // from its own events so the panel answers "which model, how many tokens".
+  const spawn = parseAgentSpawn(phaseEvents);
+  const usage = parsePhaseUsage(phaseEvents);
 
   return (
     <section className="border-t border-border bg-muted/20 px-3 py-2 text-xs">
@@ -77,6 +89,37 @@ export function FactoryPhaseDetail({
           <Fact label="Took">{formatClockDuration(endedMs - startedMs)}</Fact>
         ) : null}
         {toolCalls.length > 0 ? <Fact label="Tool calls">{toolCalls.length}</Fact> : null}
+        {/* The model this phase actually spawned on -- can differ across a run. */}
+        {spawn?.model ? (
+          <Fact label="Model">
+            <span className="font-mono text-[11px]">{spawn.model}</span>
+          </Fact>
+        ) : null}
+        {spawn?.sessionId ? (
+          <Fact label="Session">
+            <span className="font-mono text-[11px]" title={spawn.sessionId}>
+              {spawn.sessionId}
+            </span>
+          </Fact>
+        ) : null}
+        {/* What moved through this phase, not what the whole run was billed. */}
+        {usage?.read !== null && usage?.read !== undefined ? (
+          <Fact label="Tokens in">
+            <span
+              className="font-mono text-[11px]"
+              title="Prompt tokens read (input + cache writes)"
+            >
+              {COMPACT.format(usage.read)}
+            </span>
+          </Fact>
+        ) : null}
+        {usage?.written !== null && usage?.written !== undefined ? (
+          <Fact label="Tokens out">
+            <span className="font-mono text-[11px]" title="Tokens generated">
+              {COMPACT.format(usage.written)}
+            </span>
+          </Fact>
+        ) : null}
       </dl>
 
       {phase.error ? (
@@ -212,17 +255,70 @@ function EventList({ events }: { readonly events: readonly TraceEvent[] }) {
       <DisclosureRegion open={open}>
         <ul className="mt-1 max-h-64 overflow-auto">
           {events.map((event) => (
-            <li key={event.eventId} className="flex min-w-0 items-baseline gap-1.5">
-              <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
-                {event.type ?? "event"}
-              </span>
-              <span className="min-w-0 flex-1 truncate">{event.name ?? ""}</span>
-            </li>
+            <EventRow key={event.eventId} event={event} />
           ))}
         </ul>
       </DisclosureRegion>
     </div>
   );
+}
+
+/**
+ * One event, told in the terms of its type.
+ *
+ * The raw `name` is often just a status word; the useful part -- the tool that
+ * ran, the model an agent spawned on, why something failed -- lives in the
+ * payload, so each type reads its own out rather than showing the same opaque
+ * line for all ten.
+ */
+function EventRow({ event }: { readonly event: TraceEvent }) {
+  const detail = describeEvent(event);
+  const failed = event.type === "error" || (event.type === "tool_call" && detail.failed);
+  return (
+    <li className="flex min-w-0 items-baseline gap-1.5 py-px">
+      <span className="w-16 shrink-0 truncate font-mono text-[10px] text-muted-foreground">
+        {event.type ?? "event"}
+      </span>
+      <span className={cn("min-w-0 flex-1 truncate", failed && PHASE_STATUS_TONE.fail)}>
+        {detail.text}
+      </span>
+      {event.tokens !== null && event.tokens > 0 ? (
+        <span
+          className="shrink-0 font-mono text-[10px] text-muted-foreground"
+          title="Billed tokens"
+        >
+          {COMPACT.format(event.tokens)}
+        </span>
+      ) : null}
+    </li>
+  );
+}
+
+function describeEvent(event: TraceEvent): { readonly text: string; readonly failed: boolean } {
+  switch (event.type) {
+    case "agent_start": {
+      const spawn = parseAgentSpawn([event]);
+      return {
+        text: spawn?.model ? `${event.name ?? "agent"} · ${spawn.model}` : (event.name ?? "agent"),
+        failed: false,
+      };
+    }
+    case "tool_call": {
+      const call = parseToolCall(event.payloadJson);
+      const label = call.summary ?? event.name ?? call.tool ?? "tool call";
+      return { text: label, failed: call.failed };
+    }
+    case "error": {
+      const message = parseEventMessage(event.payloadJson);
+      return { text: message ?? event.name ?? "error", failed: true };
+    }
+    case "handoff": {
+      const message = parseEventMessage(event.payloadJson);
+      return { text: message ?? event.name ?? "handoff", failed: false };
+    }
+    default:
+      return { text: event.name ?? "", failed: false };
+  }
 }
 
 function prettyJson(raw: string | null): string {

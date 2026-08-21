@@ -65,8 +65,8 @@ const DESCRIPTORS: readonly Omit<PaneModeDescriptor, "implemented">[] = [
   },
   {
     mode: "trace",
-    label: "Trace",
-    description: "Provider telemetry projected into the product event stream.",
+    label: "Agent Traces",
+    description: "Captured local Tapes sessions and their provider spans.",
     Icon: IconRoute,
   },
   {

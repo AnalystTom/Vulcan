@@ -1,4 +1,6 @@
 import {
+  ApprovalRequestId,
+  BotAuditEntryId,
   type AssistantDeliveryMode,
   CommandId,
   EventId,
@@ -38,6 +40,8 @@ import {
 import { copyAndAttributeStudioGeneratedImage } from "../../studioGeneratedImages.ts";
 import { parseCheckpointFilesFromUnifiedDiff } from "../../checkpointing/Diffs.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
+import { BotRepository } from "../../persistence/Services/BotRepository.ts";
+import { requiredBotCapabilitiesForProviderRequest } from "../../bots/botProviderPolicy.ts";
 import {
   classifyTerminalTurnApplicability,
   isStartedTurnApplicable,
@@ -597,6 +601,7 @@ const make = Effect.gen(function* () {
   const orchestrationEngine = yield* OrchestrationEngineService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerService = yield* ProviderService;
+  const botRepository = Option.getOrUndefined(yield* Effect.serviceOption(BotRepository));
   const projectionTurnRepository = yield* ProjectionTurnRepository;
   const pendingInteractions = yield* ProjectionPendingInteractionRepository;
   const runtimeEvents = yield* ProviderRuntimeEventRepository;
@@ -1769,6 +1774,51 @@ const make = Effect.gen(function* () {
         ? yield* getThreadDetail(event.threadId)
         : yield* getThreadShellDetail(event.threadId);
       if (!parentThread) return;
+
+      if (botRepository && event.type === "request.opened" && event.requestId) {
+        const botOption = yield* botRepository.getBotByThreadId({ threadId: parentThread.id });
+        if (Option.isSome(botOption)) {
+          const bot = botOption.value;
+          const required = requiredBotCapabilitiesForProviderRequest(event.payload.requestType);
+          const missing = required.filter(
+            (capability) => !bot.capabilityGrants.includes(capability),
+          );
+          if (missing.length > 0) {
+            const requestId = ApprovalRequestId.makeUnsafe(event.requestId);
+            const summary = `Provider request ${event.payload.requestType} was denied; missing ${missing.join(", ")}.`;
+            const declined = yield* providerService
+              .respondToRequest({
+                threadId: parentThread.id,
+                requestId,
+                ...(event.lifecycleGeneration
+                  ? { lifecycleGeneration: event.lifecycleGeneration }
+                  : {}),
+                decision: "decline",
+              })
+              .pipe(
+                Effect.match({
+                  onFailure: () => false,
+                  onSuccess: () => true,
+                }),
+              );
+            yield* botRepository.appendAuditEntry({
+              id: BotAuditEntryId.makeUnsafe(`bot-audit:${event.eventId}`),
+              botId: bot.id,
+              taskId: bot.activeTaskId,
+              threadId: parentThread.id,
+              capability: missing[0]!,
+              action: `provider.${event.payload.requestType}`,
+              decision: declined ? "denied" : "failed",
+              summary: declined
+                ? summary
+                : `${summary} Vulcan could not deliver the decline, so the request remains visible for human resolution.`,
+              detailJson: null,
+              createdAt: now,
+            });
+            if (declined) return;
+          }
+        }
+      }
 
       const ensureSubagentThread = (
         providerThreadId: string,

@@ -176,6 +176,38 @@ describe("geometry", () => {
     expect(second!.leftPct).toBeGreaterThanOrEqual(first!.leftPct + first!.widthPct - 0.001);
   });
 
+  it("never overlaps blocks, even when a lane is too crowded to hold them all", () => {
+    // Enough near-instant phases that their minimum widths sum past the track:
+    // the old right-edge clamp piled the tail on one spot, so assert every block
+    // still starts at or past where the one before it ended.
+    const phases = Array.from({ length: 60 }, (_unused, index) =>
+      phaseOf({
+        phaseId: `c${index}`,
+        kind: "code",
+        owner: "git",
+        startedAt: at(index),
+        endedAt: at(index),
+      }),
+    );
+    const blocks = laneById(timelineOf({ phases }), "code:git").blocks;
+    expect(blocks).toHaveLength(60);
+    for (let index = 1; index < blocks.length; index += 1) {
+      const previous = blocks[index - 1]!;
+      expect(blocks[index]!.leftPct).toBeGreaterThanOrEqual(
+        previous.leftPct + previous.widthPct - 0.001,
+      );
+    }
+  });
+
+  it("pulls a block that ends at the axis edge back inside the track", () => {
+    const timeline = timelineOf({
+      phases: [phaseOf({ phaseId: "tail", kind: "code", owner: "git", startedAt: at(600) })],
+    });
+    const block = laneById(timeline, "code:git").blocks[0]!;
+    // Zero-duration block at the far edge widens to its minimum and stays inside.
+    expect(block.leftPct + block.widthPct).toBeLessThanOrEqual(99.5 + 0.001);
+  });
+
   it("keeps lanes aligned, because one lane never borrows another's space", () => {
     const timeline = timelineOf({
       phases: [

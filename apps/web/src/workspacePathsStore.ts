@@ -15,9 +15,11 @@ interface WorkspacePathsStoreState {
   homeDir: string | null;
   chatWorkspaceRoot: string | null;
   studioWorkspaceRoot: string | null;
+  botsWorkspaceRoot: string | null;
   setHomeDir: (homeDir: string | null | undefined) => void;
   setChatWorkspaceRoot: (chatWorkspaceRoot: string | null | undefined) => void;
   setStudioWorkspaceRoot: (studioWorkspaceRoot: string | null | undefined) => void;
+  setBotsWorkspaceRoot: (botsWorkspaceRoot: string | null | undefined) => void;
   setServerWorkspacePaths: (paths: ServerWorkspacePaths) => void;
 }
 
@@ -44,6 +46,7 @@ export const useWorkspacePathsStore = create<WorkspacePathsStoreState>()(
       homeDir: null,
       chatWorkspaceRoot: null,
       studioWorkspaceRoot: null,
+      botsWorkspaceRoot: null,
       setHomeDir: (homeDir) =>
         set((state) => {
           // `undefined` means server config has not arrived yet; keep the last known value.
@@ -75,6 +78,14 @@ export const useWorkspacePathsStore = create<WorkspacePathsStoreState>()(
             ? state
             : { studioWorkspaceRoot: normalizedStudioWorkspaceRoot };
         }),
+      setBotsWorkspaceRoot: (botsWorkspaceRoot) =>
+        set((state) => {
+          if (botsWorkspaceRoot === undefined) return state;
+          const normalizedBotsWorkspaceRoot = botsWorkspaceRoot?.trim() ?? null;
+          return state.botsWorkspaceRoot === normalizedBotsWorkspaceRoot
+            ? state
+            : { botsWorkspaceRoot: normalizedBotsWorkspaceRoot };
+        }),
       setServerWorkspacePaths: (paths) =>
         set((state) => {
           const normalizedPaths = normalizeServerWorkspacePaths(paths);
@@ -93,6 +104,12 @@ export const useWorkspacePathsStore = create<WorkspacePathsStoreState>()(
             state.studioWorkspaceRoot !== normalizedPaths.studioWorkspaceRoot
           ) {
             next.studioWorkspaceRoot = normalizedPaths.studioWorkspaceRoot;
+          }
+          if (
+            paths.botsWorkspaceRoot !== undefined &&
+            state.botsWorkspaceRoot !== normalizedPaths.botsWorkspaceRoot
+          ) {
+            next.botsWorkspaceRoot = normalizedPaths.botsWorkspaceRoot;
           }
           return Object.keys(next).length > 0 ? next : state;
         }),

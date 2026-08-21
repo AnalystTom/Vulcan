@@ -279,6 +279,10 @@
     "./factoryTraceTimeline": {
       "types": "./src/factoryTraceTimeline.ts",
       "import": "./src/factoryTraceTimeline.ts"
+    },
+    "./factoryTracePayload": {
+      "types": "./src/factoryTracePayload.ts",
+      "import": "./src/factoryTracePayload.ts"
     }
   },
   "scripts": {

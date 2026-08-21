@@ -23,6 +23,7 @@ import {
   WsCompatibilityError,
   WsFeatureRpcGroup,
   type AutomationStreamEvent,
+  type BotEvent,
   type GitActionProgressEvent,
   type GitCreateDetachedWorktreeResult,
   type GitRunStackedActionResult,
@@ -1394,6 +1395,14 @@ export class WsTransport {
             (event: AutomationStreamEvent) => this.emit(WS_CHANNELS.automationEvent, event),
             restartChannel,
           );
+        } else if (channel === WS_CHANNELS.botEvent) {
+          this.startStream(
+            client,
+            "bot.events",
+            client[WS_METHODS.subscribeBotEvents]({}),
+            (event: BotEvent) => this.emit(WS_CHANNELS.botEvent, event),
+            restartChannel,
+          );
         } else if (channel === ORCHESTRATION_WS_CHANNELS.domainEvent) {
           this.startStream(
             client,
@@ -1427,6 +1436,7 @@ export class WsTransport {
     else if (channel === WS_CHANNELS.terminalEvent) this.stopStream("terminal.events");
     else if (channel === WS_CHANNELS.projectDevServerEvent) this.stopStream("project.devServers");
     else if (channel === WS_CHANNELS.automationEvent) this.stopStream("automation.events");
+    else if (channel === WS_CHANNELS.botEvent) this.stopStream("bot.events");
     else if (channel === ORCHESTRATION_WS_CHANNELS.domainEvent)
       this.stopStream("orchestration.domain");
   }

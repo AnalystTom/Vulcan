@@ -17,6 +17,8 @@ import type {
 } from "@vulcan/contracts";
 import {
   ApprovalRequestId,
+  BotId,
+  BotTaskId,
   type ChatAttachment,
   CommandId,
   DEFAULT_GIT_TEXT_GENERATION_MODEL,
@@ -64,6 +66,9 @@ import { QueuedTurnPromotionRepository } from "../../persistence/Services/Queued
 import { ProjectionPendingInteractionRepository } from "../../persistence/Services/ProjectionPendingInteractions.ts";
 import { ManagedAttachmentRepository } from "../../persistence/Services/ManagedAttachments.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
+import { BotRepositoryLive } from "../../persistence/Layers/BotRepository.ts";
+import { BotRepository } from "../../persistence/Services/BotRepository.ts";
+import botsMigration from "../../persistence/Migrations/093_Bots.ts";
 import {
   ProviderService,
   type ProviderServiceShape,
@@ -532,6 +537,7 @@ describe("ProviderCommandReactor", () => {
       Layer.provideMerge(NodeServices.layer),
       Layer.provideMerge(OrchestrationEventDeliveryRepositoryLive),
       Layer.provideMerge(AgentGatewayOperationRepositoryLive),
+      Layer.provideMerge(BotRepositoryLive),
       Layer.provideMerge(SqlitePersistenceMemory),
     );
     const runtime = ManagedRuntime.make(layer);
@@ -571,6 +577,11 @@ describe("ProviderCommandReactor", () => {
     const gatewayOperations = await runtime.runPromise(
       Effect.service(AgentGatewayOperationRepository),
     );
+    // The harness layer stack does not run persistence migrations; the bots
+    // migration is self-contained (CREATE ... IF NOT EXISTS) so run it directly
+    // to let tests seed bot rows for persona-injection coverage.
+    await runtime.runPromise(botsMigration);
+    const botRepository = await runtime.runPromise(Effect.service(BotRepository));
     scope = await Effect.runPromise(Scope.make("sequential"));
     let reactorStarted = false;
     const startReactor = async () => {
@@ -702,6 +713,7 @@ describe("ProviderCommandReactor", () => {
       emitRuntimeEvent,
       setRuntimeSessionTurnState,
       startReactor,
+      botRepository,
       deliveryRepository,
       pendingInteractionRepository,
       reserveGatewayOperation: (operationId: string) =>
@@ -2013,6 +2025,201 @@ describe("ProviderCommandReactor", () => {
     expect(input?.input).toBe(messageText);
     expect(input?.input?.length).toBe(PROVIDER_SEND_TURN_MAX_INPUT_CHARS);
     expect(input?.mentions).toBeUndefined();
+  });
+
+  it("prepends the bot persona block before inlined skill instructions on bot task turns", async () => {
+    const harness = await createHarness();
+    const now = new Date().toISOString();
+
+    const botWorkspaceDir = path.join(harness.stateDir, "bots", "bot-persona-1");
+    fs.mkdirSync(botWorkspaceDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(botWorkspaceDir, "MEMORY.md"),
+      "- The user prefers tabs over spaces.\n",
+    );
+    // Skill file under a `.claude` segment so the codex provider inlines it.
+    const skillPath = path.join(harness.stateDir, ".claude", "skills", "docs", "SKILL.md");
+    fs.mkdirSync(path.dirname(skillPath), { recursive: true });
+    fs.writeFileSync(skillPath, "Always cite the docs directory.");
+
+    await Effect.runPromise(
+      harness.botRepository.createBot({
+        id: BotId.makeUnsafe("bot-persona-1"),
+        input: {
+          name: "Maus",
+          title: "Chief of Staff",
+          description: "Coordinates the other bots.",
+          avatar: { kind: "shape", shape: "happy", color: "teal" },
+          modelSelection: { provider: "codex", model: "gpt-5-codex" },
+        },
+        workspaceDir: botWorkspaceDir,
+        now,
+      }),
+    );
+    await Effect.runPromise(
+      harness.botRepository.createBotTask({
+        id: BotTaskId.makeUnsafe("bot-task-persona-1"),
+        botId: BotId.makeUnsafe("bot-persona-1"),
+        threadId: ThreadId.makeUnsafe("thread-1"),
+        title: "Persona task",
+        now,
+      }),
+    );
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.makeUnsafe("cmd-bot-persona-turn-start"),
+        threadId: ThreadId.makeUnsafe("thread-1"),
+        message: {
+          messageId: asMessageId("bot-persona-user"),
+          role: "user",
+          text: "Hello Maus",
+          attachments: [],
+          skills: [{ name: "docs", path: skillPath }],
+        },
+        runtimeMode: "approval-required",
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    const sent = harness.sendTurn.mock.calls[0]?.[0] as { input?: string } | undefined;
+    const sentInput = sent?.input ?? "";
+    expect(sentInput.startsWith("<bot_persona>\n")).toBe(true);
+    expect(sentInput).toContain("You are Maus, a bot teammate in Vulcan.");
+    expect(sentInput).toContain("Role: Chief of Staff.");
+    expect(sentInput).toContain("- The user prefers tabs over spaces.");
+    expect(sentInput).toContain("<latest_user_message>\nHello Maus\n</latest_user_message>");
+    expect(sentInput).toContain("Always cite the docs directory.");
+    // Identity leads the prompt: the persona block closes before the user
+    // message, and both come before the inlined skill instructions.
+    expect(sentInput.indexOf("</bot_persona>")).toBeLessThan(
+      sentInput.indexOf("<latest_user_message>"),
+    );
+    expect(sentInput.indexOf("</bot_persona>")).toBeLessThan(
+      sentInput.indexOf("Always cite the docs directory."),
+    );
+    expect(sentInput.length).toBeLessThanOrEqual(PROVIDER_SEND_TURN_MAX_INPUT_CHARS);
+  });
+
+  it("clamps or drops the bot persona block to stay within the provider input limit", async () => {
+    const harness = await createHarness();
+    const now = new Date().toISOString();
+
+    const botWorkspaceDir = path.join(harness.stateDir, "bots", "bot-clamp-1");
+    fs.mkdirSync(botWorkspaceDir, { recursive: true });
+    // Large (but prompt-cap-compliant) memory so the persona context exceeds
+    // the remaining turn budget and must be clipped.
+    fs.writeFileSync(
+      path.join(botWorkspaceDir, "MEMORY.md"),
+      Array.from({ length: 150 }, (_, index) => `- memory line ${index} ${"m".repeat(90)}`).join(
+        "\n",
+      ),
+    );
+    await Effect.runPromise(
+      harness.botRepository.createBot({
+        id: BotId.makeUnsafe("bot-clamp-1"),
+        input: {
+          name: "Maus",
+          title: "Chief of Staff",
+          description: "Coordinates the other bots.",
+          avatar: { kind: "shape", shape: "happy", color: "teal" },
+          modelSelection: { provider: "codex", model: "gpt-5-codex" },
+        },
+        workspaceDir: botWorkspaceDir,
+        now,
+      }),
+    );
+    await Effect.runPromise(
+      harness.botRepository.createBotTask({
+        id: BotTaskId.makeUnsafe("bot-task-clamp-1"),
+        botId: BotId.makeUnsafe("bot-clamp-1"),
+        threadId: ThreadId.makeUnsafe("thread-1"),
+        title: "Clamp task",
+        now,
+      }),
+    );
+    // Second bot thread for the zero-budget case so both dispatches run
+    // independently instead of the second queueing behind the first turn.
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.makeUnsafe("cmd-bot-clamp-thread-2-create"),
+        threadId: ThreadId.makeUnsafe("thread-bot-clamp-2"),
+        projectId: asProjectId("project-1"),
+        title: "Bot clamp thread 2",
+        modelSelection: { provider: "codex", model: "gpt-5-codex" },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        branch: null,
+        worktreePath: null,
+        createdAt: now,
+      }),
+    );
+    await Effect.runPromise(
+      harness.botRepository.createBotTask({
+        id: BotTaskId.makeUnsafe("bot-task-clamp-2"),
+        botId: BotId.makeUnsafe("bot-clamp-1"),
+        threadId: ThreadId.makeUnsafe("thread-bot-clamp-2"),
+        title: "Clamp task 2",
+        now,
+      }),
+    );
+
+    // Case 1: budget covers only part of the persona context — it is clipped,
+    // still leads the prompt, and the total stays within the provider limit.
+    const clippedMessage = "x".repeat(PROVIDER_SEND_TURN_MAX_INPUT_CHARS - 8_000);
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.makeUnsafe("cmd-bot-clamp-turn-start"),
+        threadId: ThreadId.makeUnsafe("thread-1"),
+        message: {
+          messageId: asMessageId("bot-clamp-user"),
+          role: "user",
+          text: clippedMessage,
+          attachments: [],
+        },
+        runtimeMode: "approval-required",
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        createdAt: now,
+      }),
+    );
+    // Case 2: the message alone consumes the full budget — the persona block
+    // is dropped entirely instead of overflowing the limit or failing the turn.
+    const maxedMessage = "y".repeat(PROVIDER_SEND_TURN_MAX_INPUT_CHARS);
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.makeUnsafe("cmd-bot-clamp-turn-start-2"),
+        threadId: ThreadId.makeUnsafe("thread-bot-clamp-2"),
+        message: {
+          messageId: asMessageId("bot-clamp-user-2"),
+          role: "user",
+          text: maxedMessage,
+          attachments: [],
+        },
+        runtimeMode: "approval-required",
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+    const inputs = harness.sendTurn.mock.calls.map(
+      (call) => (call[0] as { input?: string } | undefined)?.input ?? "",
+    );
+    const clippedInput = inputs.find((entry) => entry.includes(clippedMessage)) ?? "";
+    const maxedInput = inputs.find((entry) => entry.includes(maxedMessage)) ?? "";
+
+    expect(clippedInput.startsWith("<bot_persona>\n")).toBe(true);
+    expect(clippedInput).toContain("You are Maus, a bot teammate in Vulcan.");
+    expect(clippedInput.length).toBeLessThanOrEqual(PROVIDER_SEND_TURN_MAX_INPUT_CHARS);
+
+    expect(maxedInput).toBe(maxedMessage);
+    expect(maxedInput.length).toBe(PROVIDER_SEND_TURN_MAX_INPUT_CHARS);
   });
 
   it("preserves pending sidechat context when the first turn is an overlong provider review", async () => {

@@ -207,10 +207,13 @@ export function buildFactoryTraceTimeline(input: FactoryTraceTimelineInput): Fac
         // before it, so it slides right inside its own lane only. Lanes never
         // borrow space from each other, which is what keeps two lanes at the
         // same x comparable.
-        const left = Math.min(
-          Math.max(((item.startMs - startMs) / spanMs) * available, previousEdge),
-          Math.max(available - width, 0),
-        );
+        const ideal = Math.max(((item.startMs - startMs) / spanMs) * available, previousEdge);
+        // Pull a block back inside the track so one running to the end still
+        // shows its border -- but never past `previousEdge`, or the pull would
+        // land it on top of its neighbour. When a lane is too crowded to hold
+        // every block, an honest overflow (the track clips it) beats an overlap
+        // that hides which block is which and steals the other's clicks.
+        const left = Math.min(ideal, Math.max(available - width, previousEdge));
         previousEdge = left + width;
         blocks.push({
           key: item.phase.phaseId,

@@ -9,6 +9,7 @@ import { agentGatewayRouteLayer } from "./agentGateway/httpRoute";
 import { AgentGatewayCredentials } from "./agentGateway/Services/AgentGatewayCredentials";
 import { AutomationRunReactor } from "./automation/Services/AutomationRunReactor";
 import { AutomationScheduler } from "./automation/Services/AutomationScheduler";
+import { BotThreadReconciler } from "./bots/Services/BotThreadReconciler";
 import { AutomationService } from "./automation/Services/AutomationService";
 import {
   clearPersistedServerRuntimeState,
@@ -63,6 +64,7 @@ export interface ServerShape {
     | AutomationRunReactor
     | AutomationScheduler
     | AutomationService
+    | BotThreadReconciler
     | ServerLifecycleEvents
     | OrchestrationEngineService
     | OrchestrationReactor
@@ -122,6 +124,7 @@ export const createEffectServer = Effect.fn(function* (
   const agentGatewayCredentials = yield* AgentGatewayCredentials;
   const automationRunReactor = yield* AutomationRunReactor;
   const automationScheduler = yield* AutomationScheduler;
+  const botThreadReconciler = yield* BotThreadReconciler;
   const keybindings = yield* Keybindings;
   const managedAttachmentCleanup = yield* ManagedAttachmentCleanup;
   const lifecycleEvents = yield* ServerLifecycleEvents;
@@ -204,6 +207,7 @@ export const createEffectServer = Effect.fn(function* (
   yield* Scope.provide(orchestrationReactor.start, subscriptionsScope);
   yield* Scope.provide(automationScheduler.start(), subscriptionsScope);
   yield* Scope.provide(automationRunReactor.start(), subscriptionsScope);
+  yield* Scope.provide(botThreadReconciler.start(), subscriptionsScope);
   yield* Scope.provide(threadDeletionReactor.start(), subscriptionsScope);
   yield* Scope.provide(providerSessionReaper.start(), subscriptionsScope);
   yield* Scope.provide(providerRuntimeReconciler.start(), subscriptionsScope);
@@ -232,6 +236,7 @@ export const createEffectServer = Effect.fn(function* (
       homeDir: config.homeDir,
       chatWorkspaceRoot: config.chatWorkspaceRoot,
       studioWorkspaceRoot: config.studioWorkspaceRoot,
+      botsWorkspaceRoot: config.botsWorkspaceRoot,
       projectName: config.cwd.split(/[\\/]/).filter(Boolean).at(-1) ?? config.cwd,
     },
   });

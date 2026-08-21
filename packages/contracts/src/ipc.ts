@@ -55,6 +55,33 @@ import type {
   AutomationUpdateInput,
 } from "./automation";
 import type {
+  BotAuditListInput,
+  BotAuditListResult,
+  BotControlInput,
+  BotControlResult,
+  BotCreateInput,
+  BotCreateResult,
+  BotDeleteInput,
+  BotDeleteResult,
+  BotEvent,
+  BotListInput,
+  BotListResult,
+  BotMemoryGetInput,
+  BotMemoryGetResult,
+  BotMemorySetInput,
+  BotMemorySetResult,
+  BotTaskArchiveInput,
+  BotTaskArchiveResult,
+  BotTaskCreateInput,
+  BotTaskCreateResult,
+  BotTaskRunInput,
+  BotTaskRunResult,
+  BotTaskSetActiveInput,
+  BotTaskSetActiveResult,
+  BotUpdateInput,
+  BotUpdateResult,
+} from "./bot";
+import type {
   GitCheckoutInput,
   GitActionProgressEvent,
   GitWorktreeSetupProgressEvent,
@@ -841,6 +868,21 @@ export interface NativeApi {
       input: AutomationResolveProposalInput,
     ) => Promise<AutomationResolveProposalResult>;
     onEvent: (callback: (event: AutomationStreamEvent) => void) => () => void;
+  };
+  bots: {
+    list: (input?: BotListInput) => Promise<BotListResult>;
+    create: (input: BotCreateInput) => Promise<BotCreateResult>;
+    update: (input: BotUpdateInput) => Promise<BotUpdateResult>;
+    delete: (input: BotDeleteInput) => Promise<BotDeleteResult>;
+    createTask: (input: BotTaskCreateInput) => Promise<BotTaskCreateResult>;
+    runTask: (input: BotTaskRunInput) => Promise<BotTaskRunResult>;
+    setActiveTask: (input: BotTaskSetActiveInput) => Promise<BotTaskSetActiveResult>;
+    archiveTask: (input: BotTaskArchiveInput) => Promise<BotTaskArchiveResult>;
+    getMemory: (input: BotMemoryGetInput) => Promise<BotMemoryGetResult>;
+    setMemory: (input: BotMemorySetInput) => Promise<BotMemorySetResult>;
+    control: (input: BotControlInput) => Promise<BotControlResult>;
+    listAudit: (input: BotAuditListInput) => Promise<BotAuditListResult>;
+    onEvent: (callback: (event: BotEvent) => void) => () => void;
   };
   browser: BrowserControlMethods & {
     annotations: BrowserAnnotationMethods;

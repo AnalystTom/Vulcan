@@ -15,6 +15,21 @@ import {
   AutomationUpdateInput,
 } from "./automation";
 import {
+  BotAuditListInput,
+  BotControlInput,
+  BotCreateInput,
+  BotDeleteInput,
+  BotEvent,
+  BotListInput,
+  BotMemoryGetInput,
+  BotMemorySetInput,
+  BotTaskArchiveInput,
+  BotTaskCreateInput,
+  BotTaskRunInput,
+  BotTaskSetActiveInput,
+  BotUpdateInput,
+} from "./bot";
+import {
   ClientOrchestrationCommand,
   OrchestrationEvent,
   OrchestrationImportThreadInput,
@@ -274,12 +289,28 @@ export const WS_METHODS = {
   automationArchiveRun: "automation.archiveRun",
   automationResolveProposal: "automation.resolveProposal",
   subscribeAutomationEvents: "automation.subscribe",
+
+  // Bot methods
+  botList: "bot.list",
+  botCreate: "bot.create",
+  botUpdate: "bot.update",
+  botDelete: "bot.delete",
+  botTaskCreate: "bot.taskCreate",
+  botTaskRun: "bot.taskRun",
+  botTaskSetActive: "bot.taskSetActive",
+  botTaskArchive: "bot.taskArchive",
+  botMemoryGet: "bot.memoryGet",
+  botMemorySet: "bot.memorySet",
+  botControl: "bot.control",
+  botAuditList: "bot.auditList",
+  subscribeBotEvents: "bot.subscribe",
 } as const;
 
 // ── Push Event Channels ──────────────────────────────────────────────
 
 export const WS_CHANNELS = {
   automationEvent: "automation.event",
+  botEvent: "bot.event",
   gitActionProgress: "git.actionProgress",
   gitWorktreeSetupProgress: "git.worktreeSetupProgress",
   projectProvisionProgress: "project.provisionProgress",
@@ -448,6 +479,21 @@ const WebSocketRequestBody = Schema.Union([
   tagRequestBody(WS_METHODS.automationArchiveRun, AutomationArchiveRunInput),
   tagRequestBody(WS_METHODS.automationResolveProposal, AutomationResolveProposalInput),
   tagRequestBody(WS_METHODS.subscribeAutomationEvents, Schema.Struct({})),
+
+  // Bot methods
+  tagRequestBody(WS_METHODS.botList, BotListInput),
+  tagRequestBody(WS_METHODS.botCreate, BotCreateInput),
+  tagRequestBody(WS_METHODS.botUpdate, BotUpdateInput),
+  tagRequestBody(WS_METHODS.botDelete, BotDeleteInput),
+  tagRequestBody(WS_METHODS.botTaskCreate, BotTaskCreateInput),
+  tagRequestBody(WS_METHODS.botTaskRun, BotTaskRunInput),
+  tagRequestBody(WS_METHODS.botTaskSetActive, BotTaskSetActiveInput),
+  tagRequestBody(WS_METHODS.botTaskArchive, BotTaskArchiveInput),
+  tagRequestBody(WS_METHODS.botMemoryGet, BotMemoryGetInput),
+  tagRequestBody(WS_METHODS.botMemorySet, BotMemorySetInput),
+  tagRequestBody(WS_METHODS.botControl, BotControlInput),
+  tagRequestBody(WS_METHODS.botAuditList, BotAuditListInput),
+  tagRequestBody(WS_METHODS.subscribeBotEvents, Schema.Struct({})),
 ]);
 
 export const WebSocketRequest = Schema.Struct({
@@ -475,6 +521,7 @@ export const WsWelcomePayload = Schema.Struct({
   homeDir: Schema.optional(TrimmedNonEmptyString),
   chatWorkspaceRoot: Schema.optional(TrimmedNonEmptyString),
   studioWorkspaceRoot: Schema.optional(TrimmedNonEmptyString),
+  botsWorkspaceRoot: Schema.optional(TrimmedNonEmptyString),
   projectName: TrimmedNonEmptyString,
   bootstrapProjectId: Schema.optional(ProjectId),
   bootstrapThreadId: Schema.optional(ThreadId),
@@ -488,6 +535,7 @@ export interface WsPushPayloadByChannel {
   readonly [WS_CHANNELS.serverProviderStatusesUpdated]: typeof ServerProviderStatusesUpdatedPayload.Type;
   readonly [WS_CHANNELS.serverSettingsUpdated]: typeof ServerSettingsUpdatedPayload.Type;
   readonly [WS_CHANNELS.automationEvent]: typeof AutomationStreamEvent.Type;
+  readonly [WS_CHANNELS.botEvent]: typeof BotEvent.Type;
   readonly [WS_CHANNELS.gitActionProgress]: typeof GitActionProgressEvent.Type;
   readonly [WS_CHANNELS.gitWorktreeSetupProgress]: typeof GitWorktreeSetupProgressEvent.Type;
   readonly [WS_CHANNELS.projectProvisionProgress]: typeof GitHubProjectProvisionProgressEvent.Type;
@@ -533,6 +581,7 @@ export const WsPushAutomationEvent = makeWsPushSchema(
   WS_CHANNELS.automationEvent,
   AutomationStreamEvent,
 );
+export const WsPushBotEvent = makeWsPushSchema(WS_CHANNELS.botEvent, BotEvent);
 export const WsPushGitActionProgress = makeWsPushSchema(
   WS_CHANNELS.gitActionProgress,
   GitActionProgressEvent,
@@ -573,6 +622,7 @@ export const WsPushChannelSchema = Schema.Literals([
   WS_CHANNELS.serverProviderStatusesUpdated,
   WS_CHANNELS.serverSettingsUpdated,
   WS_CHANNELS.automationEvent,
+  WS_CHANNELS.botEvent,
   WS_CHANNELS.terminalEvent,
   WS_CHANNELS.projectDevServerEvent,
   ORCHESTRATION_WS_CHANNELS.domainEvent,
@@ -588,6 +638,7 @@ export const WsPush = Schema.Union([
   WsPushServerProviderStatusesUpdated,
   WsPushServerSettingsUpdated,
   WsPushAutomationEvent,
+  WsPushBotEvent,
   WsPushGitActionProgress,
   WsPushGitWorktreeSetupProgress,
   WsPushProjectProvisionProgress,

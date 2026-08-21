@@ -103,6 +103,7 @@ import { ServerConfig } from "../../config.ts";
 import { buildFileAttachmentsPromptBlock } from "../attachmentProjection.ts";
 import { loadClaudeAgentSdk } from "../claudeAgentSdk.ts";
 import { buildClaudeProcessEnv } from "../claudeProcessEnv.ts";
+import { tapesHarnessCommand } from "../../tapesCapture.ts";
 import {
   CLAUDE_CONTEXT_WINDOW_MAX_TOKENS,
   decideClaudeContextUsageWarnings,
@@ -503,7 +504,8 @@ interface ClaudeProcessOwner {
 }
 
 function spawnOwnedClaudeCodeProcess(options: ClaudeSpawnOptions): ClaudeOwnedProcess {
-  const prepared = prepareWindowsSafeProcess(options.command, options.args, {
+  const tapesCommand = tapesHarnessCommand("claude", options.command, options.args);
+  const prepared = prepareWindowsSafeProcess(tapesCommand.command, [...tapesCommand.args], {
     cwd: options.cwd,
     env: options.env,
   });

@@ -7,6 +7,7 @@ export interface ServerLifecycleWelcomePayload {
   readonly homeDir: string;
   readonly chatWorkspaceRoot: string;
   readonly studioWorkspaceRoot: string;
+  readonly botsWorkspaceRoot: string;
   readonly projectName: string;
   readonly bootstrapProjectId?: ProjectId;
   readonly bootstrapThreadId?: ThreadId;

@@ -376,6 +376,23 @@ export const ProviderModelMenuItems = function ProviderModelMenuItems(
 
   return (
     <>
+      {EXTERNAL_HARNESS_CATALOG.map((harness) => (
+        <MenuItem
+          key={harness.id}
+          disabled
+          aria-label={`${harness.name}: ${harness.availabilityLabel}`}
+        >
+          <span
+            className="size-3 shrink-0 rounded-sm border border-muted-foreground/50"
+            aria-hidden="true"
+          />
+          <span>{harness.name}</span>
+          <span className="ms-auto text-[11px] text-muted-foreground/80">
+            {harness.availabilityLabel}
+          </span>
+        </MenuItem>
+      ))}
+      {EXTERNAL_HARNESS_CATALOG.length > 0 && <MenuSeparator />}
       {visibleAvailableProviderOptions.map((option) => {
         const OptionIcon = PROVIDER_ICON_COMPONENT_BY_PROVIDER[option.value];
         const liveProvider = props.providers?.find((entry) => entry.provider === option.value);
@@ -432,23 +449,6 @@ export const ProviderModelMenuItems = function ProviderModelMenuItems(
           </MenuItem>
         );
       })}
-      {EXTERNAL_HARNESS_CATALOG.length > 0 && <MenuSeparator />}
-      {EXTERNAL_HARNESS_CATALOG.map((harness) => (
-        <MenuItem
-          key={harness.id}
-          disabled
-          aria-label={`${harness.name}: ${harness.availabilityLabel}`}
-        >
-          <span
-            className="size-3 shrink-0 rounded-sm border border-muted-foreground/50"
-            aria-hidden="true"
-          />
-          <span>{harness.name}</span>
-          <span className="ms-auto text-[11px] text-muted-foreground/80">
-            {harness.availabilityLabel}
-          </span>
-        </MenuItem>
-      ))}
     </>
   );
 };

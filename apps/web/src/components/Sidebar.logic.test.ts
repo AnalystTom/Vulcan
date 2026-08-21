@@ -43,6 +43,7 @@ import {
   resolveSettingsBackTarget,
   resolveProjectStatusIndicator,
   resolveSidebarNewThreadEnvMode,
+  resolveSidebarSurface,
   resolveThreadHoverCardMetadata,
   resolveThreadRowClassName,
   resolveThreadStatusPill,
@@ -79,11 +80,37 @@ function makeLatestTurn(overrides?: {
   };
 }
 
+describe("resolveSidebarSurface", () => {
+  it("maps each surface's route prefix", () => {
+    expect(resolveSidebarSurface("/")).toBe("threads");
+    expect(resolveSidebarSurface("/settings")).toBe("settings");
+    expect(resolveSidebarSurface("/studio")).toBe("studio");
+    expect(resolveSidebarSurface("/studio/thread-1")).toBe("studio");
+    expect(resolveSidebarSurface("/bots")).toBe("bots");
+    expect(resolveSidebarSurface("/bots/bot-1")).toBe("bots");
+  });
+
+  it("keeps unrelated routes on the threads surface", () => {
+    expect(resolveSidebarSurface("/kanban")).toBe("threads");
+    expect(resolveSidebarSurface("/automations")).toBe("threads");
+    expect(resolveSidebarSurface("/pull-requests")).toBe("threads");
+    expect(resolveSidebarSurface("/thread-1")).toBe("threads");
+  });
+
+  it("treats settings as an exact route so nested paths are not swallowed", () => {
+    expect(resolveSidebarSurface("/settings/usage")).toBe("threads");
+  });
+});
+
 describe("isProjectsSidebarSurface", () => {
   it("enables Space shortcuts only where the Space switcher is visible", () => {
-    expect(isProjectsSidebarSurface({ isOnSettings: false, isOnStudio: false })).toBe(true);
-    expect(isProjectsSidebarSurface({ isOnSettings: false, isOnStudio: true })).toBe(false);
-    expect(isProjectsSidebarSurface({ isOnSettings: true, isOnStudio: false })).toBe(false);
+    expect(isProjectsSidebarSurface("threads")).toBe(true);
+    expect(isProjectsSidebarSurface("studio")).toBe(false);
+    expect(isProjectsSidebarSurface("settings")).toBe(false);
+  });
+
+  it("excludes bots so it never inherits the projects-only sections", () => {
+    expect(isProjectsSidebarSurface("bots")).toBe(false);
   });
 });
 

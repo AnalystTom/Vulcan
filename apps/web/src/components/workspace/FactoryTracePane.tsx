@@ -32,6 +32,31 @@ import { FactoryTraceStrip } from "./factoryTrace/FactoryTraceStrip";
 
 /** Their polling default is 500ms; a pane in a grid of nine settles for less. */
 const REFRESH_INTERVAL_MS = 1_000;
+/** Aggregate views draw many sessions at once instead of naming one. */
+const ALL_AGENTS_VALUE = "__all_agents__";
+const RUNNING_AGENTS_VALUE = "__running_agents__";
+
+const isAggregateView = (value: string | null): value is string =>
+  value === ALL_AGENTS_VALUE || value === RUNNING_AGENTS_VALUE;
+
+/**
+ * The sessions an aggregate view spans, in listing order.
+ *
+ * "Running" is the live cut an operator watching a busy workspace actually
+ * wants: every agent working right now, and nothing that already finished.
+ */
+function aggregateAdwIds(value: string, sessions: readonly TraceSessionSummary[]): string[] {
+  const included =
+    value === RUNNING_AGENTS_VALUE
+      ? sessions.filter((summary) => summary.session.status === "running")
+      : sessions;
+  return included.map((summary) => summary.session.adwId);
+}
+
+interface SelectedPhase {
+  readonly adwId: string;
+  readonly phaseId: string;
+}
 
 export interface FactoryTracePaneProps {
   readonly isVisible: boolean;
@@ -43,8 +68,10 @@ export function FactoryTracePane({ isVisible, threadId }: FactoryTracePaneProps)
   const [status, setStatus] = useState<TraceSourceStatus | null>(null);
   const [sessions, setSessions] = useState<readonly TraceSessionSummary[]>([]);
   const [selectedAdwId, setSelectedAdwId] = useState<string | null>(null);
-  const [detail, setDetail] = useState<TraceSessionDetail | null>(null);
-  const [selectedPhaseId, setSelectedPhaseId] = useState<string | null>(null);
+  const [detailsByAdwId, setDetailsByAdwId] = useState<ReadonlyMap<string, TraceSessionDetail>>(
+    new Map(),
+  );
+  const [selectedPhase, setSelectedPhase] = useState<SelectedPhase | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   /**
@@ -54,54 +81,65 @@ export function FactoryTracePane({ isVisible, threadId }: FactoryTracePaneProps)
    * record where it got to, and because appending is the whole point: the trace
    * is insertion-ordered and immutable, so a page is never re-fetched.
    */
-  const eventsRef = useRef<{ adwId: string | null; cursor: number; events: TraceEvent[] }>({
-    adwId: null,
-    cursor: 0,
-    events: [],
-  });
+  const eventsRef = useRef(new Map<string, { cursor: number; events: TraceEvent[] }>());
 
   const refresh = useCallback(async () => {
     try {
       const api = ensureNativeApi();
-      const nextStatus = await api.factoryTrace.status({ threadId: threadId as never });
+      const nextStatus = await api.factoryTrace.status({
+        threadId: threadId as never,
+      });
       setStatus(nextStatus);
       setError(null);
       if (nextStatus.state !== "ready") {
         setSessions([]);
-        setDetail(null);
+        setDetailsByAdwId(new Map());
         return;
       }
 
-      const summaries = await api.factoryTrace.listSessions({ threadId: threadId as never });
+      const summaries = await api.factoryTrace.listSessions({
+        threadId: threadId as never,
+      });
       setSessions(summaries);
 
-      const adwId = selectedAdwId ?? summaries[0]?.session.adwId ?? null;
-      if (adwId !== selectedAdwId) setSelectedAdwId(adwId);
-      if (adwId === null) {
-        setDetail(null);
+      const fallbackAdwId = summaries[0]?.session.adwId ?? null;
+      const hasSelectedSession = summaries.some(
+        (summary) => summary.session.adwId === selectedAdwId,
+      );
+      const nextSelectedAdwId =
+        isAggregateView(selectedAdwId) || hasSelectedSession ? selectedAdwId : fallbackAdwId;
+      if (nextSelectedAdwId !== selectedAdwId) setSelectedAdwId(nextSelectedAdwId);
+
+      if (nextSelectedAdwId === null) {
+        setDetailsByAdwId(new Map());
         return;
       }
 
-      // A different session means a different event stream; the cursor cannot
-      // carry over or the new session would start mid-history.
-      if (eventsRef.current.adwId !== adwId) {
-        eventsRef.current = { adwId, cursor: 0, events: [] };
-      }
-      const next = await api.factoryTrace.readSession({
-        threadId: threadId as never,
-        adwId: adwId as AdwId,
-        after: eventsRef.current.cursor,
-      });
-      if (next === null) {
-        setDetail(null);
-        return;
-      }
-      eventsRef.current = {
-        adwId,
-        cursor: next.cursor,
-        events: [...eventsRef.current.events, ...next.events],
-      };
-      setDetail({ ...next, events: eventsRef.current.events });
+      const adwIds = isAggregateView(nextSelectedAdwId)
+        ? aggregateAdwIds(nextSelectedAdwId, summaries)
+        : [nextSelectedAdwId];
+      const nextDetails = await Promise.all(
+        adwIds.map(async (adwId) => {
+          const existing = eventsRef.current.get(adwId) ?? {
+            cursor: 0,
+            events: [],
+          };
+          const next = await api.factoryTrace.readSession({
+            threadId: threadId as never,
+            adwId: adwId as AdwId,
+            after: existing.cursor,
+          });
+          if (next === null) return null;
+          const events = [...existing.events, ...next.events];
+          eventsRef.current.set(adwId, { cursor: next.cursor, events });
+          return [adwId, { ...next, events }] as const;
+        }),
+      );
+      setDetailsByAdwId(
+        new Map(
+          nextDetails.filter((detail): detail is NonNullable<typeof detail> => detail !== null),
+        ),
+      );
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not read the factory trace.");
     }
@@ -116,24 +154,21 @@ export function FactoryTracePane({ isVisible, threadId }: FactoryTracePaneProps)
     return () => window.clearInterval(timer);
   }, [isVisible, refresh]);
 
-  const lanesInput = useMemo(
-    () =>
-      detail === null
-        ? null
-        : {
-            phases: detail.phases,
-            agents: detail.agents,
-            events: detail.events,
-            sessionStartedAt: detail.session.startedAt,
-            sessionEndedAt: detail.session.endedAt,
-          },
-    [detail],
+  const runningCount = useMemo(
+    () => sessions.filter((summary) => summary.session.status === "running").length,
+    [sessions],
   );
 
-  const selectedPhase = useMemo(
-    () => detail?.phases.find((phase) => phase.phaseId === selectedPhaseId) ?? null,
-    [detail, selectedPhaseId],
-  );
+  const visibleDetails = useMemo(() => {
+    if (isAggregateView(selectedAdwId)) {
+      return aggregateAdwIds(selectedAdwId, sessions).flatMap((adwId) => {
+        const detail = detailsByAdwId.get(adwId);
+        return detail ? [detail] : [];
+      });
+    }
+    const detail = selectedAdwId ? detailsByAdwId.get(selectedAdwId) : null;
+    return detail ? [detail] : [];
+  }, [detailsByAdwId, selectedAdwId, sessions]);
 
   if (error) return <PaneMessage>{error}</PaneMessage>;
   if (status === null) return <PaneMessage>Looking for a factory trace…</PaneMessage>;
@@ -159,10 +194,15 @@ export function FactoryTracePane({ isVisible, threadId }: FactoryTracePaneProps)
           onChange={(event) => {
             setSelectedAdwId(event.target.value);
             // The selection names a phase in the session being left.
-            setSelectedPhaseId(null);
-            setDetail(null);
+            setSelectedPhase(null);
           }}
         >
+          <option value={ALL_AGENTS_VALUE}>All agents — {sessions.length} sessions</option>
+          {/* Keep the option while it is the active view, so a run finishing
+              out of the last agent does not leave the select blank. */}
+          {runningCount > 0 || selectedAdwId === RUNNING_AGENTS_VALUE ? (
+            <option value={RUNNING_AGENTS_VALUE}>Running now — {runningCount} active</option>
+          ) : null}
           {sessions.map((summary) => {
             const progress = countPhaseProgress(summary.phases);
             return (
@@ -178,39 +218,91 @@ export function FactoryTracePane({ isVisible, threadId }: FactoryTracePaneProps)
         </Button>
       </div>
 
-      {detail && lanesInput ? (
+      {visibleDetails.length > 0 ? (
         <div className="flex min-h-0 flex-1 flex-col">
-          <FactoryTraceStrip
-            session={detail.session}
-            usage={detail.usage}
-            phaseProgress={countPhaseProgress(detail.phases)}
-          />
-
-          <div className="min-h-0 flex-1 overflow-auto p-2">
-            <FactoryTraceLanes
-              input={lanesInput}
-              isLive={detail.session.status === "running"}
-              selectedPhaseId={selectedPhaseId}
-              onSelectPhase={setSelectedPhaseId}
-            />
-          </div>
-
-          {selectedPhase ? (
-            <div className="max-h-[45%] shrink-0 overflow-auto">
-              <FactoryPhaseDetail
-                phase={selectedPhase}
-                events={detail.events}
-                envelopes={detail.envelopes}
-                gates={detail.gates}
-                onClose={() => setSelectedPhaseId(null)}
+          <div
+            className={
+              isAggregateView(selectedAdwId)
+                ? "grid min-h-0 flex-1 grid-cols-1 gap-2 overflow-auto p-2 xl:grid-cols-2"
+                : "min-h-0 flex-1 overflow-auto"
+            }
+          >
+            {visibleDetails.map((detail) => (
+              <FactorySessionTrace
+                key={detail.session.adwId}
+                detail={detail}
+                selectedPhaseId={
+                  selectedPhase?.adwId === detail.session.adwId ? selectedPhase.phaseId : null
+                }
+                onSelectPhase={(phaseId) =>
+                  setSelectedPhase(
+                    phaseId === null ? null : { adwId: detail.session.adwId, phaseId },
+                  )
+                }
+                onClosePhase={() => setSelectedPhase(null)}
               />
-            </div>
-          ) : null}
+            ))}
+          </div>
         </div>
+      ) : selectedAdwId === RUNNING_AGENTS_VALUE ? (
+        <PaneMessage>No agents are running right now.</PaneMessage>
       ) : (
         <PaneMessage>Loading session…</PaneMessage>
       )}
     </div>
+  );
+}
+
+function FactorySessionTrace({
+  detail,
+  selectedPhaseId,
+  onSelectPhase,
+  onClosePhase,
+}: {
+  readonly detail: TraceSessionDetail;
+  readonly selectedPhaseId: string | null;
+  readonly onSelectPhase: (phaseId: string | null) => void;
+  readonly onClosePhase: () => void;
+}) {
+  const lanesInput = useMemo(
+    () => ({
+      phases: detail.phases,
+      agents: detail.agents,
+      events: detail.events,
+      sessionStartedAt: detail.session.startedAt,
+      sessionEndedAt: detail.session.endedAt,
+    }),
+    [detail],
+  );
+  const selectedPhase = detail.phases.find((phase) => phase.phaseId === selectedPhaseId) ?? null;
+
+  return (
+    <section className="flex min-h-0 flex-col overflow-hidden border border-border bg-background">
+      <FactoryTraceStrip
+        session={detail.session}
+        usage={detail.usage}
+        phaseProgress={countPhaseProgress(detail.phases)}
+      />
+      <div className="min-h-0 flex-1 overflow-auto p-2">
+        <FactoryTraceLanes
+          input={lanesInput}
+          isLive={detail.session.status === "running"}
+          selectedPhaseId={selectedPhaseId}
+          onSelectPhase={onSelectPhase}
+        />
+      </div>
+      {selectedPhase ? (
+        <div className="max-h-[45%] shrink-0 overflow-auto">
+          <FactoryPhaseDetail
+            phase={selectedPhase}
+            events={detail.events}
+            envelopes={detail.envelopes}
+            gates={detail.gates}
+            onClose={onClosePhase}
+          />
+        </div>
+      ) : null}
+    </section>
   );
 }
 

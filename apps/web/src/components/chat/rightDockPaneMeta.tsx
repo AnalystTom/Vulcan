@@ -45,6 +45,7 @@ export const RIGHT_DOCK_PANE_META: Record<RightDockPaneKind, RightDockPaneMeta> 
   git: { label: "Git", Icon: GitCommitIcon },
   pullRequest: { label: "Pull request", Icon: GitPullRequestIcon },
   factory: { label: "Factory", Icon: WorkflowIcon },
+  trace: { label: "Agent traces", Icon: WorkflowIcon },
 };
 
 // Neutral fallback for any pane kind we no longer recognize (e.g. stale
@@ -82,6 +83,7 @@ const RIGHT_DOCK_LAUNCHER_ORDER: readonly RightDockPaneKind[] = [
   "sidechat",
   "git",
   "factory",
+  "trace",
 ];
 
 const RIGHT_DOCK_LAUNCHER_LABELS: Partial<Record<RightDockPaneKind, string>> = {
