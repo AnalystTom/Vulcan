@@ -1,11 +1,21 @@
 import {
+  botAvatarKey,
+  resolveBotAutonomy,
+  resolveBotCapabilityGrants,
+  resolveBotIsolationMode,
+} from "~/lib/botDefaults";
+import {
+  DEFAULT_BOT_AVATAR,
   type Bot,
+  type BotAvatar,
+  type BotIsolationMode,
   type BotCapability as BotCapabilityType,
   type BotUpdateInput,
 } from "@vulcan/contracts";
 import { useState } from "react";
 
 import { useAppSettings } from "~/appSettings";
+import { BotAvatarPicker } from "~/components/bots/BotAvatarPicker";
 import { ProviderModelPicker } from "~/components/chat/ProviderModelPicker";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
@@ -38,13 +48,15 @@ export function BotSettingsForm({
   const [name, setName] = useState(bot.name);
   const [title, setTitle] = useState(bot.title);
   const [description, setDescription] = useState(bot.description);
+  const [avatar, setAvatar] = useState<BotAvatar>(bot.avatar);
   const [modelSelection, setModelSelection] = useState(bot.modelSelection);
   const [chiefOfStaff, setChiefOfStaff] = useState(bot.chiefOfStaff);
-  const [isolationMode, setIsolationMode] = useState(bot.isolationMode);
-  const [autonomyEnabled, setAutonomyEnabled] = useState(bot.autonomy.enabled);
-  const [capabilityGrants, setCapabilityGrants] = useState<ReadonlyArray<BotCapabilityType>>(
-    bot.capabilityGrants,
-  );
+  const botAutonomy = resolveBotAutonomy(bot);
+  const botCapabilityGrants = resolveBotCapabilityGrants(bot);
+  const [isolationMode, setIsolationMode] = useState(() => resolveBotIsolationMode(bot));
+  const [autonomyEnabled, setAutonomyEnabled] = useState(botAutonomy.enabled);
+  const [capabilityGrants, setCapabilityGrants] =
+    useState<ReadonlyArray<BotCapabilityType>>(botCapabilityGrants);
   const statuses = useProviderStatusesForLocalConfig();
   const catalog = useProviderModelCatalog({
     selectedProvider: modelSelection.provider,
@@ -56,12 +68,13 @@ export function BotSettingsForm({
     name.trim() !== bot.name ||
     title.trim() !== bot.title ||
     description.trim() !== bot.description ||
+    botAvatarKey(avatar) !== botAvatarKey(bot.avatar) ||
     modelSelection.provider !== bot.modelSelection.provider ||
     modelSelection.model !== bot.modelSelection.model ||
     chiefOfStaff !== bot.chiefOfStaff ||
-    isolationMode !== bot.isolationMode ||
-    autonomyEnabled !== bot.autonomy.enabled ||
-    capabilityGrants.join("|") !== bot.capabilityGrants.join("|");
+    isolationMode !== resolveBotIsolationMode(bot) ||
+    autonomyEnabled !== botAutonomy.enabled ||
+    capabilityGrants.join("|") !== botCapabilityGrants.join("|");
 
   const capabilityLabels: Record<BotCapabilityType, string> = {
     "thread.read": "Read Vulcan threads",
@@ -96,6 +109,20 @@ export function BotSettingsForm({
         About
         <Textarea value={description} onChange={(event) => setDescription(event.target.value)} />
       </label>
+      <div className="space-y-3 rounded-xl border border-border p-4">
+        <div>
+          <h3 className="text-xs font-medium">Appearance</h3>
+          <p className="text-xs text-muted-foreground">
+            How this agent shows up in the roster, sidebar, and trace lanes.
+          </p>
+        </div>
+        <BotAvatarPicker
+          avatar={avatar}
+          name={name}
+          onChange={setAvatar}
+          onReset={() => setAvatar(DEFAULT_BOT_AVATAR)}
+        />
+      </div>
       <div className="space-y-1">
         <p className="text-xs font-medium">Model</p>
         <ProviderModelPicker
@@ -124,7 +151,7 @@ export function BotSettingsForm({
           <select
             className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
             value={isolationMode}
-            onChange={(event) => setIsolationMode(event.target.value as Bot["isolationMode"])}
+            onChange={(event) => setIsolationMode(event.target.value as BotIsolationMode)}
           >
             <option value="worktree">Managed Git worktree</option>
             <option value="workspace">Private bot workspace only</option>
@@ -179,10 +206,11 @@ export function BotSettingsForm({
               name: name.trim(),
               title: title.trim(),
               description: description.trim(),
+              avatar,
               modelSelection,
               chiefOfStaff,
               isolationMode,
-              autonomy: { ...bot.autonomy, enabled: autonomyEnabled },
+              autonomy: { ...botAutonomy, enabled: autonomyEnabled },
               capabilityGrants: [...capabilityGrants],
             })
           }

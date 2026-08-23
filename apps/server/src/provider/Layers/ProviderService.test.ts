@@ -1517,6 +1517,70 @@ routing.layer("ProviderServiceLive routing", (it) => {
     }).pipe(Effect.timeout("2 seconds")),
   );
 
+  it.effect("rotates a retired gateway session after a terminal runtime error", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const directory = yield* ProviderSessionDirectory;
+      const threadId = asThreadId("thread-proactive-error-gateway-rotation");
+      const turnId = asTurnId(`turn-${threadId}`);
+
+      yield* provider.startSession(threadId, {
+        provider: "codex",
+        threadId,
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+      });
+      const initialBinding = Option.getOrUndefined(yield* directory.getBinding(threadId));
+      const lifecycleGeneration = initialBinding?.lifecycleGeneration;
+      assert.equal(typeof lifecycleGeneration, "string");
+      yield* routing.codex.waitForRuntimeSubscribers();
+      yield* provider.sendTurn({ threadId, input: "turn A", attachments: [] });
+
+      const startsBeforeRotation = routing.codex.startSession.mock.calls.length;
+      const stopsBeforeRotation = routing.codex.stopSession.mock.calls.length;
+      routing.codex.emit({
+        type: "runtime.error",
+        eventId: asEventId("proactive-error-rotation-turn-a-failed"),
+        provider: "codex",
+        createdAt: "2026-08-22T12:00:01.000Z",
+        threadId,
+        turnId,
+        payload: { message: "Codex turn failed", class: "provider_error" },
+        raw: {
+          source: "codex.app-server.notification",
+          method: "error",
+          payload: { [AGENT_GATEWAY_TURN_AUTHORITY_RETIRED]: true },
+        },
+      });
+
+      yield* waitUntilEffect(
+        () =>
+          directory.getBinding(threadId).pipe(
+            Effect.map((binding) => {
+              const current = Option.getOrUndefined(binding);
+              return (
+                routing.codex.stopSession.mock.calls.length === stopsBeforeRotation + 1 &&
+                routing.codex.startSession.mock.calls.length === startsBeforeRotation + 1 &&
+                asRuntimePayloadRecord(current?.runtimePayload)
+                  .agentGatewayCredentialRotationRequired === false
+              );
+            }),
+          ),
+        500,
+        20,
+        "proactive terminal-error credential rotation",
+      );
+
+      const startsBeforeTurnB = routing.codex.startSession.mock.calls.length;
+      const sendsBeforeTurnB = routing.codex.sendTurn.mock.calls.length;
+      yield* provider.sendTurn({ threadId, input: "turn B", attachments: [] });
+      assert.equal(routing.codex.startSession.mock.calls.length, startsBeforeTurnB);
+      assert.equal(routing.codex.sendTurn.mock.calls.length, sendsBeforeTurnB + 1);
+
+      yield* provider.stopSession({ threadId });
+    }).pipe(Effect.timeout("2 seconds")),
+  );
+
   it.effect(
     "fences a next turn before a targeted child interrupt acquires lifecycle ownership",
     () =>

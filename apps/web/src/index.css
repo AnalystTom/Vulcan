@@ -1,5 +1,10 @@
 @import "tailwindcss";
 
+/* Bot avatar tints live beside the hex swatches the server writes into traces
+   (`@vulcan/shared/botAppearance`), so Tailwind has to look outside this app to
+   find those class names. */
+@source "../../../packages/shared/src/botAppearance.ts";
+
 @custom-variant dark (&:is(.dark, .dark *));
 
 @theme inline {

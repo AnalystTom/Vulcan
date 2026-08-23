@@ -1,13 +1,11 @@
-import {
-  ProjectId,
-  type Bot,
-  type BotTask,
-  type OrchestrationProjectShell,
-} from "@vulcan/contracts";
+import type { Project } from "~/types";
+import { ProjectId, type Bot, type BotTask, type BotTaskId } from "@vulcan/contracts";
 import { useState } from "react";
 
 import { Button } from "~/components/ui/button";
+import { IconButton } from "~/components/ui/icon-button";
 import { Input } from "~/components/ui/input";
+import { ArchiveIcon } from "~/lib/icons";
 
 export function BotTaskList({
   bot,
@@ -15,14 +13,19 @@ export function BotTaskList({
   projects,
   onCreate,
   onOpen,
+  onArchive,
   creating,
+  archivingTaskId,
 }: {
   bot: Bot;
   tasks: readonly BotTask[];
-  projects: readonly OrchestrationProjectShell[];
+  projects: readonly Project[];
   onCreate: (title: string, pinnedProjectId: ProjectId | null) => Promise<void>;
   onOpen: (task: BotTask) => void;
+  onArchive: (task: BotTask) => void;
   creating: boolean;
+  /** The task currently being archived, so only its own row goes busy. */
+  archivingTaskId: BotTaskId | null;
 }) {
   const [title, setTitle] = useState("");
   const [pinnedProjectId, setPinnedProjectId] = useState<ProjectId | null>(
@@ -62,7 +65,7 @@ export function BotTaskList({
           <option value="">Private bot workspace</option>
           {availableProjects.map((project) => (
             <option key={project.id} value={project.id}>
-              {project.title} · isolated worktree
+              {project.name} · isolated worktree
             </option>
           ))}
         </select>
@@ -75,19 +78,29 @@ export function BotTaskList({
           <p className="p-4 text-sm text-muted-foreground">No tasks yet.</p>
         ) : (
           activeTasks.map((task) => (
-            <button
-              key={task.id}
-              type="button"
-              className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-muted/50"
-              onClick={() => onOpen(task)}
-            >
-              <span className="min-w-0 flex-1 truncate text-sm font-medium">{task.title}</span>
-              {task.id === bot.activeTaskId ? (
-                <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
-                  Active
-                </span>
-              ) : null}
-            </button>
+            <div key={task.id} className="group flex items-center gap-2 pr-2 hover:bg-muted/50">
+              <button
+                type="button"
+                className="flex min-w-0 flex-1 items-center gap-3 px-4 py-3 text-left"
+                onClick={() => onOpen(task)}
+              >
+                <span className="min-w-0 flex-1 truncate text-sm font-medium">{task.title}</span>
+                {task.id === bot.activeTaskId ? (
+                  <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                    Active
+                  </span>
+                ) : null}
+              </button>
+              <IconButton
+                size="icon-sm"
+                label={`Archive ${task.title}`}
+                tooltip="Archive task"
+                disabled={archivingTaskId === task.id}
+                onClick={() => onArchive(task)}
+              >
+                <ArchiveIcon />
+              </IconButton>
+            </div>
           ))
         )}
       </div>

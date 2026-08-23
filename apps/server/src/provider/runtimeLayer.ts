@@ -23,6 +23,7 @@ import { makeDurableProviderServiceLive } from "./Layers/ProviderService";
 import { ProviderSessionDirectoryLive } from "./Layers/ProviderSessionDirectory";
 import { ProviderSessionRuntimeRepositoryLive } from "../persistence/Layers/ProviderSessionRuntime";
 import { ProviderRuntimeEventRepositoryLive } from "../persistence/Layers/ProviderRuntimeEvents";
+import { BotRepositoryLive } from "../persistence/Layers/BotRepository";
 
 export function makeServerProviderLayer(
   options: {
@@ -53,7 +54,7 @@ export function makeServerProviderLayer(
       options.agentGatewayCredentialsLayer ?? AgentGatewayCredentialsWithSecretsLive;
     const codexAdapterLayer = makeCodexAdapterLive(
       nativeEventLogger ? { nativeEventLogger } : undefined,
-    ).pipe(Layer.provide(agentGatewayCredentialsLayer));
+    ).pipe(Layer.provide(agentGatewayCredentialsLayer), Layer.provide(BotRepositoryLive));
     const claudeAdapterLayer = makeClaudeAdapterLive(
       nativeEventLogger ? { nativeEventLogger } : undefined,
     ).pipe(Layer.provide(agentGatewayCredentialsLayer));

@@ -25,10 +25,16 @@ import {
 import {
   BotAuditListInput,
   BotAuditListResult,
+  BotCommsChannelListInput,
+  BotCommsChannelListResult,
+  BotCommsMessageListInput,
+  BotCommsMessageListResult,
   BotControlInput,
   BotControlResult,
   BotCreateInput,
   BotCreateResult,
+  BotDelegationListInput,
+  BotDelegationListResult,
   BotDeleteInput,
   BotDeleteResult,
   BotEvent,
@@ -38,6 +44,12 @@ import {
   BotMemoryGetResult,
   BotMemorySetInput,
   BotMemorySetResult,
+  BotMemoryTopicGetInput,
+  BotMemoryTopicGetResult,
+  BotMemoryTopicListInput,
+  BotMemoryTopicListResult,
+  BotPeerApprovalRespondInput,
+  BotPeerApprovalRespondResult,
   BotTaskArchiveInput,
   BotTaskArchiveResult,
   BotTaskCreateInput,
@@ -1179,6 +1191,18 @@ export const WsBotMemorySetRpc = Rpc.make(WS_METHODS.botMemorySet, {
   error: WsRpcError,
 });
 
+export const WsBotMemoryTopicListRpc = Rpc.make(WS_METHODS.botMemoryTopicList, {
+  payload: BotMemoryTopicListInput,
+  success: BotMemoryTopicListResult,
+  error: WsRpcError,
+});
+
+export const WsBotMemoryTopicGetRpc = Rpc.make(WS_METHODS.botMemoryTopicGet, {
+  payload: BotMemoryTopicGetInput,
+  success: BotMemoryTopicGetResult,
+  error: WsRpcError,
+});
+
 export const WsBotControlRpc = Rpc.make(WS_METHODS.botControl, {
   payload: BotControlInput,
   success: BotControlResult,
@@ -1188,6 +1212,30 @@ export const WsBotControlRpc = Rpc.make(WS_METHODS.botControl, {
 export const WsBotAuditListRpc = Rpc.make(WS_METHODS.botAuditList, {
   payload: BotAuditListInput,
   success: BotAuditListResult,
+  error: WsRpcError,
+});
+
+export const WsBotCommsChannelListRpc = Rpc.make(WS_METHODS.botCommsChannelList, {
+  payload: BotCommsChannelListInput,
+  success: BotCommsChannelListResult,
+  error: WsRpcError,
+});
+
+export const WsBotCommsMessageListRpc = Rpc.make(WS_METHODS.botCommsMessageList, {
+  payload: BotCommsMessageListInput,
+  success: BotCommsMessageListResult,
+  error: WsRpcError,
+});
+
+export const WsBotDelegationListRpc = Rpc.make(WS_METHODS.botDelegationList, {
+  payload: BotDelegationListInput,
+  success: BotDelegationListResult,
+  error: WsRpcError,
+});
+
+export const WsBotPeerApprovalRespondRpc = Rpc.make(WS_METHODS.botPeerApprovalRespond, {
+  payload: BotPeerApprovalRespondInput,
+  success: BotPeerApprovalRespondResult,
   error: WsRpcError,
 });
 
@@ -1337,8 +1385,14 @@ export const WsFeatureRpcGroup = RpcGroup.make(
   WsBotTaskArchiveRpc,
   WsBotMemoryGetRpc,
   WsBotMemorySetRpc,
+  WsBotMemoryTopicListRpc,
+  WsBotMemoryTopicGetRpc,
   WsBotControlRpc,
   WsBotAuditListRpc,
+  WsBotCommsChannelListRpc,
+  WsBotCommsMessageListRpc,
+  WsBotDelegationListRpc,
+  WsBotPeerApprovalRespondRpc,
   WsSubscribeBotEventsRpc,
 );
 

@@ -53,9 +53,7 @@ export function reduceBotEvent(current: BotListResult, event: BotEvent): BotList
         runtimeStates:
           existing < 0
             ? [...runtimeStates, event.state]
-            : runtimeStates.map((state, index) =>
-                index === existing ? event.state : state,
-              ),
+            : runtimeStates.map((state, index) => (index === existing ? event.state : state)),
       };
     }
     case "audit.appended":

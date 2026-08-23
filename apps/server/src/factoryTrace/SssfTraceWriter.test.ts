@@ -18,6 +18,7 @@ import { TraceWorkspaces } from "./Services/TraceWorkspaces.ts";
 import { traceAdwId } from "./traceMapping.ts";
 import { writeTraceFixture } from "./traceFixture.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { BotRepository } from "../persistence/Services/BotRepository.ts";
 import { ProviderService } from "../provider/Services/ProviderService.ts";
 
 const workspaces: string[] = [];
@@ -27,7 +28,11 @@ const makeWorkspace = () => {
   return workspace;
 };
 
+/** Threads that belong to a bot, keyed the way this suite keys threads: by workspace. */
+const botsByThread = new Map<string, { name: string; avatar: { color: string } }>();
+
 afterEach(() => {
+  botsByThread.clear();
   for (const workspace of workspaces.splice(0)) rmSync(workspace, { recursive: true, force: true });
 });
 
@@ -47,6 +52,12 @@ const projections = Layer.succeed(ProjectionSnapshotQuery, {
 const provider = Layer.succeed(ProviderService, {
   streamEvents: Stream.empty,
 } as unknown as ProviderService["Service"]);
+const botRepository = Layer.succeed(BotRepository, {
+  getBotByThreadId: ({ threadId }: { threadId: string }) => {
+    const bot = botsByThread.get(String(threadId));
+    return Effect.succeed(bot === undefined ? Option.none() : Option.some(bot));
+  },
+} as unknown as BotRepository["Service"]);
 
 const live = Layer.mergeAll(
   SssfTraceSourceLive.pipe(Layer.provideMerge(fixedWorkspaces)),
@@ -54,6 +65,7 @@ const live = Layer.mergeAll(
     Layer.provideMerge(fixedWorkspaces),
     Layer.provideMerge(projections),
     Layer.provideMerge(provider),
+    Layer.provideMerge(botRepository),
   ),
 );
 
@@ -72,7 +84,9 @@ const writeTurn = (writer: FactoryTraceWriter["Service"], threadId: string) =>
     yield* writer.append(
       runtimeEvent(threadId, {
         type: "session.configured",
-        payload: { config: { model: "gpt-5.6", sessionId: "provider-session-1" } },
+        payload: {
+          config: { model: "gpt-5.6", sessionId: "provider-session-1" },
+        },
       }),
     );
     yield* writer.append(
@@ -87,7 +101,13 @@ const writeTurn = (writer: FactoryTraceWriter["Service"], threadId: string) =>
       runtimeEvent(threadId, {
         type: "thread.token-usage.updated",
         eventId: "usage",
-        payload: { usage: { usedTokens: 400, maxTokens: 2_000, totalProcessedTokens: 900 } },
+        payload: {
+          usage: {
+            usedTokens: 400,
+            maxTokens: 2_000,
+            totalProcessedTokens: 900,
+          },
+        },
       }),
     );
     yield* writer.append(
@@ -96,7 +116,11 @@ const writeTurn = (writer: FactoryTraceWriter["Service"], threadId: string) =>
         eventId: "tool",
         turnId: "turn-1",
         itemId: "tool-1",
-        payload: { itemType: "command_execution", title: "Run tests", detail: "All passed" },
+        payload: {
+          itemType: "command_execution",
+          title: "Run tests",
+          detail: "All passed",
+        },
       }),
     );
     yield* writer.append(
@@ -105,7 +129,10 @@ const writeTurn = (writer: FactoryTraceWriter["Service"], threadId: string) =>
         eventId: "complete",
         turnId: "turn-1",
         createdAt: "2026-08-12T10:01:00.000Z",
-        payload: { state: "completed", usage: { input_tokens: 120, output_tokens: 30 } },
+        payload: {
+          state: "completed",
+          usage: { input_tokens: 120, output_tokens: 30 },
+        },
       }),
     );
   });
@@ -160,7 +187,9 @@ describe("SssfTraceWriter", () => {
 
   it("appends to an older schema without optional columns", async () => {
     const workspace = makeWorkspace();
-    await writeTraceFixture(join(workspace, "adws/adw_data/sssf.db"), { legacy: true });
+    await writeTraceFixture(join(workspace, "adws/adw_data/sssf.db"), {
+      legacy: true,
+    });
     const runtime = ManagedRuntime.make(live);
     try {
       const writer = await runtime.runPromise(Effect.service(FactoryTraceWriter));
@@ -170,7 +199,64 @@ describe("SssfTraceWriter", () => {
         source.listSessions({ threadId: ThreadId.makeUnsafe(workspace) }),
       );
       expect(sessions).toHaveLength(1);
-      expect(sessions[0]?.agents[0]).toMatchObject({ codingAgent: "codex", color: null });
+      expect(sessions[0]?.agents[0]).toMatchObject({
+        codingAgent: "codex",
+        color: null,
+      });
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("names a bot task's lane after the bot and colours it from the avatar", async () => {
+    const workspace = makeWorkspace();
+    botsByThread.set(workspace, { name: "Ada", avatar: { color: "purple" } });
+    const runtime = ManagedRuntime.make(live);
+    try {
+      const writer = await runtime.runPromise(Effect.service(FactoryTraceWriter));
+      await runtime.runPromise(writeTurn(writer, workspace));
+      const source = await runtime.runPromise(Effect.service(FactoryTraceSource));
+      const detail = await runtime.runPromise(
+        source.readSession({
+          threadId: ThreadId.makeUnsafe(workspace),
+          adwId: AdwId.makeUnsafe(traceAdwId(workspace)),
+        }),
+      );
+
+      expect(detail?.phases[0]).toMatchObject({ kind: "agent", owner: "Ada" });
+      expect(detail?.agents).toHaveLength(1);
+      expect(detail?.agents[0]).toMatchObject({
+        agent: "Ada",
+        displayName: "Ada",
+        // The provider still shows: a coworker is who worked, not what ran it.
+        codingAgent: "codex",
+        model: "gpt-5.6",
+        color: "#a855f7",
+      });
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("adds the display name column to a trace written before it existed", async () => {
+    const workspace = makeWorkspace();
+    botsByThread.set(workspace, { name: "Ada", avatar: { color: "teal" } });
+    await writeTraceFixture(join(workspace, "adws/adw_data/sssf.db"), {
+      legacy: true,
+    });
+    const runtime = ManagedRuntime.make(live);
+    try {
+      const writer = await runtime.runPromise(Effect.service(FactoryTraceWriter));
+      await runtime.runPromise(writeTurn(writer, workspace));
+      const source = await runtime.runPromise(Effect.service(FactoryTraceSource));
+      const sessions = await runtime.runPromise(
+        source.listSessions({ threadId: ThreadId.makeUnsafe(workspace) }),
+      );
+      // The column is added by ALTER; the ones that schema never had stay absent.
+      expect(sessions[0]?.agents[0]).toMatchObject({
+        displayName: "Ada",
+        color: null,
+      });
     } finally {
       await runtime.dispose();
     }

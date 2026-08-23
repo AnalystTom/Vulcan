@@ -91,15 +91,17 @@ describe("provisionBotTaskEnvironment", () => {
 
   it("fails closed when project worktree isolation is impossible", async () => {
     const error = await Effect.runPromise(
-      Effect.flip(provisionBotTaskEnvironment({
-        bot,
-        pinnedProject: project,
-        workspaceDir: "/bots/bot-1",
-        git: {
-          statusDetails: () => Effect.succeed({ isRepo: false }),
-          createDetachedWorktree: vi.fn(),
-        } as never,
-      })),
+      Effect.flip(
+        provisionBotTaskEnvironment({
+          bot,
+          pinnedProject: project,
+          workspaceDir: "/bots/bot-1",
+          git: {
+            statusDetails: () => Effect.succeed({ isRepo: false }),
+            createDetachedWorktree: vi.fn(),
+          } as never,
+        }),
+      ),
     );
     expect(error.message).toContain("not a Git repository");
   });

@@ -662,9 +662,14 @@ function spawnCodexAppServer(input: {
   readonly binaryPath: string;
   readonly cwd: string;
   readonly env: NodeJS.ProcessEnv;
+  readonly disabledFeatures?: ReadonlyArray<string>;
 }): ChildProcessWithoutNullStreams {
   const tapesCommand = tapesCodexAppServerCommand(input.binaryPath);
-  const prepared = prepareWindowsSafeProcess(tapesCommand.command, [...tapesCommand.args], {
+  const args = [
+    ...tapesCommand.args,
+    ...(input.disabledFeatures ?? []).flatMap((feature) => ["--disable", feature]),
+  ];
+  const prepared = prepareWindowsSafeProcess(tapesCommand.command, args, {
     cwd: input.cwd,
     env: input.env,
   });
@@ -916,6 +921,9 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
     | undefined;
   private readonly teardownProcessTree: typeof teardownProviderProcessTree;
   private readonly taskCompleteFallbackGraceMs: number;
+  private readonly resolveDisabledFeatures:
+    | ((threadId: ThreadId) => Promise<ReadonlyArray<string>>)
+    | undefined;
   constructor(
     services?: ServiceMap.ServiceMap<never>,
     options?: {
@@ -926,6 +934,8 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       };
       readonly teardownProcessTree?: typeof teardownProviderProcessTree;
       readonly taskCompleteFallbackGraceMs?: number;
+      /** Provider-native capabilities that must be removed before the process starts. */
+      readonly resolveDisabledFeatures?: (threadId: ThreadId) => Promise<ReadonlyArray<string>>;
     },
   ) {
     super();
@@ -934,6 +944,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
     this.agentGatewayMcp = options?.agentGatewayMcp;
     this.teardownProcessTree = options?.teardownProcessTree ?? teardownProviderProcessTree;
     this.taskCompleteFallbackGraceMs = Math.max(0, options?.taskCompleteFallbackGraceMs ?? 750);
+    this.resolveDisabledFeatures = options?.resolveDisabledFeatures;
   }
 
   // The Vulcan MCP server rides on the shared overlay config (no secrets),
@@ -1011,9 +1022,11 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
         ...(codexHomePath ? { homePath: codexHomePath } : {}),
       });
       gatewaySessionLease = this.agentGatewayMcp?.acquireSessionLease(threadId);
+      const disabledFeatures = await this.resolveDisabledFeatures?.(threadId);
       const child = spawnCodexAppServer({
         binaryPath: codexBinaryPath,
         cwd: resolvedCwd,
+        ...(disabledFeatures?.length ? { disabledFeatures } : {}),
         env: await this.buildSessionProcessEnv(
           codexHomePath,
           gatewaySessionLease?.connection.bearerToken,

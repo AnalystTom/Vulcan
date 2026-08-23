@@ -1,3 +1,4 @@
+import { resolveBotRuntimeStates } from "~/lib/botDefaults";
 import { BotId } from "@vulcan/contracts";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 
@@ -17,7 +18,7 @@ function BotDetailRoute() {
   const projects = useStore((state) => state.projects);
   const bot = bots.data.bots.find((candidate) => candidate.id === botId);
   const tasks = bots.data.tasks.filter((task) => task.botId === botId);
-  const runtimeState = bots.data.runtimeStates.find((state) => state.botId === botId);
+  const runtimeState = resolveBotRuntimeStates(bots.data).find((state) => state.botId === botId);
 
   if (bots.isLoading) {
     return <main className="p-8 text-sm text-muted-foreground">Loading agent…</main>;
@@ -52,12 +53,26 @@ function BotDetailRoute() {
               title,
               pinnedProjectId,
             });
-            await navigate({ to: "/$threadId", params: { threadId: result.task.threadId } });
+            await navigate({
+              to: "/$threadId",
+              params: { threadId: result.task.threadId },
+            });
           }}
           onOpen={(task) => {
-            void bots.setActiveTaskMutation
-              .mutateAsync(task)
-              .then(() => navigate({ to: "/$threadId", params: { threadId: task.threadId } }));
+            void bots.setActiveTaskMutation.mutateAsync(task).then(() =>
+              navigate({
+                to: "/$threadId",
+                params: { threadId: task.threadId },
+              }),
+            );
+          }}
+          archivingTaskId={
+            bots.archiveTaskMutation.isPending
+              ? (bots.archiveTaskMutation.variables?.id ?? null)
+              : null
+          }
+          onArchive={(task) => {
+            void bots.archiveTaskMutation.mutateAsync(task);
           }}
         />
 

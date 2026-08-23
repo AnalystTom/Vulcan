@@ -276,6 +276,10 @@
       "types": "./src/browserAnnotations.ts",
       "import": "./src/browserAnnotations.ts"
     },
+    "./botAppearance": {
+      "types": "./src/botAppearance.ts",
+      "import": "./src/botAppearance.ts"
+    },
     "./factoryTraceTimeline": {
       "types": "./src/factoryTraceTimeline.ts",
       "import": "./src/factoryTraceTimeline.ts"

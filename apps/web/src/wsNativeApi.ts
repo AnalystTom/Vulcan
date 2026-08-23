@@ -828,6 +828,8 @@ export function createWsNativeApi(): NativeApi {
       archiveTask: (input) => transport.request(WS_METHODS.botTaskArchive, input),
       getMemory: (input) => transport.request(WS_METHODS.botMemoryGet, input),
       setMemory: (input) => transport.request(WS_METHODS.botMemorySet, input),
+      listMemoryTopics: (input) => transport.request(WS_METHODS.botMemoryTopicList, input),
+      getMemoryTopic: (input) => transport.request(WS_METHODS.botMemoryTopicGet, input),
       control: (input) => transport.request(WS_METHODS.botControl, input),
       listAudit: (input) => transport.request(WS_METHODS.botAuditList, input),
       onEvent: botEventListeners.subscribe,

@@ -37,7 +37,9 @@ import { provisionBotTaskEnvironment } from "../botIsolation.ts";
 import {
   BOT_MEMORY_FILE_NAME,
   ensureBotWorkspace,
+  listBotMemoryTopics,
   readBotMemoryFile,
+  readBotMemoryTopic,
   writeBotMemoryFile,
 } from "../botWorkspace.ts";
 
@@ -228,6 +230,24 @@ export const BotServiceLive = Layer.effect(
         return { bots, tasks, runtimeStates };
       });
 
+    /**
+     * There is exactly one Chief of Staff. Promoting a bot demotes whoever held the
+     * role, and the new chief is always visible (a hidden chief cannot delegate).
+     */
+    const demoteOtherChiefs = (keepId: BotId | null) =>
+      Effect.gen(function* () {
+        const roster = yield* repository
+          .listBots({ includeArchived: false })
+          .pipe(Effect.mapError(toServiceError("Failed to list bots.")));
+        for (const other of roster) {
+          if (!other.chiefOfStaff || other.id === keepId) continue;
+          const demoted = yield* repository
+            .updateBot({ ...other, chiefOfStaff: false, updatedAt: isoNow() })
+            .pipe(Effect.mapError(toServiceError("Failed to hand over the chief of staff role.")));
+          yield* publish({ type: "bot.upserted", bot: demoted });
+        }
+      });
+
     const create: BotServiceShape["create"] = (input) =>
       Effect.gen(function* () {
         const roster = yield* repository
@@ -244,8 +264,16 @@ export const BotServiceLive = Layer.effect(
         const workspaceDir = yield* withWorkspaceServices(
           ensureBotWorkspace({ botsWorkspaceRoot: config.botsWorkspaceRoot, botId: id }),
         ).pipe(Effect.mapError(toServiceError("Failed to create the bot workspace.")));
+        if (input.chiefOfStaff) {
+          yield* demoteOtherChiefs(null);
+        }
         const bot = yield* repository
-          .createBot({ id, input, workspaceDir, now: isoNow() })
+          .createBot({
+            id,
+            input: input.chiefOfStaff ? { ...input, isHidden: false } : input,
+            workspaceDir,
+            now: isoNow(),
+          })
           .pipe(
             Effect.mapError(
               input.chiefOfStaff
@@ -295,8 +323,11 @@ export const BotServiceLive = Layer.effect(
           ...(input.isHidden !== undefined ? { isHidden: input.isHidden } : {}),
           updatedAt: isoNow(),
         };
+        if (next.chiefOfStaff && !bot.chiefOfStaff) {
+          yield* demoteOtherChiefs(bot.id);
+        }
         const saved = yield* repository
-          .updateBot(next)
+          .updateBot(next.chiefOfStaff ? { ...next, isHidden: false } : next)
           .pipe(
             Effect.mapError(
               input.chiefOfStaff
@@ -472,7 +503,51 @@ export const BotServiceLive = Layer.effect(
         return { memory };
       });
 
-    const controlCapability = (action: Parameters<typeof transitionBotControl>[1]["action"]): BotCapability =>
+    const listMemoryTopics: BotServiceShape["listMemoryTopics"] = (input) =>
+      Effect.gen(function* () {
+        const bot = yield* requireBot(input.botId);
+        const topics = yield* withWorkspaceServices(
+          Effect.gen(function* () {
+            const workspaceDir = yield* ensureBotWorkspace({
+              botsWorkspaceRoot: config.botsWorkspaceRoot,
+              botId: bot.id,
+            });
+            return yield* listBotMemoryTopics({ workspaceDir });
+          }),
+        ).pipe(Effect.mapError(toServiceError("Failed to list bot memory topics.")));
+        return { topics };
+      });
+
+    const getMemoryTopic: BotServiceShape["getMemoryTopic"] = (input) =>
+      Effect.gen(function* () {
+        const bot = yield* requireBot(input.botId);
+        const topic = yield* withWorkspaceServices(
+          Effect.gen(function* () {
+            const workspaceDir = yield* ensureBotWorkspace({
+              botsWorkspaceRoot: config.botsWorkspaceRoot,
+              botId: bot.id,
+            });
+            return yield* readBotMemoryTopic({
+              workspaceDir,
+              name: input.name,
+            });
+          }),
+        ).pipe(Effect.mapError(toServiceError("Failed to read the bot memory topic.")));
+        if (topic === null) {
+          // Invalid, missing, and unreadable collapse to one answer, so a caller cannot
+          // probe the filesystem by telling those cases apart.
+          return yield* Effect.fail(
+            new BotServiceError({
+              message: "Memory topic file was not found.",
+            }),
+          );
+        }
+        return { topic };
+      });
+
+    const controlCapability = (
+      action: Parameters<typeof transitionBotControl>[1]["action"],
+    ): BotCapability =>
       action === "pause" || action === "resume" ? "automation.write" : "browser.control";
 
     const makeControlAuditEntry = (input: {
@@ -556,35 +631,50 @@ export const BotServiceLive = Layer.effect(
         const saved = yield* repository
           .setRuntimeState(next)
           .pipe(Effect.mapError(toServiceError("Failed to update bot control state.")));
+        const shouldStopProvider = saved.activeThreadId !== null && input.action === "take-control";
         const shouldInterrupt =
           saved.activeThreadId !== null &&
-          (input.action === "take-control" ||
-            (input.action === "pause" &&
-              (current.phase === "running" || current.phase === "waiting-for-approval")));
-        const interruptError = shouldInterrupt
+          input.action === "pause" &&
+          (current.phase === "running" || current.phase === "waiting-for-approval");
+        const controlError = shouldStopProvider
           ? yield* orchestrationEngine
               .dispatch({
-                type: "thread.turn.interrupt",
-                commandId: CommandId.makeUnsafe(`bot:control-interrupt:${randomUUID()}`),
+                type: "thread.session.stop",
+                commandId: CommandId.makeUnsafe(`bot:control-stop:${randomUUID()}`),
                 threadId: saved.activeThreadId!,
                 createdAt: now,
               })
               .pipe(
                 Effect.match({
                   onFailure: (cause) =>
-                    cause instanceof Error ? cause.message : "Provider interruption failed.",
+                    cause instanceof Error ? cause.message : "Provider session stop failed.",
                   onSuccess: () => null,
                 }),
               )
-          : null;
+          : shouldInterrupt
+            ? yield* orchestrationEngine
+                .dispatch({
+                  type: "thread.turn.interrupt",
+                  commandId: CommandId.makeUnsafe(`bot:control-interrupt:${randomUUID()}`),
+                  threadId: saved.activeThreadId!,
+                  createdAt: now,
+                })
+                .pipe(
+                  Effect.match({
+                    onFailure: (cause) =>
+                      cause instanceof Error ? cause.message : "Provider interruption failed.",
+                    onSuccess: () => null,
+                  }),
+                )
+            : null;
         const entry = makeControlAuditEntry({
           botId: bot.id,
           taskId,
           threadId: saved.activeThreadId,
           action: input.action,
-          decision: interruptError ? "failed" : "allowed",
-          summary: interruptError
-            ? `Control moved to ${saved.phase}, but the active provider turn could not be interrupted: ${interruptError}`
+          decision: controlError ? "failed" : "allowed",
+          summary: controlError
+            ? `Control moved to ${saved.phase}, but the active provider runtime could not be stopped: ${controlError}`
             : `Bot control moved from ${current.phase} to ${saved.phase}.`,
           createdAt: now,
         });
@@ -593,11 +683,11 @@ export const BotServiceLive = Layer.effect(
           .pipe(Effect.mapError(toServiceError("Failed to record bot control action.")));
         yield* publish({ type: "runtime.updated", state: saved });
         yield* publish({ type: "audit.appended", entry });
-        if (interruptError) {
+        if (controlError) {
           return yield* Effect.fail(
             new BotServiceError({
               message:
-                "The bot is blocked by human control, but its active provider turn could not be interrupted. Check the thread before making changes.",
+                "The bot is blocked by human control, but its active provider runtime could not be stopped. Check the thread before making changes.",
             }),
           );
         }
@@ -830,6 +920,8 @@ export const BotServiceLive = Layer.effect(
       archiveTask,
       getMemory,
       setMemory,
+      listMemoryTopics,
+      getMemoryTopic,
       control,
       listAudit,
       snapshot,

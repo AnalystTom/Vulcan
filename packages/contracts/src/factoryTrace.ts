@@ -186,6 +186,13 @@ export type TraceGateResult = typeof TraceGateResult.Type;
 export const TraceAgentSession = Schema.Struct({
   adwId: AdwId,
   agent: Schema.String,
+  /**
+   * Who this worker is to a human, when the trace knows a name for it -- a
+   * Vulcan bot's, for a thread it owns. `agent` stays the lane key the rows are
+   * written against; this is only what the lane is called. Null for a trace an
+   * external tracer wrote, which has no such notion.
+   */
+  displayName: Schema.NullOr(Schema.String),
   codingAgent: Schema.NullOr(Schema.String),
   model: Schema.NullOr(Schema.String),
   sessionId: Schema.NullOr(Schema.String),

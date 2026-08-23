@@ -37,6 +37,8 @@ import { AutomationService } from "../../automation/Services/AutomationService.t
 import { buildAutomationProposalActivity } from "../../automation/proposalActivity.ts";
 import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
 import { BotRepository } from "../../persistence/Services/BotRepository.ts";
+import { BotCommsService } from "../../bots/Services/BotCommsService.ts";
+import { makeBotTools } from "../botTools.ts";
 import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
 import { OrchestrationEventDeliveryRepository } from "../../persistence/Services/OrchestrationEventDeliveries.ts";
 import { ProviderRuntimeEventRepository } from "../../persistence/Services/ProviderRuntimeEvents.ts";
@@ -51,11 +53,7 @@ import {
   AGENT_GATEWAY_TARGET_OPTIONS_DESCRIPTION,
   type AgentGatewayProviderAvailability,
 } from "../targetResolver.ts";
-import {
-  mcpToolResultError,
-  mcpToolResultJson,
-  type McpToolCallResult,
-} from "../protocol.ts";
+import { mcpToolResultError, mcpToolResultJson, type McpToolCallResult } from "../protocol.ts";
 import { gatewayIsoNow as isoNow } from "../creationUtils.ts";
 import {
   MODEL_SELECTION_INPUT_SCHEMA,
@@ -111,6 +109,7 @@ export const makeAgentGateway = Effect.gen(function* () {
   const providerRuntimeEvents = yield* ProviderRuntimeEventRepository;
   const diagnostics = yield* ThreadDiagnosticsQuery;
   const botRepository = Option.getOrUndefined(yield* Effect.serviceOption(BotRepository));
+  const botComms = Option.getOrUndefined(yield* Effect.serviceOption(BotCommsService));
   const serverConfig = yield* ServerConfig;
   const browserAutomationHost = Option.getOrElse(
     yield* Effect.serviceOption(BrowserAutomationHost),
@@ -633,6 +632,8 @@ export const makeAgentGateway = Effect.gen(function* () {
     setThreadArchived,
     ...automationTools,
     ...browserTools,
+    // Peer tools carry their own visibility predicate: bot task threads at depth 0 only.
+    ...(botComms ? makeBotTools(botComms) : []),
   ];
 
   const authorizeBotTool = botRepository

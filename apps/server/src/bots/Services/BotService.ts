@@ -14,6 +14,10 @@ import type {
   BotMemoryGetResult,
   BotMemorySetInput,
   BotMemorySetResult,
+  BotMemoryTopicGetInput,
+  BotMemoryTopicGetResult,
+  BotMemoryTopicListInput,
+  BotMemoryTopicListResult,
   BotTaskArchiveInput,
   BotTaskArchiveResult,
   BotTaskCreateInput,
@@ -54,6 +58,14 @@ export interface BotServiceShape {
   readonly setMemory: (
     input: BotMemorySetInput,
   ) => Effect.Effect<BotMemorySetResult, BotServiceError>;
+  /** The bot's `memory/<topic>.md` files, name + size only. */
+  readonly listMemoryTopics: (
+    input: BotMemoryTopicListInput,
+  ) => Effect.Effect<BotMemoryTopicListResult, BotServiceError>;
+  /** One topic file's contents, capped at the memory byte limit. */
+  readonly getMemoryTopic: (
+    input: BotMemoryTopicGetInput,
+  ) => Effect.Effect<BotMemoryTopicGetResult, BotServiceError>;
   readonly control: (input: BotControlInput) => Effect.Effect<BotControlResult, BotServiceError>;
   readonly listAudit: (
     input: BotAuditListInput,

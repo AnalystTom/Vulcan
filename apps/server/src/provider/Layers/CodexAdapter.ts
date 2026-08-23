@@ -23,6 +23,7 @@ import {
   type ThreadTokenUsageSnapshot,
   type ProviderUserInputAnswers,
   EventId,
+  BotAuditEntryId,
   RuntimeItemId,
   RuntimeRequestId,
   RuntimeTaskId,
@@ -66,6 +67,7 @@ import {
 } from "../../codexGeneratedImages.ts";
 import { isNonFatalCodexErrorMessage } from "../../codexErrorClassification.ts";
 import { ServerConfig } from "../../config.ts";
+import { BotRepository } from "../../persistence/Services/BotRepository.ts";
 import { makeRuntimeTaskListItem } from "../runtimeTaskList.ts";
 import { extractProposedPlanMarkdown } from "../planMode.ts";
 import { appendFileAttachmentsPromptBlock } from "../attachmentProjection.ts";
@@ -83,6 +85,7 @@ import {
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 
 const PROVIDER = "codex" as const;
+const BOT_DISABLED_SHELL_FEATURES = ["shell_tool", "unified_exec"] as const;
 
 // Backstop for an alive-but-silent codex app-server: if a turn produces no
 // activity at all for this long, abort it instead of showing "Working" forever.
@@ -1681,6 +1684,7 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
     const agentGatewayCredentials = Option.getOrUndefined(
       yield* Effect.serviceOption(AgentGatewayCredentials),
     );
+    const botRepository = Option.getOrUndefined(yield* Effect.serviceOption(BotRepository));
     const nativeEventLogger =
       options?.nativeEventLogger ??
       (options?.nativeEventLogPath !== undefined
@@ -1708,6 +1712,32 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
                   },
                 }
               : {}),
+            resolveDisabledFeatures: async (threadId) => {
+              if (!String(threadId).startsWith("bot:")) return [];
+              if (!botRepository) return BOT_DISABLED_SHELL_FEATURES;
+
+              const bot = await Effect.runPromise(botRepository.getBotByThreadId({ threadId }));
+              if (Option.isNone(bot)) return BOT_DISABLED_SHELL_FEATURES;
+              if (bot.value.capabilityGrants.includes("shell.execute")) {
+                return [];
+              }
+
+              await Effect.runPromise(
+                botRepository.appendAuditEntry({
+                  id: BotAuditEntryId.makeUnsafe(`bot-audit:${threadId}:shell-disabled`),
+                  botId: bot.value.id,
+                  taskId: null,
+                  threadId,
+                  capability: "shell.execute",
+                  action: "provider.shell_tool",
+                  decision: "denied",
+                  summary: "Provider shell tools were disabled for this task session.",
+                  detailJson: null,
+                  createdAt: new Date().toISOString(),
+                }),
+              );
+              return BOT_DISABLED_SHELL_FEATURES;
+            },
           })
         );
       }),

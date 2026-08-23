@@ -126,6 +126,7 @@ interface GateRow {
 interface AgentRow {
   adw_id: string;
   agent: string;
+  display_name: string | null;
   coding_agent: string | null;
   model: string | null;
   session_id: string | null;
@@ -252,6 +253,7 @@ const toGateResult = (row: GateRow): TraceGateResult => ({
 const toAgentSession = (row: AgentRow): TraceAgentSession => ({
   adwId: asAdwId(row.adw_id),
   agent: row.agent,
+  displayName: row.display_name,
   codingAgent: row.coding_agent,
   model: row.model,
   sessionId: row.session_id,
@@ -267,6 +269,8 @@ interface AgentStartPayload {
   model?: string;
   session_id?: string;
   color?: string;
+  /** Vulcan's own: the bot the thread belongs to, before its row exists. */
+  display_name?: string;
 }
 
 interface AgentEndUsage {
@@ -371,7 +375,11 @@ const makeSssfTraceSource = Effect.gen(function* () {
           Effect.succeed(
             error.message.startsWith("No factory trace")
               ? ({ state: "absent", databasePath: path } as const)
-              : ({ state: "unreadable", databasePath: path, reason: error.message } as const),
+              : ({
+                  state: "unreadable",
+                  databasePath: path,
+                  reason: error.message,
+                } as const),
           ),
         ),
       );
@@ -391,11 +399,12 @@ const makeSssfTraceSource = Effect.gen(function* () {
     if (adwIds.length === 0) return [];
     const placeholders = adwIds.map(() => "?").join(", ");
     const color = reader.optionalColumn(database, "agent_sessions", "color");
+    const displayName = reader.optionalColumn(database, "agent_sessions", "display_name");
     const contextTokens = reader.optionalColumn(database, "agent_sessions", "context_tokens");
     const contextWindow = reader.optionalColumn(database, "agent_sessions", "context_window");
 
     const finished = database.all<AgentRow>(
-      `SELECT adw_id, agent, coding_agent, model, session_id, ${color},
+      `SELECT adw_id, agent, ${displayName}, coding_agent, model, session_id, ${color},
               ${contextTokens}, ${contextWindow}, created_at, last_used_at
          FROM agent_sessions WHERE adw_id IN (${placeholders})
         ORDER BY created_at, agent`,
@@ -426,6 +435,7 @@ const makeSssfTraceSource = Effect.gen(function* () {
       agents.push({
         adwId: asAdwId(row.adw_id),
         agent: row.agent,
+        displayName: payload.display_name ?? null,
         codingAgent: null,
         model: payload.model ?? null,
         sessionId: payload.session_id ?? null,
@@ -562,7 +572,11 @@ const makeSssfTraceSource = Effect.gen(function* () {
       });
     });
 
-  return { status, listSessions, readSession } satisfies FactoryTraceSourceShape;
+  return {
+    status,
+    listSessions,
+    readSession,
+  } satisfies FactoryTraceSourceShape;
 });
 
 export const SssfTraceSourceLive = Layer.effect(FactoryTraceSource, makeSssfTraceSource);

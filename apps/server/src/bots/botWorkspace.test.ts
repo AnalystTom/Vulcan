@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as nodePath from "node:path";
 
@@ -12,8 +12,11 @@ import { BotWorkspaceError } from "./Errors.ts";
 import {
   BOT_MEMORY_SEED,
   ensureBotWorkspace,
+  isBotMemoryTopicName,
+  listBotMemoryTopics,
   loadBotMemoryForPrompt,
   readBotMemoryFile,
+  readBotMemoryTopic,
   writeBotMemoryFile,
 } from "./botWorkspace.ts";
 
@@ -163,6 +166,120 @@ describe("botWorkspace", () => {
         Effect.provide(NodeServices.layer),
       );
       assert.strictEqual(preserved.text, "- verified: deploys run on Fridays\n");
+    }),
+  );
+
+  it("isBotMemoryTopicName gates every name listing and reading share", () => {
+    for (const name of ["notes.md", "Q3 plan.md", "deploy-runbook.md", "a.md", "_private.md"]) {
+      assert.strictEqual(isBotMemoryTopicName(name), true, name);
+    }
+    for (const name of [
+      "",
+      "notes",
+      "notes.txt",
+      "notes.MD",
+      ".hidden.md",
+      "..",
+      "../MEMORY.md",
+      "nested/notes.md",
+      "nested\\notes.md",
+      "/etc/passwd.md",
+      "note\n.md",
+      `${"a".repeat(201)}.md`,
+    ]) {
+      assert.strictEqual(isBotMemoryTopicName(name), false, JSON.stringify(name));
+    }
+  });
+
+  it.effect("lists only valid topic files, sorted, with their sizes", () =>
+    Effect.gen(function* () {
+      const workspaceDir = yield* scaffold("bot-topics");
+      const topicsDir = nodePath.join(workspaceDir, "memory");
+      writeFileSync(nodePath.join(topicsDir, "zebra.md"), "z");
+      writeFileSync(nodePath.join(topicsDir, "alpha.md"), "alpha notes");
+      // Everything the name gate rejects must stay invisible to the UI.
+      writeFileSync(nodePath.join(topicsDir, ".secret.md"), "hidden");
+      writeFileSync(nodePath.join(topicsDir, "notes.txt"), "not markdown");
+      mkdirSync(nodePath.join(topicsDir, "folder.md"));
+
+      const topics = yield* listBotMemoryTopics({ workspaceDir }).pipe(
+        Effect.provide(NodeServices.layer),
+      );
+      assert.deepStrictEqual(topics, [
+        { name: "alpha.md", bytes: 11 },
+        { name: "zebra.md", bytes: 1 },
+      ]);
+    }),
+  );
+
+  it.effect("lists nothing when the memory directory is missing", () =>
+    Effect.gen(function* () {
+      const topics = yield* listBotMemoryTopics({
+        workspaceDir: nodePath.join(makeBotsWorkspaceRoot(), "never-scaffolded"),
+      }).pipe(Effect.provide(NodeServices.layer));
+      assert.deepStrictEqual(topics, []);
+    }),
+  );
+
+  it.effect("readBotMemoryTopic returns contents and refuses anything outside memory/", () =>
+    Effect.gen(function* () {
+      const workspaceDir = yield* scaffold("bot-topic-read");
+      const contents = "# Runbook\nstep one\n";
+      writeFileSync(nodePath.join(workspaceDir, "memory", "runbook.md"), contents);
+
+      const topic = yield* readBotMemoryTopic({
+        workspaceDir,
+        name: "runbook.md",
+      }).pipe(Effect.provide(NodeServices.layer));
+      assert.deepStrictEqual(topic, {
+        name: "runbook.md",
+        text: contents,
+        bytes: Buffer.byteLength(contents, "utf8"),
+        truncated: false,
+      });
+
+      for (const name of ["../MEMORY.md", "nested/runbook.md", "missing.md"]) {
+        const denied = yield* readBotMemoryTopic({ workspaceDir, name }).pipe(
+          Effect.provide(NodeServices.layer),
+        );
+        assert.strictEqual(denied, null, name);
+      }
+    }),
+  );
+
+  it.effect("a symlink planted in memory/ is neither listed nor readable", () =>
+    Effect.gen(function* () {
+      const workspaceDir = yield* scaffold("bot-topic-symlink");
+      const outsider = nodePath.join(workspaceDir, "OUTSIDE.md");
+      writeFileSync(outsider, "secrets\n");
+      symlinkSync(outsider, nodePath.join(workspaceDir, "memory", "link.md"));
+
+      const topics = yield* listBotMemoryTopics({ workspaceDir }).pipe(
+        Effect.provide(NodeServices.layer),
+      );
+      assert.deepStrictEqual(topics, []);
+
+      const topic = yield* readBotMemoryTopic({
+        workspaceDir,
+        name: "link.md",
+      }).pipe(Effect.provide(NodeServices.layer));
+      assert.strictEqual(topic, null);
+    }),
+  );
+
+  it.effect("readBotMemoryTopic caps an oversized topic file at the memory byte limit", () =>
+    Effect.gen(function* () {
+      const workspaceDir = yield* scaffold("bot-topic-oversized");
+      const content = "a".repeat(BOT_MEMORY_FILE_MAX_BYTES + 10);
+      writeFileSync(nodePath.join(workspaceDir, "memory", "huge.md"), content);
+
+      const topic = yield* readBotMemoryTopic({
+        workspaceDir,
+        name: "huge.md",
+      }).pipe(Effect.provide(NodeServices.layer));
+      assert.strictEqual(topic?.truncated, true);
+      assert.strictEqual(topic?.bytes, BOT_MEMORY_FILE_MAX_BYTES + 10);
+      assert.strictEqual(topic?.text.length, BOT_MEMORY_FILE_MAX_BYTES);
     }),
   );
 });

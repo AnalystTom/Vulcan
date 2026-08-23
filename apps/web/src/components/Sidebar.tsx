@@ -5853,7 +5853,7 @@ export default function Sidebar() {
                     <SidebarPrimaryAction
                       icon={BotIcon}
                       label="New agent"
-                      onClick={() => void navigate({ to: "/bots" })}
+                      onClick={() => void navigate({ to: "/bots", search: { new: true } })}
                     />
                   ) : isOnStudio ? (
                     <>

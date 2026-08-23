@@ -11,7 +11,7 @@
 // `buildFactoryTraceTimeline` over the trace's own rows, so the picture cannot
 // drift from what the factory recorded.
 
-import type { TracePhase } from "@vulcan/contracts";
+import type { Bot, TracePhase } from "@vulcan/contracts";
 import {
   buildFactoryTraceTimeline,
   type FactoryTraceBlock,
@@ -19,13 +19,17 @@ import {
 } from "@vulcan/shared/factoryTraceTimeline";
 import { type CSSProperties, useMemo } from "react";
 
+import { BotAvatar } from "~/components/bots/BotAvatar";
+import { useBots } from "~/hooks/useBots";
 import { formatClockDuration } from "~/session-logic";
 import { cn } from "~/lib/utils";
 
 import {
   buildLaneTints,
+  findLaneBot,
   formatContextPercent,
   LANE_ICON,
+  laneBotTint,
   laneTintAlpha,
   PHASE_STATUS_GLYPH,
   PHASE_STATUS_LABEL,
@@ -59,7 +63,24 @@ export function FactoryTraceLanes({
   // read as motion. A finished session never re-renders for the clock.
   const nowMs = useLiveClock(isLive);
   const timeline = useMemo(() => buildFactoryTraceTimeline({ ...input, nowMs }), [input, nowMs]);
-  const tints = useMemo(() => buildLaneTints(timeline.lanes), [timeline.lanes]);
+  // A bot task is an ordinary thread, so a lane the trace named after a coworker
+  // has to be matched back against the roster to be drawn as one.
+  const { bots } = useBots().data;
+  const laneBots = useMemo(
+    () =>
+      new Map<string, Bot | null>(
+        timeline.lanes.map((lane) => [lane.id, findLaneBot(lane, bots)] as const),
+      ),
+    [timeline.lanes, bots],
+  );
+  const tints = useMemo(
+    () =>
+      buildLaneTints(timeline.lanes, (lane) => {
+        const bot = laneBots.get(lane.id);
+        return bot ? laneBotTint(bot) : null;
+      }),
+    [timeline.lanes, laneBots],
+  );
 
   if (timeline.lanes.length === 0) {
     return (
@@ -101,6 +122,7 @@ export function FactoryTraceLanes({
         <LaneRow
           key={lane.id}
           lane={lane}
+          bot={laneBots.get(lane.id) ?? null}
           tint={tints.get(lane.id) ?? "var(--muted-foreground)"}
           tickPcts={timeline.ticks.map((tick) => tick.pct)}
           selectedPhaseId={selectedPhaseId}
@@ -113,12 +135,15 @@ export function FactoryTraceLanes({
 
 function LaneRow({
   lane,
+  bot,
   tint,
   tickPcts,
   selectedPhaseId,
   onSelectPhase,
 }: {
   readonly lane: FactoryTraceLane;
+  /** The coworker this lane's work belongs to, when it belongs to one. */
+  readonly bot: Bot | null;
   readonly tint: string;
   readonly tickPcts: readonly number[];
   readonly selectedPhaseId: string | null;
@@ -132,9 +157,19 @@ function LaneRow({
         <span
           className="flex min-w-0 items-center gap-1.5 text-xs font-medium"
           style={{ color: tint }}
+          title={bot ? `${bot.name}${bot.title ? ` — ${bot.title}` : ""}` : lane.label}
         >
-          <Icon className="size-3.5 shrink-0" aria-hidden />
-          <span className="truncate">{lane.label}</span>
+          {/* A coworker gets its own face here; anyone else gets the kind's glyph. */}
+          {bot ? (
+            <BotAvatar
+              avatar={bot.avatar}
+              name={bot.name}
+              className="size-5 rounded-[38%] text-[9px]"
+            />
+          ) : (
+            <Icon className="size-3.5 shrink-0" aria-hidden />
+          )}
+          <span className="truncate">{bot?.name ?? lane.label}</span>
         </span>
         {/* The model is the lane's whole story when the trace recorded one. */}
         <span className="truncate font-mono text-[10px] text-muted-foreground">
@@ -158,7 +193,10 @@ function LaneRow({
                 className="block h-full rounded-full transition-[width] duration-220 ease-out motion-reduce:transition-none"
                 // A non-zero occupancy always shows: the exact figure rides in
                 // the label, and a bar that reads empty would contradict it.
-                style={{ width: `${Math.max(lane.context.percent, 2)}%`, background: tint }}
+                style={{
+                  width: `${Math.max(lane.context.percent, 2)}%`,
+                  background: tint,
+                }}
               />
             </span>
           </span>
@@ -298,7 +336,10 @@ function QueuedStack({
               "w-[7.5rem] border-dashed border-border bg-transparent text-muted-foreground",
               selected && "ring-2 ring-ring",
             )}
-            style={{ right: `${0.375 + index * 0.75}rem`, zIndex: visible.length - index }}
+            style={{
+              right: `${0.375 + index * 0.75}rem`,
+              zIndex: visible.length - index,
+            }}
           >
             <span className="flex min-w-0 items-baseline gap-1">
               <span className="shrink-0 text-[10px] leading-none">○</span>

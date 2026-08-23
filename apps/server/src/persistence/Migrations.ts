@@ -110,6 +110,7 @@ import Migration0091 from "./Migrations/091_FactoryRuns.ts";
 import Migration0092 from "./Migrations/092_DropFactoryRuns.ts";
 import Migration0093 from "./Migrations/093_Bots.ts";
 import Migration0094 from "./Migrations/094_BotAutonomyControlPlane.ts";
+import Migration0095 from "./Migrations/095_BotComms.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -219,6 +220,7 @@ export const migrationEntries = [
   [92, "DropFactoryRuns", Migration0092],
   [93, "Bots", Migration0093],
   [94, "BotAutonomyControlPlane", Migration0094],
+  [95, "BotComms", Migration0095],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

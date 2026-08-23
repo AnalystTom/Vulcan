@@ -6,20 +6,54 @@ import { createHash } from "node:crypto";
 
 import { isToolLifecycleItemType, type ProviderRuntimeEvent } from "@vulcan/contracts";
 
+/**
+ * Who a thread belongs to, when it belongs to a bot.
+ *
+ * A bot task is an ordinary thread, so the trace would otherwise record the lane
+ * as the provider that happened to run it -- "codex" three times over for three
+ * different coworkers. The name is the lane key as well as its label, which is
+ * what keeps one bot's work in one lane across a restart.
+ */
+export interface TraceBotIdentity {
+  readonly name: string;
+  /** The bot's avatar swatch, so the lane is the colour the roster shows. */
+  readonly color: string | null;
+}
+
 export interface TraceThreadMetadata {
   readonly title: string | null;
   readonly request: string | null;
   readonly model: string | null;
   readonly providerSessionId: string | null;
+  /** Null for an ordinary thread, and for a lookup that could not be answered. */
+  readonly bot: TraceBotIdentity | null;
 }
 
 export type TraceWriteOperation =
-  | { readonly kind: "session.ensure"; readonly values: Record<string, string | number | null> }
-  | { readonly kind: "session.update"; readonly values: Record<string, string | number | null> }
-  | { readonly kind: "phase.insert"; readonly values: Record<string, string | number | null> }
-  | { readonly kind: "phase.update"; readonly values: Record<string, string | number | null> }
-  | { readonly kind: "event.insert"; readonly values: Record<string, string | number | null> }
-  | { readonly kind: "agent.upsert"; readonly values: Record<string, string | number | null> };
+  | {
+      readonly kind: "session.ensure";
+      readonly values: Record<string, string | number | null>;
+    }
+  | {
+      readonly kind: "session.update";
+      readonly values: Record<string, string | number | null>;
+    }
+  | {
+      readonly kind: "phase.insert";
+      readonly values: Record<string, string | number | null>;
+    }
+  | {
+      readonly kind: "phase.update";
+      readonly values: Record<string, string | number | null>;
+    }
+  | {
+      readonly kind: "event.insert";
+      readonly values: Record<string, string | number | null>;
+    }
+  | {
+      readonly kind: "agent.upsert";
+      readonly values: Record<string, string | number | null>;
+    };
 
 interface ThreadState {
   seq: number;
@@ -27,6 +61,12 @@ interface ThreadState {
   model: string | null;
   providerSessionId: string | null;
   latestUsage: Usage;
+  /**
+   * Sticky: once a thread is known to be a bot's, an event that arrives without
+   * the identity (a lookup that failed, say) must not fall back to the provider
+   * name, or the run would split across two lanes mid-turn.
+   */
+  bot: TraceBotIdentity | null;
 }
 
 interface Usage {
@@ -100,9 +140,12 @@ export class FactoryTraceMapper {
       model: metadata.model,
       providerSessionId: metadata.providerSessionId,
       latestUsage: emptyUsage(),
+      bot: metadata.bot,
     };
     this.threads.set(event.threadId, state);
+    if (metadata.bot !== null) state.bot = metadata.bot;
     const adwId = traceAdwId(event.threadId);
+    const worker = state.bot?.name ?? event.provider;
 
     if (event.type === "session.started") {
       state.providerSessionId = event.providerRefs?.providerThreadId ?? state.providerSessionId;
@@ -190,7 +233,7 @@ export class FactoryTraceMapper {
             seq: state.seq,
             name: label,
             kind: "agent",
-            owner: event.provider,
+            owner: worker,
             description: null,
             status: "running",
             attempt: 1,
@@ -206,8 +249,15 @@ export class FactoryTraceMapper {
           adwId,
           id,
           "agent_start",
-          event.provider,
-          JSON.stringify({ model: state.model, session_id: state.providerSessionId }),
+          worker,
+          // Read back as the lane's identity while the turn is still open, before
+          // any `agent_sessions` row exists to carry it.
+          JSON.stringify({
+            model: state.model,
+            session_id: state.providerSessionId,
+            display_name: state.bot?.name ?? null,
+            color: state.bot?.color ?? null,
+          }),
           null,
           "agent-start",
         ),
@@ -250,7 +300,7 @@ export class FactoryTraceMapper {
           adwId,
           id,
           "agent_end",
-          event.provider,
+          worker,
           agentEndPayload(turnUsage),
           turnUsage.total,
           "agent-end",
@@ -296,7 +346,10 @@ export class FactoryTraceMapper {
           phaseId(event.threadId, event.turnId),
           "tool_call",
           event.payload.title ?? event.payload.itemType,
-          JSON.stringify({ tool: event.payload.itemType, summary: shorten(summary, 500) }),
+          JSON.stringify({
+            tool: event.payload.itemType,
+            summary: shorten(summary, 500),
+          }),
           null,
           "tool",
         ),
@@ -317,7 +370,11 @@ export class FactoryTraceMapper {
         ),
         {
           kind: "session.update",
-          values: { adw_id: adwId, status: "failed", ended_at: event.createdAt },
+          values: {
+            adw_id: adwId,
+            status: "failed",
+            ended_at: event.createdAt,
+          },
         },
       ];
       if (id !== null) {
@@ -346,10 +403,13 @@ export class FactoryTraceMapper {
       kind: "agent.upsert",
       values: {
         adw_id: adwId,
-        agent: event.provider,
+        // The lane key. A bot's name rather than its provider, because the
+        // coworker is the worker here; the provider stays on `coding_agent`.
+        agent: state.bot?.name ?? event.provider,
+        display_name: state.bot?.name ?? null,
         coding_agent: event.provider,
         model: state.model,
-        color: null,
+        color: state.bot?.color ?? null,
         session_id: state.providerSessionId,
         context_tokens: state.latestUsage.context,
         context_window: state.latestUsage.window,

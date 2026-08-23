@@ -1,8 +1,14 @@
-import type { BotColor, ModelSlug, ProviderKind } from "@vulcan/contracts";
+import {
+  DEFAULT_BOT_AVATAR,
+  type BotAvatar,
+  type ModelSlug,
+  type ProviderKind,
+} from "@vulcan/contracts";
 import { getDefaultModel } from "@vulcan/shared/model";
 import { useMemo, useState } from "react";
 
 import { useAppSettings } from "~/appSettings";
+import { BotAvatarPicker } from "~/components/bots/BotAvatarPicker";
 import { ProviderModelPicker } from "~/components/chat/ProviderModelPicker";
 import { Button } from "~/components/ui/button";
 import {
@@ -19,19 +25,6 @@ import { Textarea } from "~/components/ui/textarea";
 import { useProviderModelCatalog } from "~/hooks/useProviderModelCatalog";
 import { useProviderStatusesForLocalConfig } from "~/hooks/useProviderStatusesForLocalConfig";
 
-const COLORS: readonly BotColor[] = [
-  "green",
-  "blue",
-  "red",
-  "orange",
-  "purple",
-  "cyan",
-  "pink",
-  "yellow",
-  "teal",
-  "coral",
-];
-
 export function NewBotDialog({
   open,
   onOpenChange,
@@ -44,7 +37,7 @@ export function NewBotDialog({
     name: string;
     title: string;
     description: string;
-    color: BotColor;
+    avatar: BotAvatar;
     provider: ProviderKind;
     model: ModelSlug;
   }) => Promise<void>;
@@ -57,12 +50,16 @@ export function NewBotDialog({
   const [name, setName] = useState("");
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
-  const [color, setColor] = useState<BotColor>("green");
-  const [selection, setSelection] = useState<{ provider: ProviderKind; model: ModelSlug } | null>(
-    null,
-  );
+  const [avatar, setAvatar] = useState<BotAvatar>(DEFAULT_BOT_AVATAR);
+  const [selection, setSelection] = useState<{
+    provider: ProviderKind;
+    model: ModelSlug;
+  } | null>(null);
   const provider = selection?.provider ?? availableProvider ?? "codex";
-  const catalog = useProviderModelCatalog({ selectedProvider: provider, discoveryEnabled: open });
+  const catalog = useProviderModelCatalog({
+    selectedProvider: provider,
+    discoveryEnabled: open,
+  });
   const defaultModel = useMemo(
     () =>
       (catalog.modelOptionsByProvider[provider][0]?.slug ??
@@ -100,22 +97,7 @@ export function NewBotDialog({
               placeholder="What should this agent own?"
             />
           </label>
-          <div className="space-y-1.5">
-            <p className="text-xs font-medium">Avatar color</p>
-            <div className="flex flex-wrap gap-2">
-              {COLORS.map((value) => (
-                <button
-                  key={value}
-                  type="button"
-                  aria-label={`${value} avatar`}
-                  aria-pressed={color === value}
-                  className="size-7 rounded-full border-2 border-transparent bg-current aria-pressed:border-foreground"
-                  style={{ color: `var(--bot-${value}, ${value})` }}
-                  onClick={() => setColor(value)}
-                />
-              ))}
-            </div>
-          </div>
+          <BotAvatarPicker avatar={avatar} name={name} onChange={setAvatar} />
           <div className="space-y-1.5">
             <p className="text-xs font-medium">Model</p>
             {availableProvider && model ? (
@@ -150,7 +132,7 @@ export function NewBotDialog({
                 name: name.trim(),
                 title: title.trim(),
                 description: description.trim(),
-                color,
+                avatar,
                 provider,
                 model,
               })

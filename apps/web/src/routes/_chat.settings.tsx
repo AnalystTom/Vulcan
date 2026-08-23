@@ -87,10 +87,7 @@ import { SidebarHeaderNavigationControls } from "../components/SidebarHeaderNavi
 import { useDesktopTopBarTrafficLightGutterClassName } from "../hooks/useDesktopTopBarGutter";
 import { useTheme } from "../hooks/useTheme";
 import { isUiDensity } from "../lib/appDensity";
-import {
-  serverAuthSessionQueryOptions,
-  serverConfigQueryOptions,
-} from "../lib/serverReactQuery";
+import { serverAuthSessionQueryOptions, serverConfigQueryOptions } from "../lib/serverReactQuery";
 import { isElectron } from "../env";
 import { RotateCcwIcon } from "../lib/icons";
 import { cn, isMacPlatform } from "../lib/utils";

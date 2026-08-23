@@ -1,5 +1,5 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
-import { useState } from "react";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { useEffect, useState } from "react";
 
 import { BotAvatar } from "~/components/bots/BotAvatar";
 import { BotWorkGraph } from "~/components/bots/BotWorkGraph";
@@ -10,7 +10,17 @@ import { BotIcon, PlusIcon } from "~/lib/icons";
 
 function BotsIndexRoute() {
   const bots = useBots();
-  const [createOpen, setCreateOpen] = useState(false);
+  const navigate = useNavigate();
+  const search = Route.useSearch();
+  const [createOpen, setCreateOpen] = useState(search.new === true);
+
+  // The sidebar's "New agent" action lands here with `?new=1`; consume it so the dialog opens
+  // once and a refresh or back navigation does not reopen it.
+  useEffect(() => {
+    if (search.new !== true) return;
+    setCreateOpen(true);
+    void navigate({ to: "/bots", search: {}, replace: true });
+  }, [navigate, search.new]);
 
   return (
     <main className="h-full overflow-y-auto">
@@ -65,7 +75,9 @@ function BotsIndexRoute() {
                     className="group rounded-2xl border border-border p-4 transition-colors hover:bg-muted/40"
                   >
                     <BotAvatar avatar={bot.avatar} name={bot.name} />
-                    <h2 className="mt-4 truncate font-heading text-base font-semibold">{bot.name}</h2>
+                    <h2 className="mt-4 truncate font-heading text-base font-semibold">
+                      {bot.name}
+                    </h2>
                     <p className="mt-0.5 truncate text-xs text-muted-foreground">
                       {bot.title || "No role set"}
                     </p>
@@ -85,18 +97,27 @@ function BotsIndexRoute() {
         onOpenChange={setCreateOpen}
         pending={bots.createMutation.isPending}
         onCreate={async (input) => {
-          await bots.createMutation.mutateAsync({
+          const created = await bots.createMutation.mutateAsync({
             name: input.name,
             title: input.title,
             description: input.description,
-            avatar: { kind: "shape", shape: "idle", color: input.color },
+            avatar: input.avatar,
             modelSelection: { provider: input.provider, model: input.model },
           });
           setCreateOpen(false);
+          void navigate({ to: "/bots/$botId", params: { botId: created.bot.id } });
         }}
       />
     </main>
   );
 }
 
-export const Route = createFileRoute("/_chat/bots/")({ component: BotsIndexRoute });
+interface BotsIndexSearch {
+  readonly new?: true;
+}
+
+export const Route = createFileRoute("/_chat/bots/")({
+  validateSearch: (raw: Record<string, unknown>): BotsIndexSearch =>
+    raw.new === true || raw.new === "1" || raw.new === 1 ? { new: true } : {},
+  component: BotsIndexRoute,
+});

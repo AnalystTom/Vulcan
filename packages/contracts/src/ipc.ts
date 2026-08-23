@@ -57,10 +57,16 @@ import type {
 import type {
   BotAuditListInput,
   BotAuditListResult,
+  BotCommsChannelListInput,
+  BotCommsChannelListResult,
+  BotCommsMessageListInput,
+  BotCommsMessageListResult,
   BotControlInput,
   BotControlResult,
   BotCreateInput,
   BotCreateResult,
+  BotDelegationListInput,
+  BotDelegationListResult,
   BotDeleteInput,
   BotDeleteResult,
   BotEvent,
@@ -70,6 +76,12 @@ import type {
   BotMemoryGetResult,
   BotMemorySetInput,
   BotMemorySetResult,
+  BotMemoryTopicGetInput,
+  BotMemoryTopicGetResult,
+  BotMemoryTopicListInput,
+  BotMemoryTopicListResult,
+  BotPeerApprovalRespondInput,
+  BotPeerApprovalRespondResult,
   BotTaskArchiveInput,
   BotTaskArchiveResult,
   BotTaskCreateInput,
@@ -880,8 +892,16 @@ export interface NativeApi {
     archiveTask: (input: BotTaskArchiveInput) => Promise<BotTaskArchiveResult>;
     getMemory: (input: BotMemoryGetInput) => Promise<BotMemoryGetResult>;
     setMemory: (input: BotMemorySetInput) => Promise<BotMemorySetResult>;
+    listMemoryTopics: (input: BotMemoryTopicListInput) => Promise<BotMemoryTopicListResult>;
+    getMemoryTopic: (input: BotMemoryTopicGetInput) => Promise<BotMemoryTopicGetResult>;
     control: (input: BotControlInput) => Promise<BotControlResult>;
     listAudit: (input: BotAuditListInput) => Promise<BotAuditListResult>;
+    listCommsChannels: (input?: BotCommsChannelListInput) => Promise<BotCommsChannelListResult>;
+    listCommsMessages: (input: BotCommsMessageListInput) => Promise<BotCommsMessageListResult>;
+    listDelegations: (input?: BotDelegationListInput) => Promise<BotDelegationListResult>;
+    respondPeerApproval: (
+      input: BotPeerApprovalRespondInput,
+    ) => Promise<BotPeerApprovalRespondResult>;
     onEvent: (callback: (event: BotEvent) => void) => () => void;
   };
   browser: BrowserControlMethods & {

@@ -34,8 +34,12 @@ export function BotWorkGraph({ data }: { data: BotListResult }) {
   const stateByBotId = new Map((data.runtimeStates ?? []).map((state) => [state.botId, state]));
   const positions = new Map<string, Position>();
 
-  botNodes.forEach((node, index) => positions.set(node.id, circlePosition(index, botNodes.length, { x: 500, y: 215 }, 116)));
-  taskNodes.forEach((node, index) => positions.set(node.id, circlePosition(index, taskNodes.length, { x: 500, y: 215 }, 188)));
+  botNodes.forEach((node, index) =>
+    positions.set(node.id, circlePosition(index, botNodes.length, { x: 500, y: 215 }, 116)),
+  );
+  taskNodes.forEach((node, index) =>
+    positions.set(node.id, circlePosition(index, taskNodes.length, { x: 500, y: 215 }, 188)),
+  );
 
   return (
     <section className="overflow-hidden rounded-2xl border border-border bg-card">
@@ -47,8 +51,12 @@ export function BotWorkGraph({ data }: { data: BotListResult }) {
           </p>
         </div>
         <div className="flex items-center gap-3 text-[11px] text-muted-foreground">
-          <span className="flex items-center gap-1.5"><i className="size-2 rounded-full bg-foreground" /> Agent</span>
-          <span className="flex items-center gap-1.5"><i className="size-2 rounded-sm border border-muted-foreground" /> Task thread</span>
+          <span className="flex items-center gap-1.5">
+            <i className="size-2 rounded-full bg-foreground" /> Agent
+          </span>
+          <span className="flex items-center gap-1.5">
+            <i className="size-2 rounded-sm border border-muted-foreground" /> Task thread
+          </span>
         </div>
       </div>
 
@@ -74,7 +82,17 @@ export function BotWorkGraph({ data }: { data: BotListResult }) {
               const from = positions.get(edge.from);
               const to = positions.get(edge.to);
               if (!from || !to) return null;
-              return <line key={edge.id} x1={from.x} y1={from.y} x2={to.x} y2={to.y} stroke="url(#bot-work-link)" strokeWidth="2" />;
+              return (
+                <line
+                  key={edge.id}
+                  x1={from.x}
+                  y1={from.y}
+                  x2={to.x}
+                  y2={to.y}
+                  stroke="url(#bot-work-link)"
+                  strokeWidth="2"
+                />
+              );
             })}
           </svg>
 
@@ -97,24 +115,45 @@ export function BotWorkGraph({ data }: { data: BotListResult }) {
 
       {graph.omittedTaskCount > 0 ? (
         <p className="border-t border-border px-5 py-3 text-xs text-muted-foreground">
-          Showing the 24 most recently updated tasks; {graph.omittedTaskCount} older task{graph.omittedTaskCount === 1 ? "" : "s"} omitted.
+          Showing the 24 most recently updated tasks; {graph.omittedTaskCount} older task
+          {graph.omittedTaskCount === 1 ? "" : "s"} omitted.
         </p>
       ) : null}
     </section>
   );
 }
 
-function BotNode({ bot, phase, position }: { bot: Bot; phase: BotRuntimeState["phase"]; position: Position }) {
+function BotNode({
+  bot,
+  phase,
+  position,
+}: {
+  bot: Bot;
+  phase: BotRuntimeState["phase"];
+  position: Position;
+}) {
   return (
     <Link
       to="/bots/$botId"
       params={{ botId: bot.id }}
       className="absolute z-10 flex w-28 -translate-x-1/2 -translate-y-1/2 flex-col items-center rounded-xl px-2 py-2 text-center transition-colors hover:bg-background/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-      style={{ left: `${(position.x / GRAPH_WIDTH) * 100}%`, top: `${(position.y / GRAPH_HEIGHT) * 100}%` }}
+      style={{
+        left: `${(position.x / GRAPH_WIDTH) * 100}%`,
+        top: `${(position.y / GRAPH_HEIGHT) * 100}%`,
+      }}
     >
       <span className="relative">
-        <BotAvatar avatar={bot.avatar} name={bot.name} className="size-11 border border-background shadow-sm" />
-        <i className={cn("absolute -right-0.5 -bottom-0.5 size-3 rounded-full border-2 border-card", STATE_STYLE[phase])} />
+        <BotAvatar
+          avatar={bot.avatar}
+          name={bot.name}
+          className="size-11 border border-background shadow-sm"
+        />
+        <i
+          className={cn(
+            "absolute -right-0.5 -bottom-0.5 size-3 rounded-full border-2 border-card",
+            STATE_STYLE[phase],
+          )}
+        />
       </span>
       <span className="mt-1 w-full truncate text-xs font-semibold">{bot.name}</span>
     </Link>
@@ -125,7 +164,10 @@ function TaskNode({ label, position }: { label: string; position: Position }) {
   return (
     <div
       className="absolute z-10 w-32 -translate-x-1/2 -translate-y-1/2 rounded-lg border border-border bg-background/90 px-3 py-2 text-center text-[11px] font-medium shadow-sm backdrop-blur"
-      style={{ left: `${(position.x / GRAPH_WIDTH) * 100}%`, top: `${(position.y / GRAPH_HEIGHT) * 100}%` }}
+      style={{
+        left: `${(position.x / GRAPH_WIDTH) * 100}%`,
+        top: `${(position.y / GRAPH_HEIGHT) * 100}%`,
+      }}
       title={label}
     >
       <span className="block truncate">{label}</span>

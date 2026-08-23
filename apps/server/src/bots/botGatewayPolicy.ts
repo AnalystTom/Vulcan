@@ -8,10 +8,18 @@ export type BotGatewayPolicyDecision =
       readonly reason: string;
     };
 
-export function botCapabilityForGatewayTool(
-  toolName: string,
-  readOnly: boolean,
-): BotCapability {
+/** Bot-only peer comms tools registered by agentGateway/botTools.ts. */
+export const BOT_PEER_TOOL_NAMES = {
+  listBots: "list_bots",
+  askBot: "ask_bot",
+  delegateBot: "delegate_bot",
+} as const;
+
+export function botCapabilityForGatewayTool(toolName: string, readOnly: boolean): BotCapability {
+  if (toolName === BOT_PEER_TOOL_NAMES.askBot || toolName === BOT_PEER_TOOL_NAMES.delegateBot) {
+    return "peer.message";
+  }
+  if (toolName === BOT_PEER_TOOL_NAMES.listBots) return "thread.read";
   if (toolName.startsWith("browser_")) return readOnly ? "browser.read" : "browser.control";
   if (toolName.startsWith("vulcan_") && toolName.includes("automation")) {
     return readOnly ? "thread.read" : "automation.write";

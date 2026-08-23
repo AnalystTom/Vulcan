@@ -1,10 +1,10 @@
-import type { BotListResult } from "@vulcan/contracts";
+import type { BotId, BotListResult } from "@vulcan/contracts";
 
 export type BotWorkGraphNode = {
   readonly id: string;
   readonly kind: "bot" | "task";
   readonly label: string;
-  readonly botId: string;
+  readonly botId: BotId;
 };
 
 export type BotWorkGraphEdge = {

@@ -32,6 +32,12 @@ export interface FactoryTraceLane {
   readonly id: string;
   /** The worker's name as the factory knows it. */
   readonly label: string;
+  /**
+   * The name a human knows this worker by -- a Vulcan bot's -- when the trace
+   * recorded one. Null for every worker an external factory declared, which the
+   * lane then draws by its own label alone.
+   */
+  readonly displayName: string | null;
   readonly kind: TracePhaseKind;
   /** The model this worker ran on, when the trace recorded one. */
   readonly model: string | null;
@@ -103,7 +109,11 @@ const MIN_SPAN_MS = 1_000;
 /** A hair of right margin, so a block running to the end still shows its border. */
 const TRACK_MARGIN_PCT = 0.5;
 
-const LANE_GROUP: Record<TracePhaseKind, number> = { engineer: 0, code: 1, agent: 2 };
+const LANE_GROUP: Record<TracePhaseKind, number> = {
+  engineer: 0,
+  code: 1,
+  agent: 2,
+};
 
 const parseTime = (value: string | null): number =>
   value === null ? Number.NaN : Date.parse(value);
@@ -165,7 +175,11 @@ export function buildFactoryTraceTimeline(input: FactoryTraceTimelineInput): Fac
 
     const startMs = parseTime(phase.startedAt);
     if (Number.isFinite(startMs)) {
-      draft.timed.push({ phase, startMs, endMs: resolveEndMs(phase, startMs, nowMs) });
+      draft.timed.push({
+        phase,
+        startMs,
+        endMs: resolveEndMs(phase, startMs, nowMs),
+      });
     } else {
       draft.pending.push(phase);
     }
@@ -230,6 +244,7 @@ export function buildFactoryTraceTimeline(input: FactoryTraceTimelineInput): Fac
       return {
         id: draft.id,
         label: draft.label,
+        displayName: agent?.displayName ?? null,
         kind: draft.kind,
         model: agent?.model ?? null,
         color: agent?.color ?? null,

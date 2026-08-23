@@ -1376,7 +1376,9 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
     const retiredGatewaySessionRecoveries = new Set<ThreadId>();
     scheduleRetiredGatewaySessionRecovery = (event) => {
       if (
-        (event.type !== "turn.completed" && event.type !== "turn.aborted") ||
+        (event.type !== "turn.completed" &&
+          event.type !== "turn.aborted" &&
+          event.type !== "runtime.error") ||
         !runtimeEventRetiredGatewayTurnAuthority(event)
       ) {
         return Effect.void;

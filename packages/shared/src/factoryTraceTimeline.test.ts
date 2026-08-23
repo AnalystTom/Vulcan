@@ -35,6 +35,7 @@ const phaseOf = (
 
 const agentOf = (overrides: Partial<TraceAgentSession> & { agent: string }): TraceAgentSession => ({
   adwId: "run-1" as TraceAgentSession["adwId"],
+  displayName: null,
   codingAgent: "pi",
   model: null,
   sessionId: null,
@@ -88,10 +89,30 @@ describe("lanes", () => {
   it("keeps the engineer, code, and agents in that order", () => {
     const timeline = timelineOf({
       phases: [
-        phaseOf({ phaseId: "plan", kind: "agent", owner: "planner", startedAt: at(10) }),
-        phaseOf({ phaseId: "commit", kind: "code", owner: "git", startedAt: at(20) }),
-        phaseOf({ phaseId: "request", kind: "engineer", owner: "dan", startedAt: at(0) }),
-        phaseOf({ phaseId: "build", kind: "agent", owner: "builder", startedAt: at(30) }),
+        phaseOf({
+          phaseId: "plan",
+          kind: "agent",
+          owner: "planner",
+          startedAt: at(10),
+        }),
+        phaseOf({
+          phaseId: "commit",
+          kind: "code",
+          owner: "git",
+          startedAt: at(20),
+        }),
+        phaseOf({
+          phaseId: "request",
+          kind: "engineer",
+          owner: "dan",
+          startedAt: at(0),
+        }),
+        phaseOf({
+          phaseId: "build",
+          kind: "agent",
+          owner: "builder",
+          startedAt: at(30),
+        }),
       ],
     });
     expect(timeline.lanes.map((lane) => lane.id)).toEqual([
@@ -121,6 +142,27 @@ describe("lanes", () => {
     expect(lane.context?.percent).toBeCloseTo(6, 1);
   });
 
+  it("carries the worker's own name and swatch onto the lane", () => {
+    // The lane is keyed by whatever the factory called the worker; the display
+    // name is what a reader should see, so a Vulcan bot appears under its own
+    // name and colour rather than the provider that happened to run it.
+    const timeline = timelineOf({
+      phases: [phaseOf({ phaseId: "plan", owner: "Ada", startedAt: at(0) })],
+      agents: [agentOf({ agent: "Ada", displayName: "Ada", color: "#a855f7" })],
+    });
+    const lane = laneById(timeline, "agent:Ada");
+    expect(lane.displayName).toBe("Ada");
+    expect(lane.color).toBe("#a855f7");
+  });
+
+  it("leaves the display name unset for a lane no bot owns", () => {
+    const timeline = timelineOf({
+      phases: [phaseOf({ phaseId: "plan", startedAt: at(0) })],
+      agents: [agentOf({ agent: "planner" })],
+    });
+    expect(laneById(timeline, "agent:planner").displayName).toBeNull();
+  });
+
   it("draws no context bar while an agent is still running", () => {
     // Occupancy is only known once a turn closes; a bar against an unknown
     // ceiling would be decoration rather than data.
@@ -148,7 +190,12 @@ describe("geometry", () => {
   it("grows a running phase to the clock and stops a finished one at its end", () => {
     const timeline = timelineOf({
       phases: [
-        phaseOf({ phaseId: "build", owner: "builder", status: "running", startedAt: at(0) }),
+        phaseOf({
+          phaseId: "build",
+          owner: "builder",
+          status: "running",
+          startedAt: at(0),
+        }),
         phaseOf({ phaseId: "plan", startedAt: at(0), endedAt: at(60) }),
       ],
       nowMs: T0 + 120_000,
@@ -167,8 +214,20 @@ describe("geometry", () => {
   it("widens a near-instant phase without letting it sit on the one before it", () => {
     const timeline = timelineOf({
       phases: [
-        phaseOf({ phaseId: "c1", kind: "code", owner: "git", startedAt: at(0), endedAt: at(1) }),
-        phaseOf({ phaseId: "c2", kind: "code", owner: "git", startedAt: at(2), endedAt: at(3) }),
+        phaseOf({
+          phaseId: "c1",
+          kind: "code",
+          owner: "git",
+          startedAt: at(0),
+          endedAt: at(1),
+        }),
+        phaseOf({
+          phaseId: "c2",
+          kind: "code",
+          owner: "git",
+          startedAt: at(2),
+          endedAt: at(3),
+        }),
       ],
     });
     const [first, second] = laneById(timeline, "code:git").blocks;
@@ -201,7 +260,14 @@ describe("geometry", () => {
 
   it("pulls a block that ends at the axis edge back inside the track", () => {
     const timeline = timelineOf({
-      phases: [phaseOf({ phaseId: "tail", kind: "code", owner: "git", startedAt: at(600) })],
+      phases: [
+        phaseOf({
+          phaseId: "tail",
+          kind: "code",
+          owner: "git",
+          startedAt: at(600),
+        }),
+      ],
     });
     const block = laneById(timeline, "code:git").blocks[0]!;
     // Zero-duration block at the far edge widens to its minimum and stays inside.
@@ -211,8 +277,20 @@ describe("geometry", () => {
   it("keeps lanes aligned, because one lane never borrows another's space", () => {
     const timeline = timelineOf({
       phases: [
-        phaseOf({ phaseId: "c1", kind: "code", owner: "git", startedAt: at(0), endedAt: at(1) }),
-        phaseOf({ phaseId: "c2", kind: "code", owner: "git", startedAt: at(1), endedAt: at(2) }),
+        phaseOf({
+          phaseId: "c1",
+          kind: "code",
+          owner: "git",
+          startedAt: at(0),
+          endedAt: at(1),
+        }),
+        phaseOf({
+          phaseId: "c2",
+          kind: "code",
+          owner: "git",
+          startedAt: at(1),
+          endedAt: at(2),
+        }),
         phaseOf({ phaseId: "plan", startedAt: at(300), endedAt: at(301) }),
       ],
     });

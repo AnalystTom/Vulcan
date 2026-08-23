@@ -55,7 +55,9 @@ const make = Effect.gen(function* () {
         Stream.runForEach(orchestrationEngine.streamDomainEvents, (event) => {
           const threadId = threadIdOf(event);
           return threadId
-            ? worker.enqueue({ threadId, deleted: event.type === "thread.deleted" }).pipe(Effect.asVoid)
+            ? worker
+                .enqueue({ threadId, deleted: event.type === "thread.deleted" })
+                .pipe(Effect.asVoid)
             : Effect.void;
         }),
       ).pipe(Effect.asVoid),

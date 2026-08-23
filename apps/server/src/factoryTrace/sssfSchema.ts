@@ -3,7 +3,15 @@
 // fixtures and Vulcan-created traces.
 // Layer: Server factory trace
 
-/** The seven tables, transcribed from SSSF's observability contract. */
+/**
+ * The seven tables, transcribed from SSSF's observability contract.
+ *
+ * One column is ours: `agent_sessions.display_name`, which carries the human
+ * name of a worker (a Vulcan bot's) that `agent` -- the lane key -- cannot.
+ * Nullable and never required by a read, so an external tracer that has never
+ * heard of it keeps writing rows we can still read, and a database it created
+ * gains the column by `ALTER` rather than by rewrite (see SssfTraceWriter).
+ */
 export const SSSF_SCHEMA = `
 CREATE TABLE sessions (
   adw_id TEXT PRIMARY KEY,
@@ -69,6 +77,7 @@ CREATE TABLE processes (
 CREATE TABLE agent_sessions (
   adw_id TEXT REFERENCES sessions,
   agent TEXT,
+  display_name TEXT,
   coding_agent TEXT, model TEXT, color TEXT,
   session_id TEXT,
   context_tokens INTEGER,
@@ -79,7 +88,8 @@ CREATE TABLE agent_sessions (
 `;
 
 /** Schema produced before optional SSSF migrations landed. */
-export const SSSF_LEGACY_SCHEMA = SSSF_SCHEMA.replace("  adw_name TEXT,\n", "")
+export const SSSF_LEGACY_SCHEMA = SSSF_SCHEMA.replace("  display_name TEXT,\n", "")
+  .replace("  adw_name TEXT,\n", "")
   .replace("  archived INTEGER DEFAULT 0\n", "  total_cost_placeholder INTEGER\n")
   .replace("  coding_agent TEXT, model TEXT, color TEXT,", "  coding_agent TEXT, model TEXT,")
   .replace("  context_tokens INTEGER,\n  context_window INTEGER,\n", "")

@@ -55,6 +55,15 @@ function invalidRequestResponse(
   };
 }
 
+function isToolVisible(
+  tool: ToolEntry,
+  context: Pick<ToolContext, "callerThreadId" | "callerProvider">,
+): Effect.Effect<boolean> {
+  return tool.visibleFor === undefined
+    ? Effect.succeed(true)
+    : tool.visibleFor(context).pipe(Effect.catchDefect(() => Effect.succeed(false)));
+}
+
 function requestIdKey(id: JsonRpcId): string {
   return `${typeof id}:${String(id)}`;
 }
@@ -93,17 +102,21 @@ export function makeAgentGatewayMcpTransport(input: {
           );
         case "ping":
           return jsonRpcResult(request.id, {});
-        case "tools/list":
+        case "tools/list": {
+          const visibleTools = yield* Effect.filter(input.tools, (tool) =>
+            isToolVisible(tool, context),
+          );
           return jsonRpcResult(request.id, {
-            tools: input.tools.map((tool) => tool.definition),
+            tools: visibleTools.map((tool) => tool.definition),
           });
+        }
         case "tools/call": {
           const toolName = request.params.name;
           if (typeof toolName !== "string") {
             return jsonRpcError(request.id, JSON_RPC_INVALID_PARAMS, "Missing tool name.");
           }
           const tool = toolsByName.get(toolName);
-          if (!tool) {
+          if (!tool || !(yield* isToolVisible(tool, context))) {
             return jsonRpcError(request.id, JSON_RPC_INVALID_PARAMS, `Unknown tool "${toolName}".`);
           }
           const rawArgs = request.params.arguments;

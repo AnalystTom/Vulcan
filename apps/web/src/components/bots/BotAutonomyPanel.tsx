@@ -1,9 +1,5 @@
-import type {
-  Bot,
-  BotControlAction,
-  BotRuntimeState,
-  BotTask,
-} from "@vulcan/contracts";
+import { resolveBotAutonomy, resolveBotCapabilityGrants } from "~/lib/botDefaults";
+import type { Bot, BotControlAction, BotRuntimeState, BotTask } from "@vulcan/contracts";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 
@@ -43,9 +39,11 @@ export function BotAutonomyPanel({
     queryFn: () => ensureNativeApi().bots.listAudit({ botId: bot.id, limit: 30 }),
     refetchInterval: state.phase === "idle" ? false : 3_000,
   });
+  const autonomy = resolveBotAutonomy(bot);
+  const capabilityGrants = resolveBotCapabilityGrants(bot);
   const canRun =
-    bot.autonomy.enabled &&
-    bot.capabilityGrants.includes("thread.write") &&
+    autonomy.enabled &&
+    capabilityGrants.includes("thread.write") &&
     state.phase === "idle" &&
     activeTask !== undefined;
 
@@ -94,7 +92,9 @@ export function BotAutonomyPanel({
             Release control
           </Button>
         ) : null}
-        {state.phase === "idle" || state.phase === "running" || state.phase === "waiting-for-approval" ? (
+        {state.phase === "idle" ||
+        state.phase === "running" ||
+        state.phase === "waiting-for-approval" ? (
           <Button variant="outline" disabled={busy} onClick={() => control("pause")}>
             Pause
           </Button>
@@ -130,9 +130,9 @@ export function BotAutonomyPanel({
           value={prompt}
           onChange={(event) => setPrompt(event.target.value)}
         />
-        {!bot.autonomy.enabled ? (
+        {!autonomy.enabled ? (
           <p className="text-xs text-muted-foreground">Enable autonomous coworker in Settings.</p>
-        ) : !bot.capabilityGrants.includes("thread.write") ? (
+        ) : !capabilityGrants.includes("thread.write") ? (
           <p className="text-xs text-muted-foreground">Grant “Start and steer work” in Settings.</p>
         ) : !activeTask ? (
           <p className="text-xs text-muted-foreground">Create or open a task first.</p>

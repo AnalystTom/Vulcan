@@ -9,6 +9,7 @@ import { agentGatewayRouteLayer } from "./agentGateway/httpRoute";
 import { AgentGatewayCredentials } from "./agentGateway/Services/AgentGatewayCredentials";
 import { AutomationRunReactor } from "./automation/Services/AutomationRunReactor";
 import { AutomationScheduler } from "./automation/Services/AutomationScheduler";
+import { BotDelegationDrainer } from "./bots/Services/BotDelegationDrainer";
 import { BotThreadReconciler } from "./bots/Services/BotThreadReconciler";
 import { AutomationService } from "./automation/Services/AutomationService";
 import {
@@ -65,6 +66,7 @@ export interface ServerShape {
     | AutomationScheduler
     | AutomationService
     | BotThreadReconciler
+    | BotDelegationDrainer
     | ServerLifecycleEvents
     | OrchestrationEngineService
     | OrchestrationReactor
@@ -125,6 +127,7 @@ export const createEffectServer = Effect.fn(function* (
   const automationRunReactor = yield* AutomationRunReactor;
   const automationScheduler = yield* AutomationScheduler;
   const botThreadReconciler = yield* BotThreadReconciler;
+  const botDelegationDrainer = yield* BotDelegationDrainer;
   const keybindings = yield* Keybindings;
   const managedAttachmentCleanup = yield* ManagedAttachmentCleanup;
   const lifecycleEvents = yield* ServerLifecycleEvents;
@@ -208,6 +211,7 @@ export const createEffectServer = Effect.fn(function* (
   yield* Scope.provide(automationScheduler.start(), subscriptionsScope);
   yield* Scope.provide(automationRunReactor.start(), subscriptionsScope);
   yield* Scope.provide(botThreadReconciler.start(), subscriptionsScope);
+  yield* Scope.provide(botDelegationDrainer.start(), subscriptionsScope);
   yield* Scope.provide(threadDeletionReactor.start(), subscriptionsScope);
   yield* Scope.provide(providerSessionReaper.start(), subscriptionsScope);
   yield* Scope.provide(providerRuntimeReconciler.start(), subscriptionsScope);

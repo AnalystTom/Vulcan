@@ -2037,6 +2037,10 @@ const makeWsRpcHandlersLayer = () =>
           rpcEffect(botService.getMemory(input), "Failed to load bot memory"),
         [WS_METHODS.botMemorySet]: (input) =>
           rpcEffect(botService.setMemory(input), "Failed to save bot memory"),
+        [WS_METHODS.botMemoryTopicList]: (input) =>
+          rpcEffect(botService.listMemoryTopics(input), "Failed to list bot memory topics"),
+        [WS_METHODS.botMemoryTopicGet]: (input) =>
+          rpcEffect(botService.getMemoryTopic(input), "Failed to read the bot memory topic"),
         [WS_METHODS.botControl]: (input) =>
           rpcEffect(botService.control(input), "Failed to update bot control"),
         [WS_METHODS.botAuditList]: (input) =>

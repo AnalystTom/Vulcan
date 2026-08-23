@@ -11,6 +11,8 @@ import type {
 } from "@vulcan/contracts";
 import {
   ApprovalRequestId,
+  BotId,
+  BotTaskId,
   CommandId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   EventId,
@@ -27,6 +29,10 @@ import { OrchestrationEventStoreLive } from "../../persistence/Layers/Orchestrat
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import { ProviderRuntimeEventRepositoryLive } from "../../persistence/Layers/ProviderRuntimeEvents.ts";
+import { BotRepositoryLive } from "../../persistence/Layers/BotRepository.ts";
+import { BotRepository } from "../../persistence/Services/BotRepository.ts";
+import botsMigration from "../../persistence/Migrations/093_Bots.ts";
+import botAutonomyMigration from "../../persistence/Migrations/094_BotAutonomyControlPlane.ts";
 import {
   PROVIDER_RUNTIME_INGESTION_CONSUMER,
   ProviderRuntimeEventRepository,
@@ -75,6 +81,11 @@ type LegacyProviderRuntimeEvent = {
 function createProviderServiceHarness() {
   const runtimeEventPubSub = Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>());
   const runtimeSessions: ProviderSession[] = [];
+  const approvalResponses: Array<{
+    readonly threadId: ThreadId;
+    readonly requestId: ApprovalRequestId;
+    readonly decision: "accept" | "acceptForSession" | "decline" | "cancel";
+  }> = [];
 
   const unsupported = () => Effect.die(new Error("Unsupported provider call in test")) as never;
   const service: ProviderServiceShape = {
@@ -87,7 +98,10 @@ function createProviderServiceHarness() {
     stopTask: () => unsupported(),
     backgroundTask: () => unsupported(),
     steerSubagent: () => unsupported(),
-    respondToRequest: () => unsupported(),
+    respondToRequest: (input) =>
+      Effect.sync(() => {
+        approvalResponses.push(input);
+      }),
     respondToUserInput: () => unsupported(),
     stopSession: () => unsupported(),
     listSessions: () => Effect.succeed([...runtimeSessions]),
@@ -150,6 +164,7 @@ function createProviderServiceHarness() {
     service,
     emit,
     setSession,
+    approvalResponses,
   };
 }
 
@@ -252,7 +267,21 @@ describe("ProviderRuntimeIngestion", () => {
     }
   });
 
-  async function createHarness(options?: { readonly startIngestion?: boolean }) {
+  async function createHarness(options?: {
+    readonly startIngestion?: boolean;
+    readonly botCapabilities?: ReadonlyArray<
+      | "thread.read"
+      | "thread.write"
+      | "automation.write"
+      | "browser.read"
+      | "browser.control"
+      | "filesystem.read"
+      | "filesystem.write"
+      | "shell.execute"
+      | "network.external"
+      | "peer.message"
+    >;
+  }) {
     const workspaceRoot = makeTempDir("vulcan-provider-project-");
     fs.mkdirSync(path.join(workspaceRoot, ".git"));
     const provider = createProviderServiceHarness();
@@ -270,9 +299,11 @@ describe("ProviderRuntimeIngestion", () => {
       Layer.provideMerge(OrchestrationProjectionSnapshotQueryLive),
       Layer.provideMerge(SqlitePersistenceMemory),
       Layer.provideMerge(runtimeEventRepositoryLayer),
+      Layer.provideMerge(BotRepositoryLive),
       Layer.provideMerge(Layer.succeed(ProviderService, provider.service)),
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
       Layer.provideMerge(NodeServices.layer),
+      Layer.provideMerge(SqlitePersistenceMemory),
     );
     runtime = ManagedRuntime.make(layer);
     const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
@@ -280,6 +311,9 @@ describe("ProviderRuntimeIngestion", () => {
     const runtimeEventRepository = await runtime.runPromise(
       Effect.service(ProviderRuntimeEventRepository),
     );
+    await runtime.runPromise(botsMigration);
+    await runtime.runPromise(botAutonomyMigration);
+    const botRepository = await runtime.runPromise(Effect.service(BotRepository));
     scope = await Effect.runPromise(Scope.make("sequential"));
     let ingestionStarted = false;
     const startIngestion = async () => {
@@ -351,6 +385,32 @@ describe("ProviderRuntimeIngestion", () => {
       updatedAt: createdAt,
     });
 
+    if (options?.botCapabilities) {
+      const botId = BotId.makeUnsafe("bot-provider-policy");
+      await Effect.runPromise(
+        botRepository.createBot({
+          id: botId,
+          input: {
+            name: "Policy bot",
+            avatar: { kind: "shape", shape: "working", color: "teal" },
+            modelSelection: { provider: "codex", model: "gpt-5-codex" },
+            capabilityGrants: [...options.botCapabilities],
+          },
+          workspaceDir: workspaceRoot,
+          now: createdAt,
+        }),
+      );
+      await Effect.runPromise(
+        botRepository.createBotTask({
+          id: BotTaskId.makeUnsafe("bot-task-provider-policy"),
+          botId,
+          threadId: ThreadId.makeUnsafe("thread-1"),
+          title: "Policy task",
+          now: createdAt,
+        }),
+      );
+    }
+
     return {
       engine,
       emit: provider.emit,
@@ -358,8 +418,55 @@ describe("ProviderRuntimeIngestion", () => {
       drain,
       startIngestion,
       runtimeEventRepository,
+      approvalResponses: provider.approvalResponses,
+      botRepository,
     };
   }
+
+  it("declines and audits provider-native shell requests without a shell grant", async () => {
+    const harness = await createHarness({
+      botCapabilities: ["thread.read", "thread.write", "filesystem.read"],
+    });
+    harness.emit({
+      type: "request.opened",
+      eventId: asEventId("evt-bot-shell-denied"),
+      provider: "codex",
+      createdAt: "2026-08-21T20:00:01.000Z",
+      threadId: asThreadId("thread-1"),
+      requestId: "request-shell-denied",
+      payload: {
+        requestType: "exec_command_approval",
+        detail: "echo SHOULD_NOT_RUN",
+      },
+    });
+    await harness.drain();
+
+    expect(harness.approvalResponses).toEqual([
+      {
+        threadId: asThreadId("thread-1"),
+        requestId: ApprovalRequestId.makeUnsafe("request-shell-denied"),
+        decision: "decline",
+      },
+    ]);
+    const entries = await Effect.runPromise(
+      harness.botRepository.listAuditEntries({
+        botId: BotId.makeUnsafe("bot-provider-policy"),
+        limit: 10,
+      }),
+    );
+    expect(entries).toEqual([
+      expect.objectContaining({
+        action: "provider.exec_command_approval",
+        capability: "shell.execute",
+        decision: "denied",
+      }),
+    ]);
+    const readModel = await Effect.runPromise(harness.engine.getReadModel());
+    const thread = readModel.threads.find((entry) => entry.id === asThreadId("thread-1"));
+    expect(thread?.activities.some((activity) => activity.kind === "approval.requested")).toBe(
+      false,
+    );
+  });
 
   it("REL-01C gate: replays output persisted before subscription without duplicate acceptance", async () => {
     const harness = await createHarness({ startIngestion: false });

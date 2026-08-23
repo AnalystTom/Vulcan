@@ -5,12 +5,16 @@
 //          with its ordinary file tools. Plain markdown on purpose — the user can open,
 //          edit, or delete anything the bot believes.
 // Layer: Server workspace helper (Effect FileSystem/Path port of OpenMausBot workspace.ts)
-// Exports: ensureBotWorkspace, loadBotMemoryForPrompt, readBotMemoryFile, writeBotMemoryFile
+// Exports: ensureBotWorkspace, loadBotMemoryForPrompt, readBotMemoryFile, writeBotMemoryFile,
+//          isBotMemoryTopicName, listBotMemoryTopics, readBotMemoryTopic
 
 import {
   BOT_MEMORY_FILE_MAX_BYTES,
   BOT_MEMORY_PROMPT_MAX_BYTES,
   BOT_MEMORY_PROMPT_MAX_LINES,
+  BOT_MEMORY_TOPIC_NAME_PATTERN,
+  type BotMemoryTopic,
+  type BotMemoryTopicContent,
 } from "@vulcan/contracts";
 import { Effect, FileSystem, Path } from "effect";
 
@@ -164,6 +168,21 @@ function isEffectivelyEmptyMemory(raw: string): boolean {
   return !raw.trim() || raw === BOT_MEMORY_SEED;
 }
 
+/** A multi-byte character sliced in half decodes as U+FFFD — drop the dangling remnant. */
+function dropDanglingReplacementCharacters(text: string): string {
+  return text.replace(/�+$/u, "");
+}
+
+/** `text` cut to at most `maxBytes` UTF-8 bytes, never mid-character. */
+function clipToUtf8Bytes(text: string, maxBytes: number): string {
+  if (Buffer.byteLength(text, "utf8") <= maxBytes) {
+    return text;
+  }
+  return dropDanglingReplacementCharacters(
+    Buffer.from(text, "utf8").subarray(0, maxBytes).toString("utf8"),
+  );
+}
+
 function exceedsPromptBudget(raw: string): boolean {
   return (
     raw.split("\n").length > BOT_MEMORY_PROMPT_MAX_LINES ||
@@ -201,9 +220,7 @@ export const loadBotMemoryForPrompt = Effect.fnUntraced(function* (input: {
     truncated = true;
   }
   if (Buffer.byteLength(text, "utf8") > BOT_MEMORY_PROMPT_MAX_BYTES) {
-    text = Buffer.from(text, "utf8").subarray(0, BOT_MEMORY_PROMPT_MAX_BYTES).toString("utf8");
-    // A multi-byte character sliced in half decodes as U+FFFD — drop the dangling remnant.
-    text = text.replace(/�+$/, "");
+    text = clipToUtf8Bytes(text, BOT_MEMORY_PROMPT_MAX_BYTES);
     truncated = true;
   }
   return { text, truncated } satisfies BotMemoryFileContent;
@@ -223,12 +240,10 @@ export const readBotMemoryFile = Effect.fnUntraced(function* (input: {
   if (isEffectivelyEmptyMemory(raw)) {
     return { text: "", truncated: false } satisfies BotMemoryFileContent;
   }
-  let text = raw;
-  if (Buffer.byteLength(text, "utf8") > BOT_MEMORY_FILE_MAX_BYTES) {
-    text = Buffer.from(text, "utf8").subarray(0, BOT_MEMORY_FILE_MAX_BYTES).toString("utf8");
-    text = text.replace(/�+$/, "");
-  }
-  return { text, truncated: exceedsPromptBudget(raw) } satisfies BotMemoryFileContent;
+  return {
+    text: clipToUtf8Bytes(raw, BOT_MEMORY_FILE_MAX_BYTES),
+    truncated: exceedsPromptBudget(raw),
+  } satisfies BotMemoryFileContent;
 });
 
 /**
@@ -257,4 +272,131 @@ export const writeBotMemoryFile = Effect.fnUntraced(function* (input: {
       toWorkspaceError("writeBotMemoryFile:write", "Failed to write the bot memory file."),
     ),
   );
+});
+
+// ── Topic files (memory/<topic>.md) ──────────────────────────────────
+//
+// MEMORY.md rides into every turn under a hard budget; anything longer lives in a topic
+// file the bot opens on demand with its ordinary file tools. These helpers give the same
+// files to the UI, so the user can read what the bot wrote without leaving Vulcan.
+
+/**
+ * The most topic files one listing returns. A listing is name + size only, but a runaway
+ * bot could still fill `memory/` with thousands of notes and the RPC channel is shared —
+ * bound the payload rather than letting one bot's clutter stall every other subscriber.
+ */
+export const BOT_MEMORY_TOPIC_LIST_MAX = 500;
+
+const TOPIC_STAT_CONCURRENCY = 8;
+
+/**
+ * The single gate every topic name passes. Listing and reading agree on it by
+ * construction: no slash, no backslash, no leading dot, so no traversal, no dotfiles,
+ * and no bare "..".
+ */
+export function isBotMemoryTopicName(name: string): boolean {
+  return BOT_MEMORY_TOPIC_NAME_PATTERN.test(name);
+}
+
+/**
+ * A symlink is not a topic file. `stat` follows links, so a link planted in `memory/`
+ * would otherwise read as an ordinary file and hand back whatever it points at —
+ * `readLink` succeeds only on the link itself, which is what distinguishes the two.
+ */
+const isSymbolicLink = Effect.fnUntraced(function* (filePath: string) {
+  const fileSystem = yield* FileSystem.FileSystem;
+  return yield* fileSystem.readLink(filePath).pipe(
+    Effect.as(true),
+    Effect.catch(() => Effect.succeed(false)),
+  );
+});
+
+/**
+ * The bot's `memory/` topic files, name + size only — contents are fetched one at a time
+ * so listing stays cheap however large the notes grow. A missing or unreadable directory
+ * lists as empty: a bot whose workspace was never scaffolded simply has no topics.
+ */
+export const listBotMemoryTopics = Effect.fnUntraced(function* (input: {
+  readonly workspaceDir: string;
+}) {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const topicsDir = path.join(input.workspaceDir, BOT_MEMORY_TOPICS_DIRNAME);
+  const entryNames = yield* fileSystem
+    .readDirectory(topicsDir)
+    .pipe(Effect.catch(() => Effect.succeed<Array<string>>([])));
+
+  const candidates = entryNames
+    .filter(isBotMemoryTopicName)
+    .toSorted((left, right) => left.localeCompare(right))
+    .slice(0, BOT_MEMORY_TOPIC_LIST_MAX);
+
+  const stats = yield* Effect.forEach(
+    candidates,
+    (name) =>
+      Effect.gen(function* () {
+        const filePath = path.join(topicsDir, name);
+        if (yield* isSymbolicLink(filePath)) {
+          return null;
+        }
+        const info = yield* fileSystem.stat(filePath);
+        return info.type === "File"
+          ? ({ name, bytes: Number(info.size) } satisfies BotMemoryTopic)
+          : null;
+      }).pipe(Effect.catch(() => Effect.succeed(null))),
+    { concurrency: TOPIC_STAT_CONCURRENCY },
+  );
+
+  return stats.filter((topic): topic is BotMemoryTopic => topic !== null);
+});
+
+/**
+ * One topic file, capped at the memory file byte limit so a runaway note cannot flood the
+ * RPC channel. The name gate runs here too, not only at the RPC boundary — a future
+ * caller must not be able to turn this into a read of an arbitrary path. Null for
+ * anything invalid, missing, or unreadable.
+ */
+export const readBotMemoryTopic = Effect.fnUntraced(function* (input: {
+  readonly workspaceDir: string;
+  readonly name: string;
+}) {
+  if (!isBotMemoryTopicName(input.name)) {
+    return null;
+  }
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const filePath = path.join(input.workspaceDir, BOT_MEMORY_TOPICS_DIRNAME, input.name);
+
+  return yield* Effect.gen(function* () {
+    if (yield* isSymbolicLink(filePath)) {
+      return null;
+    }
+    const info = yield* fileSystem.stat(filePath);
+    if (info.type !== "File") {
+      return null;
+    }
+    const bytes = Number(info.size);
+    if (bytes <= BOT_MEMORY_FILE_MAX_BYTES) {
+      const text = yield* fileSystem.readFileString(filePath);
+      return {
+        name: input.name,
+        text,
+        bytes,
+        truncated: false,
+      } satisfies BotMemoryTopicContent;
+    }
+    // Oversized: read only the prefix that fits instead of pulling the whole file into
+    // memory just to throw most of it away.
+    const prefix = yield* Effect.scoped(
+      fileSystem
+        .open(filePath, { flag: "r" })
+        .pipe(Effect.flatMap((file) => file.readAlloc(BOT_MEMORY_FILE_MAX_BYTES))),
+    );
+    return {
+      name: input.name,
+      text: dropDanglingReplacementCharacters(Buffer.from(prefix ?? []).toString("utf8")),
+      bytes,
+      truncated: true,
+    } satisfies BotMemoryTopicContent;
+  }).pipe(Effect.catch(() => Effect.succeed(null)));
 });
