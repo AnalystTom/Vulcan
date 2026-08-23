@@ -6,6 +6,7 @@ import { useState } from "react";
 import { ensureNativeApi } from "~/nativeApi";
 import { Button } from "~/components/ui/button";
 import { Textarea } from "~/components/ui/textarea";
+import { ChiefOfStaffCallPanel } from "./ChiefOfStaffCallPanel";
 
 const PHASE_LABELS: Record<BotRuntimeState["phase"], string> = {
   idle: "Idle",
@@ -53,7 +54,9 @@ export function BotAutonomyPanel({
   };
 
   return (
-    <section className="space-y-4">
+    <div className="space-y-10">
+      {bot.chiefOfStaff ? <ChiefOfStaffCallPanel bot={bot} /> : null}
+      <section className="space-y-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 className="font-heading text-base font-semibold">Coworker control</h2>
@@ -169,6 +172,7 @@ export function BotAutonomyPanel({
           )}
         </div>
       </div>
-    </section>
+      </section>
+    </div>
   );
 }

@@ -2,6 +2,7 @@ export * from "./auth";
 export * from "./automation";
 export * from "./baseSchemas";
 export * from "./bot";
+export * from "./chiefOfStaffCall";
 export * from "./browserAutomationBounds";
 export * from "./browserAutomationIds";
 export * from "./browserAutomationErrors";

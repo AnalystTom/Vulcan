@@ -1,4 +1,5 @@
 import http from "node:http";
+import { join } from "node:path";
 
 import type { ServerSettingsError } from "@vulcan/contracts";
 import { Effect, Exit, FileSystem, Layer, Path, Schema, Scope, ServiceMap } from "effect";
@@ -46,6 +47,8 @@ import { makeBoundedNodeHttpServer } from "./nodeHttpServer";
 import { websocketRpcRouteLayer } from "./wsRpc";
 import { recoverGitHandoffOperations } from "./gitHandoffOperations";
 import { externalMcpRouteLayer } from "./externalMcp/httpRoute";
+import { chiefOfStaffCallRouteLayer } from "./chiefOfStaffCall/httpRoute";
+import { chiefOfStaffCallManager } from "./chiefOfStaffCall/callManager";
 import { ExternalMcpGateway } from "./externalMcp/Services/ExternalMcpGateway";
 import { ExternalMcpService } from "./externalMcp/Services/ExternalMcpService";
 
@@ -116,6 +119,17 @@ export const createEffectServer = Effect.fn(function* (
   shutdownController: ServerShutdownController,
 ) {
   const config = yield* ServerConfig;
+  yield* Effect.tryPromise(() =>
+    chiefOfStaffCallManager.recover({
+      env: process.env,
+      publicUrl: config.publicUrl,
+      statePath: join(config.stateDir, "chief-of-staff-call.json"),
+    }),
+  ).pipe(
+    Effect.catch((cause) =>
+      Effect.logWarning("failed to reconcile Chief of Staff call state", { cause }),
+    ),
+  );
   const remotePolicyError = remoteAccessPolicyError(config);
   if (remotePolicyError) {
     return yield* new ServerLifecycleError({
@@ -171,6 +185,7 @@ export const createEffectServer = Effect.fn(function* (
     websocketRpcRouteLayer,
     agentGatewayRouteLayer,
     externalMcpRouteLayer,
+    chiefOfStaffCallRouteLayer,
   );
   const httpApp = yield* HttpRouter.toHttpEffect(routesLayer);
   yield* httpServer
