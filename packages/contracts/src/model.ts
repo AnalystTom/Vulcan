@@ -154,6 +154,7 @@ export const ProviderModelOptions = Schema.Struct({
   kilo: Schema.optional(OpenCodeModelOptions),
   opencode: Schema.optional(OpenCodeModelOptions),
   pi: Schema.optional(PiModelOptions),
+  omp: Schema.optional(PiModelOptions),
 });
 export type ProviderModelOptions = typeof ProviderModelOptions.Type;
 
@@ -826,6 +827,8 @@ export const MODEL_OPTIONS_BY_PROVIDER = {
   ],
   // Pi discovery owns the live catalog, including auth-gated Anthropic models.
   pi: [],
+  // OMP discovery owns the live catalog from ~/.omp/agent/models.yml.
+  omp: [],
   cursor: [
     {
       // Cursor exposes auto as the `default` model id over ACP; the adapter maps it.
@@ -1017,7 +1020,7 @@ export type ModelOptionsByProvider = typeof MODEL_OPTIONS_BY_PROVIDER;
 type BuiltInModelSlug = (typeof MODEL_OPTIONS_BY_PROVIDER)[ProviderKind][number]["slug"];
 export type ModelSlug = BuiltInModelSlug | (string & {});
 
-export type ProviderWithDefaultModel = Exclude<ProviderKind, "pi">;
+export type ProviderWithDefaultModel = Exclude<ProviderKind, "pi" | "omp">;
 
 export const DEFAULT_MODEL_BY_PROVIDER: Record<ProviderWithDefaultModel, ModelSlug> = {
   codex: "gpt-5.5",
@@ -1162,6 +1165,7 @@ export const MODEL_SLUG_ALIASES_BY_PROVIDER: Record<ProviderKind, Record<string,
   kilo: {},
   opencode: {},
   pi: {},
+  omp: {},
 };
 
 // ── Agent mention aliases ─────────────────────────────────────────────
@@ -1198,4 +1202,5 @@ export const PROVIDER_DISPLAY_NAMES: Record<ProviderKind, string> = {
   kilo: "Kilo",
   opencode: "OpenCode",
   pi: "Pi",
+  omp: "OMP",
 };

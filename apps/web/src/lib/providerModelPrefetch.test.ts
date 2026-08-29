@@ -34,6 +34,8 @@ function makeSettings(
     openCodeBinaryPath: "",
     piBinaryPath: "",
     piAgentDir: "",
+    ompBinaryPath: "",
+    ompAgentDir: "",
     ...overrides,
   };
 }

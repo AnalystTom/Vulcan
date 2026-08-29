@@ -34,6 +34,7 @@ const MODEL_SLUG_SET_BY_PROVIDER: Record<ProviderKind, ReadonlySet<ModelSlug>> =
   kilo: new Set(MODEL_OPTIONS_BY_PROVIDER.kilo.map((option) => option.slug)),
   opencode: new Set(MODEL_OPTIONS_BY_PROVIDER.opencode.map((option) => option.slug)),
   pi: new Set<ModelSlug>(),
+  omp: new Set<ModelSlug>(),
 };
 
 export interface SelectableModelOption {
@@ -61,10 +62,10 @@ export function getModelOptions(provider: ProviderKind = "codex") {
 }
 
 function hasDefaultModel(provider: ProviderKind): provider is ProviderWithDefaultModel {
-  return provider !== "pi";
+  return provider !== "pi" && provider !== "omp";
 }
 
-export function getDefaultModel(provider: "pi"): null;
+export function getDefaultModel(provider: "pi" | "omp"): null;
 export function getDefaultModel(provider?: ProviderWithDefaultModel): ModelSlug;
 export function getDefaultModel(provider: ProviderKind): ModelSlug | null;
 export function getDefaultModel(provider: ProviderKind = "codex"): ModelSlug | null {
@@ -284,7 +285,7 @@ function reasoningDescriptorId(provider: ProviderKind): string {
   if (provider === "kilo" || provider === "opencode") {
     return "variant";
   }
-  if (provider === "pi") {
+  if (provider === "pi" || provider === "omp") {
     return "thinkingLevel";
   }
   return "reasoningEffort";
@@ -495,7 +496,7 @@ export function resolveModelSlug(
   provider: ProviderKind = "codex",
 ): ModelSlug | null {
   const normalized = normalizeModelSlug(model, provider);
-  if (provider === "pi") {
+  if (provider === "pi" || provider === "omp") {
     return normalized;
   }
   if (!normalized) {

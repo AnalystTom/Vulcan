@@ -265,6 +265,18 @@ export const GrokIcon: Icon = (props) => (
   </svg>
 );
 
+export const OmpIcon: Icon = (props) => (
+  <svg {...props} viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <circle cx="12" cy="12" r="7.25" stroke="currentColor" strokeWidth="2.25" />
+    <path
+      d="M8.5 12.75c.7 1.35 1.95 2.15 3.5 2.15s2.8-.8 3.5-2.15"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+    />
+  </svg>
+);
+
 export const PiIcon: Icon = (props) => (
   <svg {...props} viewBox="0 0 800 800" fill="none" xmlns="http://www.w3.org/2000/svg">
     <path

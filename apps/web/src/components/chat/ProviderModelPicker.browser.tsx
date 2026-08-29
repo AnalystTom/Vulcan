@@ -63,6 +63,14 @@ const MODEL_OPTIONS_BY_PROVIDER = {
       upstreamProviderName: "Anthropic",
     },
   ],
+  omp: [
+    {
+      slug: "qwen3090/qwen3.8-27b",
+      name: "qwen3.8-27b",
+      upstreamProviderId: "qwen3090",
+      upstreamProviderName: "qwen3090",
+    },
+  ],
   antigravity: [
     {
       slug: "Gemini 3.5 Flash",
