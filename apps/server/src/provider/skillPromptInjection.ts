@@ -49,7 +49,8 @@ export function shouldInlineSkillForProvider(provider: ProviderKind, skillPath: 
       // Claude Code only loads skills from .claude/skills folders.
       return !segments.has(".claude");
     case "pi":
-      // Pi loads its own skill set; anything resolved from a cross-provider
+    case "omp":
+      // Pi/OMP load their own skill set; anything resolved from a cross-provider
       // folder is portable and must be inlined.
       return CROSS_PROVIDER_SKILL_DIR_NAMES.some((dir) => segments.has(dir));
     default:

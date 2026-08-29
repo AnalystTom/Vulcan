@@ -276,8 +276,9 @@ describe("resolveAppModelSelection", () => {
           droid: [],
           kilo: [],
           opencode: [],
-          pi: [],
-        },
+      pi: [],
+      omp: [],
+    },
         "galapagos-alpha",
       ),
     ).toBe("galapagos-alpha");
@@ -296,8 +297,9 @@ describe("resolveAppModelSelection", () => {
           droid: [],
           kilo: [],
           opencode: [],
-          pi: [],
-        },
+      pi: [],
+      omp: [],
+    },
         "",
       ),
     ).toBe("gpt-5.5");
@@ -316,8 +318,9 @@ describe("resolveAppModelSelection", () => {
           droid: [],
           kilo: [],
           opencode: [],
-          pi: [],
-        },
+      pi: [],
+      omp: [],
+    },
         "GPT-5.3 Codex",
       ),
     ).toBe("gpt-5.3-codex");
@@ -336,8 +339,9 @@ describe("resolveAppModelSelection", () => {
           droid: [],
           kilo: [],
           opencode: [],
-          pi: [],
-        },
+      pi: [],
+      omp: [],
+    },
         "sonnet",
       ),
     ).toBe("claude-sonnet-5");
@@ -356,8 +360,9 @@ describe("resolveAppModelSelection", () => {
           droid: [],
           kilo: [],
           opencode: [],
-          pi: [],
-        },
+      pi: [],
+      omp: [],
+    },
         "custom/selected-model",
       ),
     ).toBe("custom/selected-model");
@@ -473,6 +478,7 @@ describe("normalizeStoredAppSettings", () => {
         kiloBinaryPath: "kilo",
         openCodeBinaryPath: "opencode",
         piBinaryPath: "pi",
+        ompBinaryPath: "omp",
       }),
     );
     const normalized = normalizeStoredAppSettings(decodedSettings);
@@ -519,6 +525,8 @@ describe("getProviderStartOptions", () => {
         openCodeServerUrl: "",
         piAgentDir: "",
         piBinaryPath: "",
+        ompAgentDir: "",
+        ompBinaryPath: "",
       }),
     ).toEqual({
       claudeAgent: {
@@ -558,6 +566,8 @@ describe("getProviderStartOptions", () => {
         openCodeServerUrl: "",
         piAgentDir: "",
         piBinaryPath: "",
+        ompAgentDir: "",
+        ompBinaryPath: "",
       }),
     ).toBeUndefined();
   });
@@ -580,6 +590,8 @@ describe("getProviderStartOptions", () => {
         openCodeServerUrl: "",
         piAgentDir: "",
         piBinaryPath: "pi",
+        ompAgentDir: "",
+        ompBinaryPath: "omp",
       }),
     ).toBeUndefined();
   });
@@ -596,6 +608,7 @@ describe("provider-indexed custom model settings", () => {
     customKiloModels: ["kilo/kilo-auto/free"],
     customOpenCodeModels: ["openrouter/gpt-oss-120b"],
     customPiModels: ["anthropic/custom-pi"],
+    customOmpModels: ["qwen3090/qwen3.8-27b"],
   } as const;
 
   it("exports one provider config per provider", () => {
@@ -609,6 +622,7 @@ describe("provider-indexed custom model settings", () => {
       "kilo",
       "opencode",
       "pi",
+      "omp",
     ]);
   });
 
@@ -627,6 +641,7 @@ describe("provider-indexed custom model settings", () => {
     expect(getCustomModelsForProvider(settings, "kilo")).toEqual(["kilo/kilo-auto/free"]);
     expect(getCustomModelsForProvider(settings, "opencode")).toEqual(["openrouter/gpt-oss-120b"]);
     expect(getCustomModelsForProvider(settings, "pi")).toEqual(["anthropic/custom-pi"]);
+    expect(getCustomModelsForProvider(settings, "omp")).toEqual(["qwen3090/qwen3.8-27b"]);
   });
 
   it("reads default custom models for each provider", () => {
@@ -640,6 +655,7 @@ describe("provider-indexed custom model settings", () => {
       customKiloModels: ["kilo/default-auto"],
       customOpenCodeModels: ["openai/gpt-5"],
       customPiModels: ["anthropic/default-pi"],
+      customOmpModels: ["qwen3090/qwen3.8-27b"],
     } as const;
 
     expect(getDefaultCustomModelsForProvider(defaults, "codex")).toEqual(["default/codex-model"]);
@@ -655,6 +671,7 @@ describe("provider-indexed custom model settings", () => {
     expect(getDefaultCustomModelsForProvider(defaults, "kilo")).toEqual(["kilo/default-auto"]);
     expect(getDefaultCustomModelsForProvider(defaults, "opencode")).toEqual(["openai/gpt-5"]);
     expect(getDefaultCustomModelsForProvider(defaults, "pi")).toEqual(["anthropic/default-pi"]);
+    expect(getDefaultCustomModelsForProvider(defaults, "omp")).toEqual(["qwen3090/qwen3.8-27b"]);
   });
 
   it("patches custom models for codex", () => {
@@ -722,6 +739,7 @@ describe("provider-indexed custom model settings", () => {
       kilo: ["kilo/kilo-auto/free"],
       opencode: ["openrouter/gpt-oss-120b"],
       pi: ["anthropic/custom-pi"],
+      omp: ["qwen3090/qwen3.8-27b"],
     });
   });
 
@@ -754,6 +772,9 @@ describe("provider-indexed custom model settings", () => {
     expect(modelOptionsByProvider.pi.some((option) => option.slug === "anthropic/custom-pi")).toBe(
       true,
     );
+    expect(
+      modelOptionsByProvider.omp.some((option) => option.slug === "qwen3090/qwen3.8-27b"),
+    ).toBe(true);
   });
 
   it("normalizes and deduplicates custom model options per provider", () => {
@@ -779,6 +800,7 @@ describe("provider-indexed custom model settings", () => {
         "anthropic/custom-pi",
         "anthropic/custom-pi",
       ],
+      customOmpModels: [" qwen3090/qwen3.8-27b ", "qwen3090/qwen3.8-27b"],
     });
 
     expect(
@@ -898,6 +920,7 @@ describe("AppSettingsSchema", () => {
       customKiloModels: [],
       customOpenCodeModels: [],
       customPiModels: [],
+      customOmpModels: [],
     });
   });
 

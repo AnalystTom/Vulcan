@@ -53,7 +53,7 @@ import {
 } from "effect";
 import { nonEmptyTrimmed } from "@vulcan/shared/text";
 
-import { ProviderValidationError } from "../Errors.ts";
+import { ProviderAdapterRequestError, ProviderValidationError } from "../Errors.ts";
 import { ProviderAdapterRegistry } from "../Services/ProviderAdapterRegistry.ts";
 import { ProviderService, type ProviderServiceShape } from "../Services/ProviderService.ts";
 import {
@@ -279,6 +279,16 @@ function runtimePayloadRecord(value: unknown): Record<string, unknown> {
 
 function runtimeEventRetiredGatewayTurnAuthority(event: ProviderRuntimeEvent): boolean {
   return runtimePayloadRecord(event.raw?.payload)[AGENT_GATEWAY_TURN_AUTHORITY_RETIRED] === true;
+}
+
+/** A `turn/start` rejection can arrive before any runtime event is published. */
+function isRetiredGatewayTurnStartError(error: unknown): error is ProviderAdapterRequestError {
+  return (
+    error instanceof ProviderAdapterRequestError &&
+    error.provider === "codex" &&
+    error.method === "turn/start" &&
+    error.detail.toLowerCase().includes("gateway authority is retired")
+  );
 }
 
 function runtimeActiveTurnId(value: unknown): string | undefined {
@@ -1849,7 +1859,42 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
               operation: "ProviderService.sendTurn",
               allowRecovery: true,
             });
-            const turn = yield* routed.adapter.sendTurn(input);
+            const turn = yield* routed.adapter.sendTurn(input).pipe(
+              Effect.catchIf(isRetiredGatewayTurnStartError, (error) =>
+                Effect.gen(function* () {
+                  // The gateway guarantees this error means it accepted no
+                  // turn. Fence the stale runtime, replace it, then retry the
+                  // exact input once without surfacing a blocked thread.
+                  yield* directory.upsert({
+                    threadId: input.threadId,
+                    provider: routed.adapter.provider,
+                    runtimePayload: {
+                      [AGENT_GATEWAY_CREDENTIAL_ROTATION_REQUIRED]: true,
+                      lastError: error.message,
+                      lastRuntimeEvent: "provider.sendTurn.retiredGatewayAuthority",
+                      lastRuntimeEventAt: new Date().toISOString(),
+                    },
+                  });
+                  const binding = yield* directory.getBinding(input.threadId).pipe(
+                    Effect.flatMap(
+                      Option.match({
+                        onNone: () =>
+                          toValidationError(
+                            "ProviderService.sendTurn",
+                            `Cannot recover thread '${input.threadId}' because its provider binding was removed.`,
+                          ),
+                        onSome: Effect.succeed,
+                      }),
+                    ),
+                  );
+                  const recoveredAdapter = yield* recoverSessionForThread({
+                    binding,
+                    operation: "ProviderService.sendTurn.retiredGatewayAuthority",
+                  });
+                  return yield* recoveredAdapter.sendTurn(input);
+                }),
+              ),
+            );
             const persistenceInput: StartedTurnPersistenceInput = {
               threadId: input.threadId,
               provider: routed.adapter.provider,
