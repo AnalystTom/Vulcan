@@ -67,6 +67,7 @@ const SETTINGS = {
   customKiloModels: [],
   customOpenCodeModels: [],
   customPiModels: [],
+  customOmpModels: [],
   droidBinaryPath: "",
   grokBinaryPath: "",
   hiddenProviders: [],
@@ -74,6 +75,8 @@ const SETTINGS = {
   openCodeBinaryPath: "",
   piAgentDir: "",
   piBinaryPath: "",
+  ompAgentDir: "",
+  ompBinaryPath: "",
 };
 
 function readCatalogRenders(

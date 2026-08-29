@@ -231,8 +231,9 @@ function getProviderStateFromCapabilities(
       normalizedOptions = normalizeOpenCodeModelOptions(providerOptions);
       break;
     }
-    case "pi": {
-      const providerOptions = modelOptions?.pi;
+    case "pi":
+    case "omp": {
+      const providerOptions = provider === "omp" ? modelOptions?.omp : modelOptions?.pi;
       rawEffort = trimOrNull(providerOptions?.thinkingLevel);
       normalizedOptions = normalizePiModelOptions(providerOptions);
       break;
@@ -318,6 +319,11 @@ const composerProviderRegistry: Record<ProviderKind, ProviderRegistryEntry> = {
     getState: (input) => getProviderStateFromCapabilities(input),
     renderTraitsMenuContent: (input) => renderTraitsMenuContentForProvider("pi", input),
     renderTraitsPicker: (input) => renderTraitsPickerForProvider("pi", input),
+  },
+  omp: {
+    getState: (input) => getProviderStateFromCapabilities(input),
+    renderTraitsMenuContent: (input) => renderTraitsMenuContentForProvider("omp", input),
+    renderTraitsPicker: (input) => renderTraitsPickerForProvider("omp", input),
   },
 };
 

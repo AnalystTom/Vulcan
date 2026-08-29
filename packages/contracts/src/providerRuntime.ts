@@ -31,6 +31,7 @@ const RuntimeEventRawSource = Schema.Literals([
   "kilo.sdk.event",
   "opencode.sdk.event",
   "pi.sdk.event",
+  "omp.rpc.event",
 ]);
 export type RuntimeEventRawSource = typeof RuntimeEventRawSource.Type;
 

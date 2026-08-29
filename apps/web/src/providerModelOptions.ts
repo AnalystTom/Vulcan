@@ -21,6 +21,7 @@ import {
   type ModelSelection,
   type OpenCodeModelOptions,
   type OpenCodeModelSelection,
+  type OmpModelSelection,
   type PiModelOptions,
   type PiModelSelection,
   type ProviderKind,
@@ -387,6 +388,11 @@ export function buildModelSelection(
   options?: PiModelOptions | null | undefined,
 ): PiModelSelection;
 export function buildModelSelection(
+  provider: "omp",
+  model: string,
+  options?: PiModelOptions | null | undefined,
+): OmpModelSelection;
+export function buildModelSelection(
   provider: ProviderKind,
   model: string,
   options?: ProviderOptions | null | undefined,
@@ -463,6 +469,14 @@ export function buildModelSelection(
           }
         : { provider, model };
     case "pi":
+      return options
+        ? {
+            provider,
+            model,
+            options: options as PiModelOptions,
+          }
+        : { provider, model };
+    case "omp":
       return options
         ? {
             provider,

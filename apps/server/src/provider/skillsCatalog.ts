@@ -359,6 +359,7 @@ const HOME_ORIGIN_ORDER = [
   "kilo",
   "opencode",
   "pi",
+  "omp",
   "agents",
 ] as const;
 export type SkillsCatalogOrigin = (typeof HOME_ORIGIN_ORDER)[number] | "project";
@@ -451,6 +452,10 @@ const SKILL_ORIGIN_ROOTS = {
     homeRoots: (input) => [nodePath.join(input.homeDir, ".pi", "agent", "skills")],
     projectRootNames: [".pi"],
   },
+  omp: {
+    homeRoots: (input) => [nodePath.join(input.homeDir, ".omp", "agent", "skills")],
+    projectRootNames: [".omp"],
+  },
   agents: {
     homeRoots: (input) => [nodePath.join(input.homeDir, ".agents", "skills")],
     projectRootNames: [".agents"],
@@ -467,6 +472,7 @@ const PROVIDER_SKILL_ORIGIN_PREFERENCES = {
   kilo: ["kilo", "agents", "claude"],
   opencode: ["opencode", "claude", "agents"],
   pi: ["pi", "agents"],
+  omp: ["omp", "agents"],
 } as const satisfies Partial<Record<ProviderKind, readonly SkillsHomeOrigin[]>>;
 
 function homeRootsForOrigin(

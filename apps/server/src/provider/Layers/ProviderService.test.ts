@@ -44,6 +44,7 @@ import { TestClock } from "effect/testing";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import {
+  ProviderAdapterRequestError,
   ProviderAdapterSessionNotFoundError,
   ProviderSessionDirectoryPersistenceError,
   ProviderUnsupportedError,
@@ -1576,6 +1577,53 @@ routing.layer("ProviderServiceLive routing", (it) => {
       yield* provider.sendTurn({ threadId, input: "turn B", attachments: [] });
       assert.equal(routing.codex.startSession.mock.calls.length, startsBeforeTurnB);
       assert.equal(routing.codex.sendTurn.mock.calls.length, sendsBeforeTurnB + 1);
+
+      yield* provider.stopSession({ threadId });
+    }).pipe(Effect.timeout("2 seconds")),
+  );
+
+  it.effect("recovers and retries when turn/start reports a retired gateway authority", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const directory = yield* ProviderSessionDirectory;
+      const threadId = asThreadId("thread-turn-start-retired-gateway-authority");
+
+      yield* provider.startSession(threadId, {
+        provider: "codex",
+        threadId,
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+      });
+      routing.codex.sendTurn.mockImplementationOnce((input: ProviderSendTurnInput) =>
+        Effect.fail(
+          new ProviderAdapterRequestError({
+            provider: "codex",
+            method: "turn/start",
+            detail:
+              "Codex session gateway authority is retired; resume the provider runtime before starting another turn.",
+            cause: { input },
+          }),
+        ),
+      );
+      const sendsBeforeRetry = routing.codex.sendTurn.mock.calls.length;
+      const startsBeforeRetry = routing.codex.startSession.mock.calls.length;
+      const stopsBeforeRetry = routing.codex.stopSession.mock.calls.length;
+
+      const turn = yield* provider.sendTurn({
+        threadId,
+        input: "retry this turn",
+        attachments: [],
+      });
+
+      assert.equal(String(turn.threadId), String(threadId));
+      assert.equal(routing.codex.sendTurn.mock.calls.length, sendsBeforeRetry + 2);
+      assert.equal(routing.codex.stopSession.mock.calls.length, stopsBeforeRetry + 1);
+      assert.equal(routing.codex.startSession.mock.calls.length, startsBeforeRetry + 1);
+      const binding = Option.getOrUndefined(yield* directory.getBinding(threadId));
+      assert.equal(
+        asRuntimePayloadRecord(binding?.runtimePayload).agentGatewayCredentialRotationRequired,
+        false,
+      );
 
       yield* provider.stopSession({ threadId });
     }).pipe(Effect.timeout("2 seconds")),

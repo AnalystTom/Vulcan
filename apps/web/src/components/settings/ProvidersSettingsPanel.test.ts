@@ -27,6 +27,8 @@ describe("isProviderInstallSettingsDirty", () => {
       { openCodeExperimentalWebSockets: true },
       { piBinaryPath: "/opt/pi" },
       { piAgentDir: "/tmp/pi-agent" },
+      { ompBinaryPath: "/opt/omp" },
+      { ompAgentDir: "/tmp/omp-agent" },
     ] satisfies ReadonlyArray<Partial<AppSettings>>;
 
     expect(isProviderInstallSettingsDirty(defaults, defaults)).toBe(false);
@@ -76,6 +78,8 @@ describe("createProviderInstallResetPatch", () => {
         "openCodeExperimentalWebSockets",
         "openCodeServerPassword",
         "openCodeServerUrl",
+        "ompAgentDir",
+        "ompBinaryPath",
         "piAgentDir",
         "piBinaryPath",
       ].sort(),
