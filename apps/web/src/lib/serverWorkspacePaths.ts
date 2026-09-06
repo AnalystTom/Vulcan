@@ -1,5 +1,5 @@
 // FILE: serverWorkspacePaths.ts
-// Purpose: Normalize server-provided home, chat, and Studio workspace paths.
+// Purpose: Normalize server-provided home, chat, Studio, and Bots workspace paths.
 // Layer: Web domain helper
 // Exports: ServerWorkspacePaths plus normalization and fallback helpers.
 
@@ -9,12 +9,14 @@ export interface ServerWorkspacePaths {
   readonly homeDir: string | null | undefined;
   readonly chatWorkspaceRoot?: string | null | undefined;
   readonly studioWorkspaceRoot?: string | null | undefined;
+  readonly botsWorkspaceRoot?: string | null | undefined;
 }
 
 export interface NormalizedServerWorkspacePaths {
   readonly homeDir: string | null;
   readonly chatWorkspaceRoot: string | null;
   readonly studioWorkspaceRoot: string | null;
+  readonly botsWorkspaceRoot: string | null;
 }
 
 export function normalizeServerWorkspacePaths(
@@ -24,6 +26,7 @@ export function normalizeServerWorkspacePaths(
     homeDir: paths.homeDir?.trim() || null,
     chatWorkspaceRoot: paths.chatWorkspaceRoot?.trim() || null,
     studioWorkspaceRoot: paths.studioWorkspaceRoot?.trim() || null,
+    botsWorkspaceRoot: paths.botsWorkspaceRoot?.trim() || null,
   };
 }
 

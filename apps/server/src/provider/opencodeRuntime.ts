@@ -46,6 +46,7 @@ import {
   teardownProviderProcessTree,
 } from "./supervisedProcessTeardown.ts";
 import { isWindowsShellCommandMissingResult } from "../shell-command-detection.ts";
+import { tapesHarnessCommand } from "../tapesCapture.ts";
 
 const DEFAULT_OPENCODE_SERVER_TIMEOUT_MS = 20_000;
 const DEFAULT_HOSTNAME = "127.0.0.1";
@@ -975,7 +976,8 @@ const makeOpenCodeRuntime = (options?: OpenCodeRuntimeLiveOptions) =>
         });
         // Match runOpenCodeCommand: bare npm/pi-node shims like `opencode.cmd` need
         // Windows-safe resolution before Effect/Node spawn can launch them.
-        const prepared = prepareWindowsSafeProcess(input.binaryPath, args, {
+        const tapesCommand = tapesHarnessCommand("opencode", input.binaryPath, args);
+        const prepared = prepareWindowsSafeProcess(tapesCommand.command, [...tapesCommand.args], {
           cwd: input.cwd,
           env: childEnv,
         });

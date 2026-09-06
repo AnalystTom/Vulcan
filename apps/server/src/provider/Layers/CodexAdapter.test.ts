@@ -1227,7 +1227,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
           threadId: asThreadId("thread-1"),
           createdAt: new Date().toISOString(),
           lifecycleGeneration: "generation-request-a",
-          method: "item/tool/requestUserInput",
+          method: "tool/requestUserInput",
           requestId: ApprovalRequestId.makeUnsafe("req-user-input-1"),
           payload: {
             questions: [

@@ -60,6 +60,7 @@ import { isNonFatalCodexErrorMessage } from "./codexErrorClassification.ts";
 import { buildCodexProcessEnv } from "./codexProcessEnv.ts";
 import { assertCodexWorkingDirectoryExists } from "./codexWorkingDirectory.ts";
 import { executableIdentity, resolveExecutable } from "./executableLookup.ts";
+import { tapesCodexAppServerCommand } from "./tapesCapture.ts";
 import {
   teardownChildProcessTree,
   teardownProviderProcessTree,
@@ -118,6 +119,7 @@ function isPermissionApprovalRequest(request: PendingApprovalRequest): boolean {
 }
 
 interface PendingUserInputRequest {
+  mcpToolConfirmation?: boolean;
   requestId: ApprovalRequestId;
   jsonRpcId: string | number;
   threadId: ThreadId;
@@ -661,8 +663,14 @@ function spawnCodexAppServer(input: {
   readonly binaryPath: string;
   readonly cwd: string;
   readonly env: NodeJS.ProcessEnv;
+  readonly disabledFeatures?: ReadonlyArray<string>;
 }): ChildProcessWithoutNullStreams {
-  const prepared = prepareWindowsSafeProcess(input.binaryPath, ["app-server"], {
+  const tapesCommand = tapesCodexAppServerCommand(input.binaryPath);
+  const args = [
+    ...tapesCommand.args,
+    ...(input.disabledFeatures ?? []).flatMap((feature) => ["--disable", feature]),
+  ];
+  const prepared = prepareWindowsSafeProcess(tapesCommand.command, args, {
     cwd: input.cwd,
     env: input.env,
   });
@@ -782,6 +790,39 @@ function toCodexUserInputAnswers(
 export function parseCodexUserInputQuestions(
   payload: Record<string, unknown> | undefined,
 ): UserInputQuestion[] | undefined {
+  // Only empty-form MCP tool confirmations fit this UI. Data-entry and URL
+  // elicitation need a dedicated renderer; never silently accept their inputs.
+  if (
+    payload?.mode === "form" &&
+    asObject(payload._meta)?.codex_approval_kind === "mcp_tool_call"
+  ) {
+    const schema = asObject(payload.requestedSchema);
+    const properties = asObject(schema?.properties);
+    const message = asString(payload.message);
+    if (
+      schema?.type !== "object" ||
+      !properties ||
+      Object.keys(properties).length > 0 ||
+      (schema.required !== undefined &&
+        (!Array.isArray(schema.required) || schema.required.length > 0)) ||
+      !message
+    )
+      return undefined;
+    return [
+      {
+        id: "mcp_tool_confirmation",
+        header: "Tool approval",
+        question: `${message}\n\n${JSON.stringify(asObject(payload._meta)?.tool_params ?? {}, null, 2)}`,
+        options: [
+          { label: "Decline", description: "Do not run this tool." },
+          {
+            label: "Approve once",
+            description: "Allow only this tool call with the displayed arguments.",
+          },
+        ],
+      },
+    ];
+  }
   const questions = payload?.questions;
   if (!Array.isArray(questions)) {
     return undefined;
@@ -914,6 +955,9 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
     | undefined;
   private readonly teardownProcessTree: typeof teardownProviderProcessTree;
   private readonly taskCompleteFallbackGraceMs: number;
+  private readonly resolveDisabledFeatures:
+    | ((threadId: ThreadId) => Promise<ReadonlyArray<string>>)
+    | undefined;
   constructor(
     services?: ServiceMap.ServiceMap<never>,
     options?: {
@@ -924,6 +968,8 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       };
       readonly teardownProcessTree?: typeof teardownProviderProcessTree;
       readonly taskCompleteFallbackGraceMs?: number;
+      /** Provider-native capabilities that must be removed before the process starts. */
+      readonly resolveDisabledFeatures?: (threadId: ThreadId) => Promise<ReadonlyArray<string>>;
     },
   ) {
     super();
@@ -932,6 +978,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
     this.agentGatewayMcp = options?.agentGatewayMcp;
     this.teardownProcessTree = options?.teardownProcessTree ?? teardownProviderProcessTree;
     this.taskCompleteFallbackGraceMs = Math.max(0, options?.taskCompleteFallbackGraceMs ?? 750);
+    this.resolveDisabledFeatures = options?.resolveDisabledFeatures;
   }
 
   // The Vulcan MCP server rides on the shared overlay config (no secrets),
@@ -1009,9 +1056,11 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
         ...(codexHomePath ? { homePath: codexHomePath } : {}),
       });
       gatewaySessionLease = this.agentGatewayMcp?.acquireSessionLease(threadId);
+      const disabledFeatures = await this.resolveDisabledFeatures?.(threadId);
       const child = spawnCodexAppServer({
         binaryPath: codexBinaryPath,
         cwd: resolvedCwd,
+        ...(disabledFeatures?.length ? { disabledFeatures } : {}),
         env: await this.buildSessionProcessEnv(
           codexHomePath,
           gatewaySessionLease?.connection.bearerToken,
@@ -2079,9 +2128,12 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
     // dropping it first would strand codex on an id nobody can respond to.
     await this.writeMessage(context, {
       id: pendingRequest.jsonRpcId,
-      result: {
-        answers: codexAnswers,
-      },
+      result: pendingRequest.mcpToolConfirmation
+        ? codexAnswers.mcp_tool_confirmation?.answers.length === 1 &&
+          codexAnswers.mcp_tool_confirmation.answers[0] === "Approve once"
+          ? { action: "accept", content: {} }
+          : { action: "decline", content: null }
+        : { answers: codexAnswers },
     });
     context.pendingUserInputs.delete(pendingRequest.requestId);
 
@@ -3257,7 +3309,10 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       context.pendingApprovals.set(requestId, pendingRequest);
     }
 
-    const isUserInputRequest = request.method === "item/tool/requestUserInput";
+    const isUserInputRequest =
+      request.method === "item/tool/requestUserInput" ||
+      request.method === "tool/requestUserInput" ||
+      request.method === "mcpServer/elicitation/request";
     // Parsed up front: a request whose questions cannot be rendered must never
     // become a pending entry, because nothing would ever answer its JSON-RPC id.
     const userInputQuestions = isUserInputRequest
@@ -3266,6 +3321,9 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
     if (isUserInputRequest && userInputQuestions) {
       requestId = ApprovalRequestId.makeUnsafe(randomUUID());
       context.pendingUserInputs.set(requestId, {
+        ...(request.method === "mcpServer/elicitation/request"
+          ? { mcpToolConfirmation: true }
+          : {}),
         requestId,
         jsonRpcId: request.id,
         threadId: context.session.threadId,

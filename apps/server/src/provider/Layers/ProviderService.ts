@@ -1386,7 +1386,9 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
     const retiredGatewaySessionRecoveries = new Set<ThreadId>();
     scheduleRetiredGatewaySessionRecovery = (event) => {
       if (
-        (event.type !== "turn.completed" && event.type !== "turn.aborted") ||
+        (event.type !== "turn.completed" &&
+          event.type !== "turn.aborted" &&
+          event.type !== "runtime.error") ||
         !runtimeEventRetiredGatewayTurnAuthority(event)
       ) {
         return Effect.void;
@@ -1879,9 +1881,11 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                     Effect.flatMap(
                       Option.match({
                         onNone: () =>
-                          toValidationError(
-                            "ProviderService.sendTurn",
-                            `Cannot recover thread '${input.threadId}' because its provider binding was removed.`,
+                          Effect.fail(
+                            toValidationError(
+                              "ProviderService.sendTurn",
+                              `Cannot recover thread '${input.threadId}' because its provider binding was removed.`,
+                            ),
                           ),
                         onSome: Effect.succeed,
                       }),

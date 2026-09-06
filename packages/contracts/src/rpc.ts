@@ -22,6 +22,45 @@ import {
   AutomationStreamEvent,
   AutomationUpdateInput,
 } from "./automation";
+import {
+  BotAuditListInput,
+  BotAuditListResult,
+  BotCommsChannelListInput,
+  BotCommsChannelListResult,
+  BotCommsMessageListInput,
+  BotCommsMessageListResult,
+  BotControlInput,
+  BotControlResult,
+  BotCreateInput,
+  BotCreateResult,
+  BotDelegationListInput,
+  BotDelegationListResult,
+  BotDeleteInput,
+  BotDeleteResult,
+  BotEvent,
+  BotListInput,
+  BotListResult,
+  BotMemoryGetInput,
+  BotMemoryGetResult,
+  BotMemorySetInput,
+  BotMemorySetResult,
+  BotMemoryTopicGetInput,
+  BotMemoryTopicGetResult,
+  BotMemoryTopicListInput,
+  BotMemoryTopicListResult,
+  BotPeerApprovalRespondInput,
+  BotPeerApprovalRespondResult,
+  BotTaskArchiveInput,
+  BotTaskArchiveResult,
+  BotTaskCreateInput,
+  BotTaskCreateResult,
+  BotTaskRunInput,
+  BotTaskRunResult,
+  BotTaskSetActiveInput,
+  BotTaskSetActiveResult,
+  BotUpdateInput,
+  BotUpdateResult,
+} from "./bot";
 import { OpenInEditorInput } from "./editor";
 import { ProjectId, WorkspaceId } from "./baseSchemas";
 import {
@@ -1114,6 +1153,121 @@ export const WsSubscribeAutomationEventsRpc = Rpc.make(WS_METHODS.subscribeAutom
   stream: true,
 });
 
+export const WsBotListRpc = Rpc.make(WS_METHODS.botList, {
+  payload: BotListInput,
+  success: BotListResult,
+  error: WsRpcError,
+});
+
+export const WsBotCreateRpc = Rpc.make(WS_METHODS.botCreate, {
+  payload: BotCreateInput,
+  success: BotCreateResult,
+  error: WsRpcError,
+});
+
+export const WsBotUpdateRpc = Rpc.make(WS_METHODS.botUpdate, {
+  payload: BotUpdateInput,
+  success: BotUpdateResult,
+  error: WsRpcError,
+});
+
+export const WsBotDeleteRpc = Rpc.make(WS_METHODS.botDelete, {
+  payload: BotDeleteInput,
+  success: BotDeleteResult,
+  error: WsRpcError,
+});
+
+export const WsBotTaskCreateRpc = Rpc.make(WS_METHODS.botTaskCreate, {
+  payload: BotTaskCreateInput,
+  success: BotTaskCreateResult,
+  error: WsRpcError,
+});
+
+export const WsBotTaskRunRpc = Rpc.make(WS_METHODS.botTaskRun, {
+  payload: BotTaskRunInput,
+  success: BotTaskRunResult,
+  error: WsRpcError,
+});
+
+export const WsBotTaskSetActiveRpc = Rpc.make(WS_METHODS.botTaskSetActive, {
+  payload: BotTaskSetActiveInput,
+  success: BotTaskSetActiveResult,
+  error: WsRpcError,
+});
+
+export const WsBotTaskArchiveRpc = Rpc.make(WS_METHODS.botTaskArchive, {
+  payload: BotTaskArchiveInput,
+  success: BotTaskArchiveResult,
+  error: WsRpcError,
+});
+
+export const WsBotMemoryGetRpc = Rpc.make(WS_METHODS.botMemoryGet, {
+  payload: BotMemoryGetInput,
+  success: BotMemoryGetResult,
+  error: WsRpcError,
+});
+
+export const WsBotMemorySetRpc = Rpc.make(WS_METHODS.botMemorySet, {
+  payload: BotMemorySetInput,
+  success: BotMemorySetResult,
+  error: WsRpcError,
+});
+
+export const WsBotMemoryTopicListRpc = Rpc.make(WS_METHODS.botMemoryTopicList, {
+  payload: BotMemoryTopicListInput,
+  success: BotMemoryTopicListResult,
+  error: WsRpcError,
+});
+
+export const WsBotMemoryTopicGetRpc = Rpc.make(WS_METHODS.botMemoryTopicGet, {
+  payload: BotMemoryTopicGetInput,
+  success: BotMemoryTopicGetResult,
+  error: WsRpcError,
+});
+
+export const WsBotControlRpc = Rpc.make(WS_METHODS.botControl, {
+  payload: BotControlInput,
+  success: BotControlResult,
+  error: WsRpcError,
+});
+
+export const WsBotAuditListRpc = Rpc.make(WS_METHODS.botAuditList, {
+  payload: BotAuditListInput,
+  success: BotAuditListResult,
+  error: WsRpcError,
+});
+
+export const WsBotCommsChannelListRpc = Rpc.make(WS_METHODS.botCommsChannelList, {
+  payload: BotCommsChannelListInput,
+  success: BotCommsChannelListResult,
+  error: WsRpcError,
+});
+
+export const WsBotCommsMessageListRpc = Rpc.make(WS_METHODS.botCommsMessageList, {
+  payload: BotCommsMessageListInput,
+  success: BotCommsMessageListResult,
+  error: WsRpcError,
+});
+
+export const WsBotDelegationListRpc = Rpc.make(WS_METHODS.botDelegationList, {
+  payload: BotDelegationListInput,
+  success: BotDelegationListResult,
+  error: WsRpcError,
+});
+
+export const WsBotPeerApprovalRespondRpc = Rpc.make(WS_METHODS.botPeerApprovalRespond, {
+  payload: BotPeerApprovalRespondInput,
+  success: BotPeerApprovalRespondResult,
+  error: WsRpcError,
+});
+
+export const WsSubscribeBotEventsRpc = Rpc.make(WS_METHODS.subscribeBotEvents, {
+  payload: Schema.Struct({}),
+  success: BotEvent,
+  error: WsRpcError,
+  stream: true,
+});
+
 export const WsBootstrapRpcGroup = RpcGroup.make(WsBootstrapNegotiateRpc);
 
 export const WsFeatureRpcGroup = RpcGroup.make(
@@ -1246,6 +1400,25 @@ export const WsFeatureRpcGroup = RpcGroup.make(
   WsAutomationArchiveRunRpc,
   WsAutomationResolveProposalRpc,
   WsSubscribeAutomationEventsRpc,
+  WsBotListRpc,
+  WsBotCreateRpc,
+  WsBotUpdateRpc,
+  WsBotDeleteRpc,
+  WsBotTaskCreateRpc,
+  WsBotTaskRunRpc,
+  WsBotTaskSetActiveRpc,
+  WsBotTaskArchiveRpc,
+  WsBotMemoryGetRpc,
+  WsBotMemorySetRpc,
+  WsBotMemoryTopicListRpc,
+  WsBotMemoryTopicGetRpc,
+  WsBotControlRpc,
+  WsBotAuditListRpc,
+  WsBotCommsChannelListRpc,
+  WsBotCommsMessageListRpc,
+  WsBotDelegationListRpc,
+  WsBotPeerApprovalRespondRpc,
+  WsSubscribeBotEventsRpc,
 );
 
 /** @deprecated Use WsFeatureRpcGroup. Bootstrap is intentionally a separate endpoint/group. */

@@ -21,6 +21,7 @@ import {
   workspaceRootsEqual,
 } from "@vulcan/shared/threadWorkspace";
 import { doThreadMarkerRangesOverlap } from "@vulcan/shared/threadMarkers";
+import { isLocalOnlyContainerProjectKind } from "@vulcan/shared/projectContainers";
 import { collectSubagentDescendants } from "@vulcan/shared/threadHierarchy";
 import { autoRuntimeModeSelectionIssue } from "@vulcan/shared/runtimeMode";
 import { providerSupportsNativeTurnSteering } from "@vulcan/shared/providerMetadata";
@@ -63,10 +64,12 @@ import {
 
 const nowIso = () => new Date().toISOString();
 const DEFAULT_ASSISTANT_DELIVERY_MODE = "buffered" as const;
-const STUDIO_PROJECT_KIND_SET = new Set<ProjectKind>(["studio"]);
+// App-managed container kinds (Studio, Bots) own their root exclusively and must never be
+// silently retired by a plain project claiming the same folder.
+const MANAGED_CONTAINER_PROJECT_KIND_SET = new Set<ProjectKind>(["studio", "bots"]);
 // Kinds that claim exclusive ownership of a workspace root. Chat containers are excluded: they
 // use placeholder roots (e.g. the home dir) that legitimately coexist with real projects.
-const WORKSPACE_OWNING_PROJECT_KIND_SET = new Set<ProjectKind>(["project", "studio"]);
+const WORKSPACE_OWNING_PROJECT_KIND_SET = new Set<ProjectKind>(["project", "studio", "bots"]);
 
 function validateAutoRuntimeMode(
   command: OrchestrationCommand,
@@ -285,7 +288,7 @@ function resolveCreatedThreadWorkspaceMetadata(
   projectKind: ProjectKind | undefined,
   command: CreatedThreadWorkspaceCommand,
 ) {
-  if (projectKind === "studio") {
+  if (isLocalOnlyContainerProjectKind(projectKind)) {
     return {
       envMode: "local" as const,
       branch: null,
@@ -326,7 +329,7 @@ function resolveThreadWorkspaceMetadataPatch(
   command: Extract<OrchestrationCommand, { type: "thread.meta.update" }>,
   currentThread: OrchestrationThread,
 ) {
-  if (projectKind === "studio") {
+  if (isLocalOnlyContainerProjectKind(projectKind)) {
     return {
       envMode: "local" as const,
       branch: null,
@@ -599,7 +602,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         const existingStudioProject = listActiveProjectsByWorkspaceRoot(
           readModel,
           command.workspaceRoot,
-          { kinds: STUDIO_PROJECT_KIND_SET },
+          { kinds: MANAGED_CONTAINER_PROJECT_KIND_SET },
         )[0];
         if (existingStudioProject) {
           return yield* new OrchestrationCommandInvariantError({
@@ -642,9 +645,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           });
         }
       }
-      if (nextProjectKind === "studio") {
+      if (nextProjectKind === "studio" || nextProjectKind === "bots") {
         // Cross-kind on purpose: a regular project already using this root would otherwise
-        // coexist with the Studio container, breaking workspace-root-to-project uniqueness
+        // coexist with the Studio/Bots container, breaking workspace-root-to-project uniqueness
         // that shell snapshot mapping and duplicate recovery rely on.
         const existingOwningProject = listActiveProjectsByWorkspaceRoot(
           readModel,
@@ -906,8 +909,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           runtimeMode: command.runtimeMode,
           interactionMode: command.interactionMode,
           ...resolveCreatedThreadWorkspaceMetadata(project.kind, command),
-          createBranchFlowCompleted:
-            project.kind === "studio" ? false : command.createBranchFlowCompleted,
+          createBranchFlowCompleted: isLocalOnlyContainerProjectKind(project.kind)
+            ? false
+            : command.createBranchFlowCompleted,
           isPinned: command.isPinned,
           parentThreadId: command.parentThreadId,
           ...(command.creationSource !== undefined
@@ -983,8 +987,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           runtimeMode: command.runtimeMode,
           interactionMode: command.interactionMode,
           ...resolveCreatedThreadWorkspaceMetadata(project.kind, command),
-          createBranchFlowCompleted:
-            project.kind === "studio" ? false : command.createBranchFlowCompleted,
+          createBranchFlowCompleted: isLocalOnlyContainerProjectKind(project.kind)
+            ? false
+            : command.createBranchFlowCompleted,
           isPinned: false,
           parentThreadId: null,
           subagentAgentId: null,
@@ -1079,8 +1084,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           runtimeMode: command.runtimeMode,
           interactionMode: command.interactionMode,
           ...resolveCreatedThreadWorkspaceMetadata(project.kind, command),
-          createBranchFlowCompleted:
-            project.kind === "studio" ? false : command.createBranchFlowCompleted,
+          createBranchFlowCompleted: isLocalOnlyContainerProjectKind(project.kind)
+            ? false
+            : command.createBranchFlowCompleted,
           isPinned: false,
           parentThreadId: null,
           subagentAgentId: null,

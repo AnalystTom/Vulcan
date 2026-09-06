@@ -14,6 +14,7 @@ import {
   JSON_RPC_METHOD_NOT_FOUND,
   mcpToolResultError,
   parseMcpMessage,
+  type McpToolCallResult,
   type JsonRpcId,
   type JsonRpcRequest,
 } from "./protocol.ts";
@@ -54,6 +55,15 @@ function invalidRequestResponse(
   };
 }
 
+function isToolVisible(
+  tool: ToolEntry,
+  context: Pick<ToolContext, "callerThreadId" | "callerProvider">,
+): Effect.Effect<boolean> {
+  return tool.visibleFor === undefined
+    ? Effect.succeed(true)
+    : tool.visibleFor(context).pipe(Effect.catchDefect(() => Effect.succeed(false)));
+}
+
 function requestIdKey(id: JsonRpcId): string {
   return `${typeof id}:${String(id)}`;
 }
@@ -66,6 +76,16 @@ export function makeAgentGatewayMcpTransport(input: {
   readonly requireThreadShell: (
     threadId: string,
   ) => Effect.Effect<OrchestrationThreadShell, unknown>;
+  readonly authorizeTool?: (input: {
+    readonly tool: ToolEntry;
+    readonly args: Record<string, unknown>;
+    readonly context: ToolContext;
+  }) => Effect.Effect<McpToolCallResult | null>;
+  readonly observeToolResult?: (input: {
+    readonly tool: ToolEntry;
+    readonly context: ToolContext;
+    readonly result: McpToolCallResult;
+  }) => Effect.Effect<void>;
 }): AgentGatewayShape["handleMcpPost"] {
   const toolsByName = new Map(input.tools.map((tool) => [tool.definition.name, tool]));
   const handleRequest = (request: JsonRpcRequest, context: Omit<ToolContext, "jsonRpcRequestId">) =>
@@ -82,17 +102,21 @@ export function makeAgentGatewayMcpTransport(input: {
           );
         case "ping":
           return jsonRpcResult(request.id, {});
-        case "tools/list":
+        case "tools/list": {
+          const visibleTools = yield* Effect.filter(input.tools, (tool) =>
+            isToolVisible(tool, context),
+          );
           return jsonRpcResult(request.id, {
-            tools: input.tools.map((tool) => tool.definition),
+            tools: visibleTools.map((tool) => tool.definition),
           });
+        }
         case "tools/call": {
           const toolName = request.params.name;
           if (typeof toolName !== "string") {
             return jsonRpcError(request.id, JSON_RPC_INVALID_PARAMS, "Missing tool name.");
           }
           const tool = toolsByName.get(toolName);
-          if (!tool) {
+          if (!tool || !(yield* isToolVisible(tool, context))) {
             return jsonRpcError(request.id, JSON_RPC_INVALID_PARAMS, `Unknown tool "${toolName}".`);
           }
           const rawArgs = request.params.arguments;
@@ -125,9 +149,20 @@ export function makeAgentGatewayMcpTransport(input: {
               return jsonRpcResult(request.id, gatewayToolErrorResult(authorityError));
             }
           }
+          if (input.authorizeTool) {
+            const rejection = yield* input.authorizeTool({
+              tool,
+              args,
+              context: invocationContext,
+            });
+            if (rejection) return jsonRpcResult(request.id, rejection);
+          }
           const result = yield* Effect.suspend(() => tool.handler(args, invocationContext)).pipe(
             Effect.catchDefect((defect) => Effect.succeed(mcpToolResultError(errorText(defect)))),
           );
+          if (input.observeToolResult) {
+            yield* input.observeToolResult({ tool, context: invocationContext, result });
+          }
           return jsonRpcResult(request.id, result);
         }
         default:

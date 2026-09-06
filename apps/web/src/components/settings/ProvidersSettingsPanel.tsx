@@ -400,7 +400,8 @@ const PROVIDER_INSTALL_SETTINGS: readonly ProviderInstallSettings[] = [
         settingsKey: "ompAgentDir",
         label: "OMP agent directory",
         placeholder: "OMP agent directory",
-        description: "Optional custom OMP agent directory for auth, models.yml, skills, and commands.",
+        description:
+          "Optional custom OMP agent directory for auth, models.yml, skills, and commands.",
       },
     ],
   },

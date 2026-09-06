@@ -303,6 +303,10 @@
     "./browserAnnotations": {
       "types": "./src/browserAnnotations.ts",
       "import": "./src/browserAnnotations.ts"
+    },
+    "./botAppearance": {
+      "types": "./src/botAppearance.ts",
+      "import": "./src/botAppearance.ts"
     }
   },
   "scripts": {

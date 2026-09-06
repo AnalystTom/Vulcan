@@ -63,6 +63,7 @@ const makeConfigLayer = () =>
         studioWorkspaceRoot: resolveDefaultStudioWorkspaceRoot({ homeDir }),
         baseDir,
         ...derived,
+        botsWorkspaceRoot: path.join(resolveDefaultChatWorkspaceRoot({ homeDir }), "Bots"),
         staticDir: undefined,
         devUrl: undefined,
         publicUrl: undefined,

@@ -34,7 +34,7 @@ import {
 import { buildTemporaryWorktreeBranchName } from "@vulcan/shared/git";
 import { providerStartOptionsFromServerSettings } from "@vulcan/shared/serverSettings";
 import { autoRuntimeModeSelectionIssue } from "@vulcan/shared/runtimeMode";
-import { Cause, Effect, Layer, Option, PubSub, Queue, Stream } from "effect";
+import { Cause, Effect, Layer, Option, PubSub, Queue, Semaphore, Stream } from "effect";
 
 import { GitCore } from "../../git/Services/GitCore.ts";
 import { TextGeneration } from "../../git/Services/TextGeneration.ts";
@@ -43,6 +43,7 @@ import { OrchestrationEngineService } from "../../orchestration/Services/Orchest
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { threadHasInFlightTurn } from "../../orchestration/commandInvariants.ts";
 import { AutomationRepository } from "../../persistence/Services/AutomationRepository.ts";
+import { BotRepository } from "../../persistence/Services/BotRepository.ts";
 import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
 import { runWorktreeSetupScript } from "../../worktreeSetup.ts";
 import type { ProjectionTurn } from "../../persistence/Services/ProjectionTurns.ts";
@@ -330,6 +331,19 @@ function safeComputeNextRunAt(
   }
 }
 
+function automationRetryDelaySeconds(
+  policy: Exclude<AutomationDefinition["retryPolicy"], { type: "none" }>,
+  failedAttempts: number,
+): number {
+  if (policy.type === "fixed") {
+    return policy.delaySeconds;
+  }
+  return Math.min(
+    policy.initialDelaySeconds * 2 ** Math.max(0, failedAttempts - 1),
+    policy.maxDelaySeconds,
+  );
+}
+
 function effectiveMinimumIntervalSeconds(input: {
   readonly minimumIntervalSeconds: number;
   readonly acknowledgedRisks: readonly string[];
@@ -558,6 +572,7 @@ export const AutomationServiceLive = Layer.effect(
   AutomationService,
   Effect.gen(function* () {
     const automationRepository = yield* AutomationRepository;
+    const botRepository = yield* BotRepository;
     const scheduleInstallSalt = yield* automationRepository
       .getOrCreateInstallSalt()
       .pipe(Effect.mapError(toServiceError("Failed to initialize automation schedule jitter.")));
@@ -573,6 +588,10 @@ export const AutomationServiceLive = Layer.effect(
     const orchestrationEngine = yield* OrchestrationEngineService;
     const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
     const projectionTurnRepository = yield* ProjectionTurnRepository;
+    // The scheduler lease serializes processes; this closes the same-process manual/scheduled
+    // race between bot-wide eligibility checks and durable run claims without slowing non-bot work.
+    // ponytail: bot admissions share one lock; use per-bot locks if admission throughput matters.
+    const botDispatchAdmissionLock = yield* Semaphore.make(1);
     // Unbounded so we never silently drop run/definition updates under a burst, matching
     // the rest of the server's PubSub usage.
     const events = yield* PubSub.unbounded<AutomationStreamEvent>();
@@ -764,11 +783,12 @@ export const AutomationServiceLive = Layer.effect(
     const validateExecutionPolicies = (input: {
       readonly retryPolicy: AutomationDefinition["retryPolicy"];
     }) =>
-      input.retryPolicy.type === "none"
+      input.retryPolicy.type !== "exponential" ||
+      input.retryPolicy.initialDelaySeconds <= input.retryPolicy.maxDelaySeconds
         ? Effect.void
         : Effect.fail(
             new AutomationServiceError({
-              message: "Automation retry policies are not supported yet.",
+              message: "Exponential retry max delay must be at least its initial delay.",
             }),
           );
 
@@ -938,6 +958,7 @@ export const AutomationServiceLive = Layer.effect(
       run: AutomationRun,
       now: string,
     ): Effect.Effect<AutomationRunNowResult, AutomationServiceError> => {
+      let retrySafe = automationContinuationThreadId(definition) !== null;
       return Effect.gen(function* () {
         const plannedIds = deriveAutomationRunIds(run.id);
         // Read the thread from the definition rather than the run: a dedicated automation can
@@ -980,6 +1001,14 @@ export const AutomationServiceLive = Layer.effect(
           acknowledgedRisks: definition.acknowledgedRisks,
           now,
         });
+        if (continuationThreadId !== null) {
+          const botEligibility = yield* botHeartbeatEligibility(continuationThreadId, true);
+          if (!botEligibility.eligible) {
+            return yield* Effect.fail(
+              new AutomationServiceError({ message: botEligibility.reason }),
+            );
+          }
+        }
 
         const [memoryOption, lastRunOption] = yield* Effect.all([
           automationRepository
@@ -1078,7 +1107,16 @@ export const AutomationServiceLive = Layer.effect(
               interactionMode: definition.interactionMode,
               createdAt: now,
             })
-            .pipe(Effect.mapError(toServiceError("Failed to continue automation thread.")));
+            .pipe(
+              Effect.tapError((error) =>
+                Effect.sync(() => {
+                  // Internal/projector failures may happen after durable acceptance.
+                  // Only an admission rejection proves this turn never started.
+                  retrySafe = error._tag === "OrchestrationCommandAdmissionError";
+                }),
+              ),
+              Effect.mapError(toServiceError("Failed to continue automation thread.")),
+            );
 
           return { run: started };
         }
@@ -1225,7 +1263,7 @@ export const AutomationServiceLive = Layer.effect(
               yield* publish({ type: "run-upserted", run: failed });
               return yield* Effect.fail(error);
             }
-            yield* publishRunResult(failed, "failed", failedAt, summary, true);
+            yield* publishRunResult(failed, "failed", failedAt, summary, true, false, retrySafe);
             return yield* Effect.fail(error);
           }).pipe(Effect.catch(() => Effect.fail(error))),
         ),
@@ -1302,10 +1340,15 @@ export const AutomationServiceLive = Layer.effect(
       trigger: AutomationRun["trigger"],
       scheduledFor: string,
       now: string,
-      options: { readonly threadIdOverride?: ThreadId | null } = {},
+      options: {
+        readonly threadIdOverride?: ThreadId | null;
+        readonly deferredUntil?: string | null;
+      } = {},
     ) =>
       Effect.gen(function* () {
-        const settings = yield* serverSettings.getSnapshot;
+        const settings = yield* serverSettings.getSnapshot.pipe(
+          Effect.mapError(toServiceError("Failed to load provider settings.")),
+        );
         const input = pendingRunInput(
           definition,
           trigger,
@@ -1332,7 +1375,9 @@ export const AutomationServiceLive = Layer.effect(
       threadIdOverride?: ThreadId | null,
     ) =>
       Effect.gen(function* () {
-        const settings = yield* serverSettings.getSnapshot;
+        const settings = yield* serverSettings.getSnapshot.pipe(
+          Effect.mapError(toServiceError("Failed to load provider settings.")),
+        );
         return yield* automationRepository.createRunAndIncrementDefinition(
           pendingRunInput(
             definition,
@@ -1794,7 +1839,12 @@ export const AutomationServiceLive = Layer.effect(
       ),
     );
 
-    const maybeStopLoop = (run: AutomationRun, status: AutomationRunStatus, now: string) =>
+    const maybeStopLoop = (
+      run: AutomationRun,
+      status: AutomationRunStatus,
+      now: string,
+      retrySafe: boolean,
+    ) =>
       automationRepository.getDefinitionById({ id: run.automationId }).pipe(
         Effect.mapError(toServiceError("Failed to load automation.")),
         Effect.flatMap((definitionOption) =>
@@ -1820,7 +1870,41 @@ export const AutomationServiceLive = Layer.effect(
                       policy: completionPolicy,
                     })
                   : Effect.void;
+              const retryPolicy = definition.retryPolicy;
+              const scheduleRetry =
+                status !== "failed" ||
+                stopOnError ||
+                reachedMax ||
+                !retrySafe ||
+                retryPolicy.type === "none"
+                  ? Effect.void
+                  : automationRepository
+                      .listRunsForDefinition({
+                        automationId: definition.id,
+                        limit: retryPolicy.maxAttempts,
+                      })
+                      .pipe(
+                        Effect.mapError(toServiceError("Failed to load automation retry history.")),
+                        Effect.flatMap((runs) => {
+                          const failedAttempts = runs.findIndex(
+                            (candidate) => candidate.status !== "failed",
+                          );
+                          const attemptCount = failedAttempts === -1 ? runs.length : failedAttempts;
+                          if (attemptCount >= retryPolicy.maxAttempts) {
+                            return Effect.void;
+                          }
+                          const retryAt = new Date(
+                            Date.parse(now) +
+                              automationRetryDelaySeconds(retryPolicy, attemptCount) * 1_000,
+                          ).toISOString();
+                          return createPendingRun(definition, { type: "scheduled" }, retryAt, now, {
+                            threadIdOverride: null,
+                            deferredUntil: retryAt,
+                          }).pipe(Effect.asVoid);
+                        }),
+                      );
               return enqueueAiStop.pipe(
+                Effect.flatMap(() => scheduleRetry),
                 Effect.flatMap(() => {
                   if (!stopOnError && !reachedMax) {
                     return Effect.void;
@@ -1843,6 +1927,7 @@ export const AutomationServiceLive = Layer.effect(
       summary?: string | null,
       evaluateStop = false,
       interruptBeforePublish = false,
+      retrySafe = false,
     ) =>
       automationRepository
         .markRunResult({
@@ -1860,7 +1945,7 @@ export const AutomationServiceLive = Layer.effect(
           ),
           Effect.tap((updated) => publish({ type: "run-upserted", run: updated })),
           Effect.tap((updated) =>
-            evaluateStop ? maybeStopLoop(updated, status, now) : Effect.void,
+            evaluateStop ? maybeStopLoop(updated, status, now, retrySafe) : Effect.void,
           ),
         );
 
@@ -2065,7 +2150,7 @@ export const AutomationServiceLive = Layer.effect(
         }
 
         yield* publish({ type: "run-upserted", run: updated });
-        yield* maybeStopLoop(updated, updated.status, now);
+        yield* maybeStopLoop(updated, updated.status, now, false);
       });
 
     const failRunForTimeout = (definition: AutomationDefinition, run: AutomationRun, now: string) =>
@@ -2575,6 +2660,73 @@ export const AutomationServiceLive = Layer.effect(
     // Gate a run that would append to an existing thread. A dedicated automation is the only
     // writer on its own thread, so in practice it only ever waits for its predecessor; the
     // same checks still apply, because a user can open and drive that thread by hand.
+    const botHeartbeatEligibility = (
+      targetThreadId: ThreadId,
+      currentRunClaimed: boolean,
+    ): Effect.Effect<
+      { readonly eligible: true } | { readonly eligible: false; readonly reason: string },
+      AutomationServiceError
+    > =>
+      Effect.gen(function* () {
+        const botOption = yield* botRepository
+          .getBotByThreadId({ threadId: targetThreadId })
+          .pipe(Effect.mapError(toServiceError("Failed to resolve heartbeat bot owner.")));
+        if (Option.isNone(botOption)) {
+          return { eligible: true as const };
+        }
+        const bot = botOption.value;
+        const tasks = yield* botRepository
+          .listBotTasks({ botId: bot.id, includeArchived: true })
+          .pipe(Effect.mapError(toServiceError("Failed to load heartbeat bot task.")));
+        const task = tasks.find((candidate) => candidate.threadId === targetThreadId);
+        const runtime = yield* botRepository
+          .getRuntimeState({ botId: bot.id })
+          .pipe(Effect.mapError(toServiceError("Failed to load heartbeat bot runtime.")));
+        if (bot.archivedAt) {
+          return { eligible: false as const, reason: "Heartbeat bot is archived." };
+        }
+        if (!task || task.archivedAt) {
+          return { eligible: false as const, reason: "Heartbeat bot task is archived." };
+        }
+        if (!bot.autonomy.enabled) {
+          return { eligible: false as const, reason: "Heartbeat bot autonomy is disabled." };
+        }
+        if (!bot.capabilityGrants.includes("thread.write")) {
+          return {
+            eligible: false as const,
+            reason: "Heartbeat bot has not been granted thread.write.",
+          };
+        }
+        if (Option.isNone(runtime)) {
+          return {
+            eligible: false as const,
+            reason: "Heartbeat bot runtime state is unavailable.",
+          };
+        }
+        if (runtime.value.phase !== "idle") {
+          return {
+            eligible: false as const,
+            reason: `Heartbeat bot cannot run while it is ${runtime.value.phase}.`,
+          };
+        }
+        const activeCounts = yield* Effect.forEach(
+          tasks.filter((candidate) => candidate.archivedAt === null),
+          (candidate) =>
+            automationRepository
+              .countActiveRunsForThread({ threadId: candidate.threadId })
+              .pipe(Effect.mapError(toServiceError("Failed to check heartbeat bot concurrency."))),
+          { concurrency: "unbounded" },
+        );
+        const activeRuns = activeCounts.reduce((sum, count) => sum + count, 0);
+        if (activeRuns - (currentRunClaimed ? 1 : 0) >= bot.autonomy.maxActiveRuns) {
+          return {
+            eligible: false as const,
+            reason: "Heartbeat bot has reached its autonomous run limit.",
+          };
+        }
+        return { eligible: true as const };
+      });
+
     const continuationEligibility = (
       definition: AutomationDefinition,
       now: string,
@@ -2594,6 +2746,13 @@ export const AutomationServiceLive = Layer.effect(
           return { eligible: false as const, reason: "Heartbeat target thread was not found." };
         }
         const shell = shellOption.value;
+        if (shell.archivedAt) {
+          return { eligible: false as const, reason: "Heartbeat target thread is archived." };
+        }
+        const botEligibility = yield* botHeartbeatEligibility(targetThreadId, false);
+        if (!botEligibility.eligible) {
+          return botEligibility;
+        }
         if (threadHasInFlightTurn(shell)) {
           return { eligible: false as const, reason: "Target thread has an active turn." };
         }
@@ -2705,7 +2864,7 @@ export const AutomationServiceLive = Layer.effect(
           );
       });
 
-    const runNow: AutomationServiceShape["runNow"] = (input) =>
+    const runNowUnlocked: AutomationServiceShape["runNow"] = (input) =>
       Effect.gen(function* () {
         const definition = yield* requireDefinition(input.automationId);
         if (definition.proposalState === "pending") {
@@ -2777,6 +2936,25 @@ export const AutomationServiceLive = Layer.effect(
         }
         return yield* dispatchRun(runnableDefinition, claimedRun.value, now);
       });
+    const withBotDispatchAdmission = <A, E, R>(
+      definition: AutomationDefinition,
+      effect: Effect.Effect<A, E, R>,
+    ): Effect.Effect<A, E | AutomationServiceError, R> => {
+      const targetThreadId = automationContinuationThreadId(definition);
+      if (!targetThreadId) {
+        return effect;
+      }
+      return botRepository.getBotByThreadId({ threadId: targetThreadId }).pipe(
+        Effect.mapError(toServiceError("Failed to resolve heartbeat bot owner.")),
+        Effect.flatMap((botOption) =>
+          Option.isSome(botOption) ? botDispatchAdmissionLock.withPermits(1)(effect) : effect,
+        ),
+      );
+    };
+    const runNow: AutomationServiceShape["runNow"] = (input) =>
+      requireDefinition(input.automationId).pipe(
+        Effect.flatMap((definition) => withBotDispatchAdmission(definition, runNowUnlocked(input))),
+      );
 
     const cancelRun: AutomationServiceShape["cancelRun"] = (input) =>
       cancelRunById(input).pipe(Effect.map((run) => ({ run })));
@@ -2834,7 +3012,7 @@ export const AutomationServiceLive = Layer.effect(
     // Run one due definition: enforce the iteration cap, apply misfire policy, skip when a
     // prior heartbeat run is still in flight, then dispatch. The run row is durable before
     // schedule advancement, so dispatch failures still leave auditable history.
-    const runDueDefinition = (definition: AutomationDefinition, now: string) =>
+    const runDueDefinitionUnlocked = (definition: AutomationDefinition, now: string) =>
       Effect.gen(function* () {
         if (definition.proposalState === "pending") {
           return Option.none<AutomationRunNowResult>();
@@ -3004,8 +3182,10 @@ export const AutomationServiceLive = Layer.effect(
         );
         return Option.some(result);
       });
+    const runDueDefinition = (definition: AutomationDefinition, now: string) =>
+      withBotDispatchAdmission(definition, runDueDefinitionUnlocked(definition, now));
 
-    const retryDeferredRun = (run: AutomationRun, now: string) =>
+    const retryDeferredRunUnlocked = (run: AutomationRun, now: string) =>
       Effect.gen(function* () {
         const definition = yield* requireDefinition(run.automationId);
         if (!definition.enabled) {
@@ -3090,6 +3270,12 @@ export const AutomationServiceLive = Layer.effect(
         );
         return Option.some(result);
       });
+    const retryDeferredRun = (run: AutomationRun, now: string) =>
+      requireDefinition(run.automationId).pipe(
+        Effect.flatMap((definition) =>
+          withBotDispatchAdmission(definition, retryDeferredRunUnlocked(run, now)),
+        ),
+      );
 
     const runDueOnce: AutomationServiceShape["runDueOnce"] = (input = {}) =>
       Effect.gen(function* () {

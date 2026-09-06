@@ -21,6 +21,7 @@ export interface DispatchCommandNormalizerOptions<E> {
   readonly attachmentsDir: string;
   readonly chatWorkspaceRoot?: string;
   readonly studioWorkspaceRoot?: string;
+  readonly botsWorkspaceRoot?: string;
   readonly fileSystem: FileSystem.FileSystem;
   readonly path: Path.Path;
   readonly canonicalizeProjectWorkspaceRoot: (
@@ -29,6 +30,7 @@ export interface DispatchCommandNormalizerOptions<E> {
   ) => Effect.Effect<string, E>;
   readonly prepareChatWorkspaceRoot?: (workspaceRoot: string) => Effect.Effect<void, E>;
   readonly prepareStudioWorkspaceRoot?: (workspaceRoot: string) => Effect.Effect<void, E>;
+  readonly prepareBotsWorkspaceRoot?: (workspaceRoot: string) => Effect.Effect<void, E>;
 }
 
 // Deferred workspace-root scaffolding (mkdir of managed subdirectories like Inbox/Outbox/
@@ -53,8 +55,10 @@ export function makeDispatchCommandNormalizer<E>(options: DispatchCommandNormali
   //     to avoid ever scaffolding "work"/"outputs" straight into the shared parent directory.
   //   - studio: the Studio container project's workspace root IS exactly studioWorkspaceRoot
   //     (see ensureStudioProject in studioProjects.ts), so exact equality must trigger prepare.
+  //   - bots: mirrors studio — the Bots container project's workspace root IS exactly
+  //     botsWorkspaceRoot (per-bot directories are scaffolded lazily by botWorkspace.ts).
   const maybePrepareWorkspaceRoot = (input: {
-    readonly kind: "chat" | "studio";
+    readonly kind: "chat" | "studio" | "bots";
     readonly command: Extract<
       ClientOrchestrationCommand,
       { type: "project.create" | "project.meta.update" }
@@ -118,6 +122,21 @@ export function makeDispatchCommandNormalizer<E>(options: DispatchCommandNormali
       prepare: options.prepareStudioWorkspaceRoot,
       prepareWhenEqualToRoot: true,
     });
+  const maybePrepareBotsWorkspaceRoot = (
+    command: Extract<
+      ClientOrchestrationCommand,
+      { type: "project.create" | "project.meta.update" }
+    >,
+    workspaceRoot: string,
+  ) =>
+    maybePrepareWorkspaceRoot({
+      kind: "bots",
+      command,
+      workspaceRoot,
+      configuredWorkspaceRoot: options.botsWorkspaceRoot,
+      prepare: options.prepareBotsWorkspaceRoot,
+      prepareWhenEqualToRoot: true,
+    });
 
   // Combines the chat + studio scaffolding decisions into a single deferred effect. The
   // decision logic (kinds, prepareWhenEqualToRoot, isWorkspaceRootWithin/workspaceRootsEqual)
@@ -134,6 +153,7 @@ export function makeDispatchCommandNormalizer<E>(options: DispatchCommandNormali
       [
         maybePrepareChatWorkspaceRoot(command, workspaceRoot),
         maybePrepareStudioWorkspaceRoot(command, workspaceRoot),
+        maybePrepareBotsWorkspaceRoot(command, workspaceRoot),
       ],
       { discard: true },
     );

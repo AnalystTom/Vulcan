@@ -724,6 +724,7 @@ export function useAutomations(onRunStarted?: (threadId: ThreadId) => void) {
   return {
     data,
     isLoading: automationsQuery.isLoading,
+    isError: automationsQuery.isError,
     refetch: automationsQuery.refetch,
     createMutation,
     updateMutation,

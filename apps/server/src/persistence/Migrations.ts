@@ -107,6 +107,9 @@ import Migration0088 from "./Migrations/088_ProjectionThreadsSettledAt.ts";
 import Migration0089 from "./Migrations/089_RecoverRetentionHiddenThreads.ts";
 import Migration0090 from "./Migrations/090_WorkspaceLayouts.ts";
 import Migration0091 from "./Migrations/091_FactoryRuns.ts";
+import Migration0093 from "./Migrations/093_Bots.ts";
+import Migration0094 from "./Migrations/094_BotAutonomyControlPlane.ts";
+import Migration0095 from "./Migrations/095_BotComms.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -213,6 +216,9 @@ export const migrationEntries = [
   [89, "RecoverRetentionHiddenThreads", Migration0089],
   [90, "WorkspaceLayouts", Migration0090],
   [91, "FactoryRuns", Migration0091],
+  [93, "Bots", Migration0093],
+  [94, "BotAutonomyControlPlane", Migration0094],
+  [95, "BotComms", Migration0095],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

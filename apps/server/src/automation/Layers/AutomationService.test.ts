@@ -1,6 +1,8 @@
 import { assert, it } from "@effect/vitest";
 import {
   AutomationId,
+  BotId,
+  BotTaskId,
   type AutomationListResult,
   AutomationRunId,
   CommandId,
@@ -11,6 +13,9 @@ import {
   TurnId,
   type AutomationCreateInput,
   type AutomationRun,
+  type Bot,
+  type BotRuntimeState,
+  type BotTask,
   type GitCreateDetachedWorktreeInput,
   type GitRemoveWorktreeInput,
   type OrchestrationCommand,
@@ -23,7 +28,10 @@ import { TestClock } from "effect/testing";
 
 import { GitCore, type GitCoreShape } from "../../git/Services/GitCore.ts";
 import { TextGeneration, type TextGenerationShape } from "../../git/Services/TextGeneration.ts";
-import { OrchestrationCommandInternalError } from "../../orchestration/Errors.ts";
+import {
+  OrchestrationCommandAdmissionError,
+  OrchestrationCommandInternalError,
+} from "../../orchestration/Errors.ts";
 import { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
 import type { OrchestrationEngineShape } from "../../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
@@ -32,6 +40,10 @@ import { AutomationRepositoryLive } from "../../persistence/Layers/AutomationRep
 import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import { AutomationRepository } from "../../persistence/Services/AutomationRepository.ts";
+import {
+  BotRepository,
+  type BotRepositoryShape,
+} from "../../persistence/Services/BotRepository.ts";
 import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { automationProposalActivityId } from "../proposalActivity.ts";
@@ -87,9 +99,13 @@ let completionEvaluationGate: {
 // When set, the orchestration dispatch mock fails on the matching command type so we
 // can exercise the failed-run / advance-after-dispatch paths.
 let failDispatchType: OrchestrationCommand["type"] | null = null;
+let rejectDispatchAdmission = false;
 let dispatchHook:
   | ((command: OrchestrationCommand) => Effect.Effect<void, OrchestrationCommandInternalError>)
   | null = null;
+let heartbeatBot: Bot | null = null;
+let heartbeatBotTasks: BotTask[] = [];
+let heartbeatBotRuntime: BotRuntimeState | null = null;
 
 function resetHarness() {
   dispatchedCommands.length = 0;
@@ -109,7 +125,11 @@ function resetHarness() {
   completionEvaluationInputs = [];
   completionEvaluationGate = null;
   failDispatchType = null;
+  rejectDispatchAdmission = false;
   dispatchHook = null;
+  heartbeatBot = null;
+  heartbeatBotTasks = [];
+  heartbeatBotRuntime = null;
 }
 
 // Build a partial thread shell; only the fields reconcileThread reads are populated.
@@ -120,6 +140,7 @@ function makeThreadShell(overrides: {
   readonly hasPendingApprovals?: boolean;
   readonly hasPendingUserInput?: boolean;
   readonly lastError?: string | null;
+  readonly archivedAt?: string | null;
 }): OrchestrationThreadShell {
   return {
     id: overrides.id ?? ThreadId.makeUnsafe("thread-shell"),
@@ -128,6 +149,7 @@ function makeThreadShell(overrides: {
     hasPendingApprovals: overrides.hasPendingApprovals,
     hasPendingUserInput: overrides.hasPendingUserInput,
     session: overrides.lastError !== undefined ? { lastError: overrides.lastError } : null,
+    archivedAt: overrides.archivedAt ?? null,
   } as unknown as OrchestrationThreadShell;
 }
 
@@ -373,11 +395,19 @@ const orchestrationEngine = {
   dispatch: (command: OrchestrationCommand) =>
     failDispatchType !== null && command.type === failDispatchType
       ? Effect.fail(
-          new OrchestrationCommandInternalError({
-            commandId: command.commandId,
-            commandType: command.type,
-            detail: "dispatch rejected by test harness",
-          }),
+          rejectDispatchAdmission
+            ? new OrchestrationCommandAdmissionError({
+                commandId: command.commandId,
+                commandType: command.type,
+                capacity: 1,
+                reservedCapacity: 0,
+                reason: "overloaded",
+              })
+            : new OrchestrationCommandInternalError({
+                commandId: command.commandId,
+                commandType: command.type,
+                detail: "dispatch rejected by test harness",
+              }),
         )
       : Effect.gen(function* () {
           if (dispatchHook) {
@@ -502,6 +532,76 @@ const gitCore = {
     }),
 } as unknown as GitCoreShape;
 
+const botRepository = {
+  getBotByThreadId: ({ threadId }: { threadId: ThreadId }) =>
+    Effect.succeed(
+      heartbeatBot && heartbeatBotTasks.some((task) => task.threadId === threadId)
+        ? Option.some(heartbeatBot)
+        : Option.none(),
+    ),
+  listBotTasks: () => Effect.succeed(heartbeatBotTasks),
+  getRuntimeState: () =>
+    Effect.succeed(heartbeatBotRuntime ? Option.some(heartbeatBotRuntime) : Option.none()),
+} as unknown as BotRepositoryShape;
+
+function configureHeartbeatBot(
+  threadId: ThreadId,
+  overrides: {
+    readonly autonomyEnabled?: boolean;
+    readonly grantsThreadWrite?: boolean;
+    readonly archivedBot?: boolean;
+    readonly archivedTask?: boolean;
+    readonly phase?: BotRuntimeState["phase"];
+  } = {},
+) {
+  const botId = BotId.makeUnsafe(`bot-${threadId}`);
+  const taskId = BotTaskId.makeUnsafe(`task-${threadId}`);
+  heartbeatBot = {
+    id: botId,
+    name: "Responsibility bot",
+    title: "Operator",
+    description: "",
+    avatar: { kind: "shape", shape: "idle", color: "green" },
+    modelSelection: { provider: "codex", model: "bot-default-model" },
+    providerOptions: null,
+    runtimeMode: "approval-required",
+    interactionMode: "default",
+    isolationMode: "workspace",
+    autonomy: { enabled: overrides.autonomyEnabled ?? true, maxActiveRuns: 1 },
+    capabilityGrants: overrides.grantsThreadWrite === false ? ["thread.read"] : ["thread.write"],
+    defaultWorkingDirectory: null,
+    defaultProjectId: null,
+    chiefOfStaff: false,
+    approvePeerComms: false,
+    isPinned: false,
+    isHidden: false,
+    activeTaskId: taskId,
+    workspaceDir: "/tmp/responsibility-bot",
+    createdAt: now,
+    updatedAt: now,
+    archivedAt: overrides.archivedBot ? now : null,
+  };
+  heartbeatBotTasks = [
+    {
+      id: taskId,
+      botId,
+      threadId,
+      pinnedProjectId: null,
+      title: "Recurring responsibility",
+      createdAt: now,
+      updatedAt: now,
+      archivedAt: overrides.archivedTask ? now : null,
+    },
+  ];
+  heartbeatBotRuntime = {
+    botId,
+    phase: overrides.phase ?? "idle",
+    activeThreadId: overrides.phase && overrides.phase !== "idle" ? threadId : null,
+    takeoverReason: null,
+    updatedAt: now,
+  };
+}
+
 const layer = it.layer(
   AutomationServiceLive.pipe(
     Layer.provideMerge(AutomationRepositoryLive),
@@ -512,6 +612,7 @@ const layer = it.layer(
     Layer.provideMerge(Layer.succeed(TextGeneration, textGeneration)),
     Layer.provideMerge(ServerSettingsService.layerTest()),
     Layer.provideMerge(Layer.succeed(GitCore, gitCore)),
+    Layer.provideMerge(Layer.succeed(BotRepository, botRepository)),
   ),
 );
 
@@ -3635,23 +3736,25 @@ layer("AutomationService", (it) => {
     }),
   );
 
-  it.effect("rejects retry policies until retry attempts are modeled", () =>
+  it.effect("accepts fixed retry policies", () =>
     Effect.gen(function* () {
       resetHarness();
       const service = yield* AutomationService;
 
-      const error = yield* service
-        .create({
-          ...createInput("local"),
-          retryPolicy: { type: "fixed", maxAttempts: 3, delaySeconds: 30 },
-        })
-        .pipe(Effect.flip);
+      const created = yield* service.create({
+        ...createInput("local"),
+        retryPolicy: { type: "fixed", maxAttempts: 3, delaySeconds: 30 },
+      });
 
-      assert.match(error.message, /retry policies are not supported/);
+      assert.deepStrictEqual(created.retryPolicy, {
+        type: "fixed",
+        maxAttempts: 3,
+        delaySeconds: 30,
+      });
     }),
   );
 
-  it.effect("rejects retry policies on update until retry attempts are modeled", () =>
+  it.effect("rejects an exponential retry cap below its initial delay", () =>
     Effect.gen(function* () {
       resetHarness();
       const service = yield* AutomationService;
@@ -3660,11 +3763,16 @@ layer("AutomationService", (it) => {
       const error = yield* service
         .update({
           id: created.id,
-          retryPolicy: { type: "fixed", maxAttempts: 3, delaySeconds: 30 },
+          retryPolicy: {
+            type: "exponential",
+            maxAttempts: 3,
+            initialDelaySeconds: 60,
+            maxDelaySeconds: 30,
+          },
         })
         .pipe(Effect.flip);
 
-      assert.match(error.message, /retry policies are not supported/);
+      assert.match(error.message, /max delay/);
     }),
   );
 
@@ -5127,6 +5235,321 @@ layer("AutomationService", (it) => {
         1,
       );
       yield* service.cancelRun({ runId: second.run.id });
+    }),
+  );
+
+  it.effect("enforces bot ownership guards before heartbeat dispatch", () =>
+    Effect.gen(function* () {
+      const cases = [
+        { name: "disabled autonomy", options: { autonomyEnabled: false } },
+        { name: "missing thread.write", options: { grantsThreadWrite: false } },
+        { name: "archived bot", options: { archivedBot: true } },
+        { name: "archived task", options: { archivedTask: true } },
+        { name: "paused runtime", options: { phase: "paused" as const } },
+        { name: "takeover runtime", options: { phase: "takeover-requested" as const } },
+        { name: "human runtime", options: { phase: "human-control" as const } },
+        { name: "busy runtime", options: { phase: "running" as const } },
+      ];
+
+      for (const testCase of cases) {
+        resetHarness();
+        const service = yield* AutomationService;
+        const targetThreadId = ThreadId.makeUnsafe(`guard-${testCase.name}`);
+        threadShell = Option.some(makeThreadShell({ id: targetThreadId }));
+        configureHeartbeatBot(targetThreadId, testCase.options);
+        const created = yield* service.create({
+          ...createInput("local"),
+          name: `Guard ${testCase.name}`,
+          mode: "heartbeat",
+          targetThreadId,
+        });
+
+        const result = yield* service.runNow({ automationId: created.id });
+
+        assert.strictEqual(result.run.status, "pending", testCase.name);
+        assert.strictEqual(
+          dispatchedCommands.filter((command) => command.type === "thread.turn.start").length,
+          0,
+          testCase.name,
+        );
+        yield* service.cancelRun({ runId: result.run.id });
+      }
+    }),
+  );
+
+  it.effect("dispatches an eligible bot heartbeat with the automation model", () =>
+    Effect.gen(function* () {
+      resetHarness();
+      const service = yield* AutomationService;
+      const targetThreadId = ThreadId.makeUnsafe("eligible-bot-heartbeat");
+      threadShell = Option.some(makeThreadShell({ id: targetThreadId }));
+      configureHeartbeatBot(targetThreadId);
+      const modelSelection = { provider: "codex" as const, model: "automation-specific-model" };
+      const created = yield* service.create({
+        ...createInput("local"),
+        mode: "heartbeat",
+        targetThreadId,
+        modelSelection,
+      });
+
+      const result = yield* service.runNow({ automationId: created.id });
+      const turn = dispatchedCommands.find((command) => command.type === "thread.turn.start");
+
+      assert.strictEqual(result.run.status, "running");
+      assert.deepStrictEqual(
+        turn?.type === "thread.turn.start" ? turn.modelSelection : null,
+        modelSelection,
+      );
+    }),
+  );
+
+  it.effect("defers bot heartbeats beyond the bot concurrency limit", () =>
+    Effect.gen(function* () {
+      resetHarness();
+      const service = yield* AutomationService;
+      const firstThreadId = ThreadId.makeUnsafe("bot-concurrency-first");
+      const secondThreadId = ThreadId.makeUnsafe("bot-concurrency-second");
+      threadShell = Option.some(makeThreadShell({ id: firstThreadId }));
+      configureHeartbeatBot(firstThreadId);
+      heartbeatBotTasks.push({
+        id: BotTaskId.makeUnsafe("bot-concurrency-second-task"),
+        botId: heartbeatBot!.id,
+        threadId: secondThreadId,
+        pinnedProjectId: null,
+        title: "Second responsibility",
+        createdAt: now,
+        updatedAt: now,
+        archivedAt: null,
+      });
+      const first = yield* service.create({
+        ...createInput("local"),
+        name: "First responsibility",
+        mode: "heartbeat",
+        targetThreadId: firstThreadId,
+      });
+      const second = yield* service.create({
+        ...createInput("local"),
+        name: "Second responsibility",
+        mode: "heartbeat",
+        targetThreadId: secondThreadId,
+      });
+
+      threadShell = Option.some(makeThreadShell({ id: secondThreadId }));
+      const [firstResult, secondResult] = yield* Effect.all(
+        [service.runNow({ automationId: first.id }), service.runNow({ automationId: second.id })],
+        { concurrency: "unbounded" },
+      );
+      const deferred = [firstResult, secondResult].find(
+        (result) => result.run.status === "pending",
+      );
+
+      assert.isDefined(deferred);
+      assert.isNotNull(deferred?.run.deferredUntil ?? null);
+      assert.strictEqual(
+        dispatchedCommands.filter((command) => command.type === "thread.turn.start").length,
+        1,
+      );
+    }),
+  );
+
+  it.effect("persists and recovers a bounded safe heartbeat retry", () =>
+    Effect.gen(function* () {
+      resetHarness();
+      const service = yield* AutomationService;
+      const targetThreadId = ThreadId.makeUnsafe("retry-bot-heartbeat");
+      threadShell = Option.some(makeThreadShell({ id: targetThreadId }));
+      configureHeartbeatBot(targetThreadId);
+      const modelSelection = { provider: "codex" as const, model: "retry-specific-model" };
+      const created = yield* service.create({
+        ...createInput("local"),
+        mode: "heartbeat",
+        targetThreadId,
+        modelSelection,
+        stopOnError: false,
+        retryPolicy: { type: "fixed", maxAttempts: 2, delaySeconds: 30 },
+      });
+      failDispatchType = "thread.turn.start";
+      rejectDispatchAdmission = true;
+
+      yield* service.runNow({ automationId: created.id }).pipe(Effect.flip);
+
+      const afterFailure = yield* service.listRunsForDefinition({
+        automationId: created.id,
+        limit: 10,
+      });
+      const retry = afterFailure.find((run) => run.status === "pending");
+      const failed = afterFailure.find((run) => run.status === "failed");
+      assert.isDefined(retry);
+      assert.isDefined(failed);
+      assert.strictEqual(
+        Date.parse(retry?.deferredUntil ?? "") - Date.parse(failed?.finishedAt ?? ""),
+        30_000,
+      );
+
+      failDispatchType = null;
+      const recovered = yield* service.runDueOnce({
+        now: new Date(Date.parse(retry?.deferredUntil ?? "") + 1_000).toISOString(),
+      });
+      const retryTurn = dispatchedCommands.find(
+        (command) => command.type === "thread.turn.start" && command.threadId === targetThreadId,
+      );
+
+      const recoveredRetry = recovered.find((result) => result.run.id === retry?.id);
+      assert.isDefined(recoveredRetry);
+      assert.strictEqual(recoveredRetry?.run.status, "running");
+      assert.deepStrictEqual(
+        retryTurn?.type === "thread.turn.start" ? retryTurn.modelSelection : null,
+        modelSelection,
+      );
+    }),
+  );
+
+  it.effect("bounds exponential heartbeat retries and caps their delay", () =>
+    Effect.gen(function* () {
+      resetHarness();
+      const service = yield* AutomationService;
+      const targetThreadId = ThreadId.makeUnsafe("exponential-retry-heartbeat");
+      threadShell = Option.some(makeThreadShell({ id: targetThreadId }));
+      const created = yield* service.create({
+        ...createInput("local"),
+        mode: "heartbeat",
+        targetThreadId,
+        stopOnError: false,
+        retryPolicy: {
+          type: "exponential",
+          maxAttempts: 3,
+          initialDelaySeconds: 10,
+          maxDelaySeconds: 15,
+        },
+      });
+      failDispatchType = "thread.turn.start";
+      rejectDispatchAdmission = true;
+
+      yield* service.runNow({ automationId: created.id }).pipe(Effect.flip);
+      let runs = yield* service.listRunsForDefinition({ automationId: created.id, limit: 10 });
+      const firstFailure = runs.find((run) => run.status === "failed")!;
+      const firstRetry = runs.find((run) => run.status === "pending")!;
+      assert.strictEqual(
+        Date.parse(firstRetry.deferredUntil!) - Date.parse(firstFailure.finishedAt!),
+        10_000,
+      );
+
+      yield* service.runDueOnce({
+        now: new Date(Date.parse(firstRetry.deferredUntil!) + 1_000).toISOString(),
+      });
+      runs = yield* service.listRunsForDefinition({ automationId: created.id, limit: 10 });
+      const failuresAfterRetry = runs.filter((run) => run.status === "failed");
+      const secondRetry = runs.find((run) => run.status === "pending")!;
+      assert.strictEqual(failuresAfterRetry.length, 2);
+      assert.strictEqual(
+        Date.parse(secondRetry.deferredUntil!) - Date.parse(failuresAfterRetry[0]!.finishedAt!),
+        15_000,
+      );
+
+      yield* service.runDueOnce({
+        now: new Date(Date.parse(secondRetry.deferredUntil!) + 1_000).toISOString(),
+      });
+      runs = yield* service.listRunsForDefinition({ automationId: created.id, limit: 10 });
+      assert.strictEqual(runs.filter((run) => run.status === "failed").length, 3);
+      assert.strictEqual(
+        runs.some((run) => run.status === "pending"),
+        false,
+      );
+    }),
+  );
+
+  it.effect("does not retry when stopOnError disables the automation", () =>
+    Effect.gen(function* () {
+      resetHarness();
+      const service = yield* AutomationService;
+      const targetThreadId = ThreadId.makeUnsafe("retry-stop-on-error");
+      threadShell = Option.some(makeThreadShell({ id: targetThreadId }));
+      const created = yield* service.create({
+        ...createInput("local"),
+        mode: "heartbeat",
+        targetThreadId,
+        stopOnError: true,
+        retryPolicy: { type: "fixed", maxAttempts: 2, delaySeconds: 30 },
+      });
+      failDispatchType = "thread.turn.start";
+
+      yield* service.runNow({ automationId: created.id }).pipe(Effect.flip);
+
+      const listed = yield* service.list({ projectId });
+      assert.strictEqual(
+        listed.definitions.find((definition) => definition.id === created.id)?.enabled,
+        false,
+      );
+      assert.strictEqual(listed.runs.filter((run) => run.automationId === created.id).length, 1);
+    }),
+  );
+
+  it.effect("does not retry an uncertain internal dispatch failure", () =>
+    Effect.gen(function* () {
+      resetHarness();
+      const service = yield* AutomationService;
+      const targetThreadId = ThreadId.makeUnsafe("uncertain-dispatch");
+      threadShell = Option.some(makeThreadShell({ id: targetThreadId }));
+      const created = yield* service.create({
+        ...createInput("local"),
+        mode: "heartbeat",
+        targetThreadId,
+        stopOnError: false,
+        retryPolicy: { type: "fixed", maxAttempts: 3, delaySeconds: 30 },
+      });
+      failDispatchType = "thread.turn.start";
+      yield* service.runNow({ automationId: created.id }).pipe(Effect.flip);
+      const runs = yield* service.listRunsForDefinition({ automationId: created.id, limit: 10 });
+      assert.strictEqual(runs.length, 1);
+      assert.strictEqual(runs[0]?.status, "failed");
+    }),
+  );
+
+  it.effect("does not resend a turn that was accepted and later failed", () =>
+    Effect.gen(function* () {
+      resetHarness();
+      const service = yield* AutomationService;
+      const projectionTurns = yield* ProjectionTurnRepository;
+      const targetThreadId = ThreadId.makeUnsafe("accepted-turn-no-retry");
+      const turnId = TurnId.makeUnsafe("accepted-turn-error");
+      threadShell = Option.some(makeThreadShell({ id: targetThreadId }));
+      const created = yield* service.create({
+        ...createInput("local"),
+        mode: "heartbeat",
+        targetThreadId,
+        stopOnError: false,
+        retryPolicy: { type: "fixed", maxAttempts: 3, delaySeconds: 30 },
+      });
+      const { run } = yield* service.runNow({ automationId: created.id });
+      yield* projectionTurns.upsertByTurnId({
+        threadId: targetThreadId,
+        turnId,
+        pendingMessageId: run.messageId!,
+        sourceProposedPlanThreadId: null,
+        sourceProposedPlanId: null,
+        assistantMessageId: null,
+        state: "error",
+        requestedAt: now,
+        startedAt: now,
+        completedAt: now,
+        checkpointTurnCount: null,
+        checkpointRef: null,
+        checkpointStatus: null,
+        checkpointFiles: [],
+      });
+      threadShell = Option.some(
+        makeThreadShell({
+          id: targetThreadId,
+          latestTurn: makeLatestTurn("error", turnId),
+          lastError: "provider failed after accepting the turn",
+        }),
+      );
+
+      yield* service.reconcileThread({ threadId: targetThreadId });
+
+      const runs = yield* service.listRunsForDefinition({ automationId: created.id, limit: 10 });
+      assert.strictEqual(runs.length, 1);
+      assert.strictEqual(runs[0]?.status, "failed");
     }),
   );
 

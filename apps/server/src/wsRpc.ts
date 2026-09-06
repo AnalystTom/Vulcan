@@ -1,3 +1,4 @@
+import type { BotEvent } from "@vulcan/contracts";
 import { execFile } from "node:child_process";
 
 import {
@@ -37,6 +38,8 @@ import { Headers, HttpRouter, HttpServerRequest, HttpServerResponse } from "effe
 import { RpcMiddleware, RpcSchema, RpcSerialization, RpcServer } from "effect/unstable/rpc";
 
 import { AutomationService } from "./automation/Services/AutomationService";
+import { BotCommsService } from "./bots/Services/BotCommsService";
+import { BotService } from "./bots/Services/BotService";
 import { authErrorResponse, makeEffectAuthRequest } from "./auth/effectHttp";
 import {
   ServerAuth,
@@ -327,6 +330,8 @@ const makeWsRpcHandlersLayer = () =>
     Effect.gen(function* () {
       const checkpointDiffQuery = yield* CheckpointDiffQuery;
       const automationService = yield* AutomationService;
+      const botService = yield* BotService;
+      const botCommsService = yield* BotCommsService;
       const config = yield* ServerConfig;
       const devServerManager = yield* DevServerManager;
       const fileSystem = yield* FileSystem.FileSystem;
@@ -576,15 +581,31 @@ const makeWsRpcHandlersLayer = () =>
           ),
         );
 
+      // The Bots container root has no managed subdirectory tree: per-bot directories
+      // (with their MEMORY.md / instruction files) are scaffolded lazily by botWorkspace.ts
+      // when a bot is created. The container prepare only guarantees the root exists.
+      const prepareBotsWorkspaceRoot = (workspaceRoot: string) =>
+        fileSystem.makeDirectory(workspaceRoot, { recursive: true }).pipe(
+          Effect.mapError(
+            (cause) =>
+              new WsRpcError({
+                message: `Failed to create bots workspace root: ${workspaceRoot}`,
+                cause,
+              }),
+          ),
+        );
+
       const normalizeDispatchCommand = makeDispatchCommandNormalizer<WsRpcError>({
         attachmentsDir: config.attachmentsDir,
         chatWorkspaceRoot: config.chatWorkspaceRoot,
         studioWorkspaceRoot: config.studioWorkspaceRoot,
+        botsWorkspaceRoot: config.botsWorkspaceRoot,
         fileSystem,
         path,
         canonicalizeProjectWorkspaceRoot,
         prepareChatWorkspaceRoot,
         prepareStudioWorkspaceRoot,
+        prepareBotsWorkspaceRoot,
       });
 
       const importThread = makeImportThreadHandler({
@@ -671,6 +692,7 @@ const makeWsRpcHandlersLayer = () =>
           homeDir: config.homeDir,
           chatWorkspaceRoot: config.chatWorkspaceRoot,
           studioWorkspaceRoot: config.studioWorkspaceRoot,
+          botsWorkspaceRoot: config.botsWorkspaceRoot,
           worktreesDir: config.worktreesDir,
           keybindingsConfigPath: config.keybindingsConfigPath,
           keybindings: keybindingsConfig.keybindings,
@@ -2145,6 +2167,70 @@ const makeWsRpcHandlersLayer = () =>
             ).pipe(
               Stream.mapError((cause) => toWsRpcError(cause, "Automation event stream failed")),
             ),
+          ),
+        [WS_METHODS.botList]: (input) =>
+          rpcEffect(
+            Effect.all([botService.list(input), botCommsService.snapshot]).pipe(
+              Effect.map(([bots, comms]) => ({ ...bots, ...comms })),
+            ),
+            "Failed to list bots",
+          ),
+        [WS_METHODS.botCreate]: (input) =>
+          rpcEffect(botService.create(input), "Failed to create bot"),
+        [WS_METHODS.botUpdate]: (input) =>
+          rpcEffect(botService.update(input), "Failed to update bot"),
+        [WS_METHODS.botDelete]: (input) =>
+          rpcEffect(botService.delete(input), "Failed to delete bot"),
+        [WS_METHODS.botTaskCreate]: (input) =>
+          rpcEffect(botService.createTask(input), "Failed to create bot task"),
+        [WS_METHODS.botTaskRun]: (input) =>
+          rpcEffect(botService.runTask(input), "Failed to run bot task"),
+        [WS_METHODS.botTaskSetActive]: (input) =>
+          rpcEffect(botService.setActiveTask(input), "Failed to set active bot task"),
+        [WS_METHODS.botTaskArchive]: (input) =>
+          rpcEffect(botService.archiveTask(input), "Failed to archive bot task"),
+        [WS_METHODS.botMemoryGet]: (input) =>
+          rpcEffect(botService.getMemory(input), "Failed to load bot memory"),
+        [WS_METHODS.botMemorySet]: (input) =>
+          rpcEffect(botService.setMemory(input), "Failed to save bot memory"),
+        [WS_METHODS.botMemoryTopicList]: (input) =>
+          rpcEffect(botService.listMemoryTopics(input), "Failed to list bot memory topics"),
+        [WS_METHODS.botMemoryTopicGet]: (input) =>
+          rpcEffect(botService.getMemoryTopic(input), "Failed to read the bot memory topic"),
+        [WS_METHODS.botControl]: (input) =>
+          rpcEffect(botService.control(input), "Failed to update bot control"),
+        [WS_METHODS.botAuditList]: (input) =>
+          rpcEffect(botService.listAudit(input), "Failed to list bot audit entries"),
+        [WS_METHODS.botCommsChannelList]: (input) =>
+          rpcEffect(botCommsService.listChannels(input), "Failed to list bot channels"),
+        [WS_METHODS.botCommsMessageList]: (input) =>
+          rpcEffect(botCommsService.listMessages(input), "Failed to list bot messages"),
+        [WS_METHODS.botDelegationList]: (input) =>
+          rpcEffect(botCommsService.listDelegations(input), "Failed to list bot delegations"),
+        [WS_METHODS.botPeerApprovalRespond]: (input) =>
+          rpcEffect(
+            botCommsService.respondPeerApproval(input),
+            "Failed to respond to the peer comms request",
+          ),
+        [WS_METHODS.subscribeBotEvents]: (_, { clientId }) =>
+          streamAdmission.guard(
+            clientId,
+            { key: "bot.events" },
+            Stream.mergeAll(
+              [
+                Stream.fromEffect(
+                  Effect.all([botService.snapshot, botCommsService.snapshot]).pipe(
+                    Effect.map(
+                      ([snapshot, comms]): BotEvent =>
+                        snapshot.type === "snapshot" ? { ...snapshot, ...comms } : snapshot,
+                    ),
+                  ),
+                ),
+                botService.streamEvents,
+                botCommsService.streamEvents,
+              ],
+              { concurrency: "unbounded" },
+            ).pipe(Stream.mapError((cause) => toWsRpcError(cause, "Bot event stream failed"))),
           ),
       });
     }),

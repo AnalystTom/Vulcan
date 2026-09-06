@@ -16,6 +16,7 @@
 import { randomUUID } from "node:crypto";
 
 import {
+  BotAuditEntryId,
   CommandId,
   VULCAN_GATEWAY_MAX_THREADS_PER_OPERATION,
   MessageId,
@@ -35,6 +36,14 @@ import { ProjectionSnapshotQuery } from "../../orchestration/Services/Projection
 import { AutomationService } from "../../automation/Services/AutomationService.ts";
 import { buildAutomationProposalActivity } from "../../automation/proposalActivity.ts";
 import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
+import { BotRepository } from "../../persistence/Services/BotRepository.ts";
+import { BotCommsService } from "../../bots/Services/BotCommsService.ts";
+import { makeBotTools } from "../botTools.ts";
+import { makeBotServerBrowserTools } from "../botBrowserTools.ts";
+import { makeBotEmailTools } from "../botEmailTools.ts";
+import { ServerSecretStore } from "../../auth/Services/ServerSecretStore.ts";
+import { makeBotProfileTools } from "../botProfileTools.ts";
+import { BotService } from "../../bots/Services/BotService.ts";
 import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
 import { OrchestrationEventDeliveryRepository } from "../../persistence/Services/OrchestrationEventDeliveries.ts";
 import { ProviderRuntimeEventRepository } from "../../persistence/Services/ProviderRuntimeEvents.ts";
@@ -49,7 +58,7 @@ import {
   AGENT_GATEWAY_TARGET_OPTIONS_DESCRIPTION,
   type AgentGatewayProviderAvailability,
 } from "../targetResolver.ts";
-import { mcpToolResultError, mcpToolResultJson } from "../protocol.ts";
+import { mcpToolResultError, mcpToolResultJson, type McpToolCallResult } from "../protocol.ts";
 import { gatewayIsoNow as isoNow } from "../creationUtils.ts";
 import {
   MODEL_SELECTION_INPUT_SCHEMA,
@@ -63,7 +72,12 @@ import {
   readRecordArg,
   readStringArg,
 } from "../toolInput.ts";
-import { WRITE_TOOL_ANNOTATIONS, type ToolEntry } from "../toolRuntime.ts";
+import {
+  GatewayToolError,
+  WRITE_TOOL_ANNOTATIONS,
+  gatewayToolErrorResult,
+  type ToolEntry,
+} from "../toolRuntime.ts";
 import { makeAgentGatewayMcpTransport } from "../mcpTransport.ts";
 import { recoverInterruptedAgentGatewayOperations } from "../startupRecovery.ts";
 import { makeCreateThreadsHandler } from "../creationCoordinator.ts";
@@ -75,6 +89,7 @@ import { makeThreadReadTools } from "../threadReadTools.ts";
 import { makeThreadDiagnosticTools } from "../threadDiagnosticTools.ts";
 import { pruneProjectedArchivedManagedWorktrees } from "../../managedWorktrees.ts";
 import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
+import { evaluateBotGatewayToolPolicy } from "../../bots/botGatewayPolicy.ts";
 
 // Providers already receive the versioned host policy exactly once in their
 // private prompt. MCP clients prepend initialize.instructions to every exposed
@@ -98,6 +113,10 @@ export const makeAgentGateway = Effect.gen(function* () {
   const eventDeliveries = yield* OrchestrationEventDeliveryRepository;
   const providerRuntimeEvents = yield* ProviderRuntimeEventRepository;
   const diagnostics = yield* ThreadDiagnosticsQuery;
+  const botRepository = Option.getOrUndefined(yield* Effect.serviceOption(BotRepository));
+  const botEmailSecrets = Option.getOrUndefined(yield* Effect.serviceOption(ServerSecretStore));
+  const botService = Option.getOrUndefined(yield* Effect.serviceOption(BotService));
+  const botComms = Option.getOrUndefined(yield* Effect.serviceOption(BotCommsService));
   const serverConfig = yield* ServerConfig;
   const browserAutomationHost = Option.getOrElse(
     yield* Effect.serviceOption(BrowserAutomationHost),
@@ -620,7 +639,107 @@ export const makeAgentGateway = Effect.gen(function* () {
     setThreadArchived,
     ...automationTools,
     ...browserTools,
+    ...(botRepository && process.env.VULCAN_AGENT_BROWSER_BIN
+      ? makeBotServerBrowserTools(botRepository, process.env.VULCAN_AGENT_BROWSER_BIN)
+      : []),
+    // Peer tools carry their own visibility predicate: bot task threads at depth 0 only.
+    ...(botComms ? makeBotTools(botComms) : []),
+    ...(botService && botRepository ? makeBotProfileTools(botRepository, botService) : []),
+    ...(botEmailSecrets && botRepository ? makeBotEmailTools(botRepository, botEmailSecrets) : []),
   ];
+
+  const authorizeBotTool = botRepository
+    ? (input: {
+        readonly tool: ToolEntry;
+        readonly context: { readonly callerThreadId: string };
+      }) =>
+        Effect.gen(function* () {
+          const botOption = yield* botRepository.getBotByThreadId({
+            threadId: ThreadId.makeUnsafe(input.context.callerThreadId),
+          });
+          if (Option.isNone(botOption)) return null;
+          const bot = botOption.value;
+          const stateOption = yield* botRepository.getRuntimeState({ botId: bot.id });
+          const phase = Option.match(stateOption, {
+            onNone: () => "idle" as const,
+            onSome: (state) => state.phase,
+          });
+          const readOnly = input.tool.definition.annotations?.readOnlyHint === true;
+          const policy = evaluateBotGatewayToolPolicy({
+            capabilityGrants: bot.capabilityGrants,
+            controlPhase: phase,
+            toolName: input.tool.definition.name,
+            readOnly,
+          });
+          const createdAt = isoNow();
+          yield* botRepository.appendAuditEntry({
+            id: BotAuditEntryId.makeUnsafe(`bot-audit-${randomUUID()}`),
+            botId: bot.id,
+            taskId: bot.activeTaskId,
+            threadId: ThreadId.makeUnsafe(input.context.callerThreadId),
+            capability: policy.capability,
+            action: input.tool.definition.name,
+            decision: policy.decision,
+            summary:
+              policy.decision === "allowed"
+                ? `Bot policy allowed ${input.tool.definition.name}.`
+                : policy.reason,
+            // Never persist raw tool arguments: they may contain credentials or user data.
+            detailJson: null,
+            createdAt,
+          });
+          if (policy.decision === "allowed") return null;
+          return gatewayToolErrorResult(
+            new GatewayToolError("bot_policy_denied", policy.reason, {
+              botId: bot.id,
+              capability: policy.capability,
+              phase,
+            }),
+          );
+        }).pipe(
+          Effect.catch(() =>
+            Effect.succeed(
+              mcpToolResultError(
+                "Bot permissions could not be verified. Try again when the server is available.",
+              ),
+            ),
+          ),
+        )
+    : undefined;
+  const observeBotToolResult = botRepository
+    ? (input: {
+        readonly tool: ToolEntry;
+        readonly context: { readonly callerThreadId: string };
+        readonly result: McpToolCallResult;
+      }) =>
+        Effect.gen(function* () {
+          if (input.result.isError !== true) return;
+          const botOption = yield* botRepository.getBotByThreadId({
+            threadId: ThreadId.makeUnsafe(input.context.callerThreadId),
+          });
+          if (Option.isNone(botOption)) return;
+          const bot = botOption.value;
+          const readOnly = input.tool.definition.annotations?.readOnlyHint === true;
+          const policy = evaluateBotGatewayToolPolicy({
+            capabilityGrants: bot.capabilityGrants,
+            controlPhase: "idle",
+            toolName: input.tool.definition.name,
+            readOnly,
+          });
+          yield* botRepository.appendAuditEntry({
+            id: BotAuditEntryId.makeUnsafe(`bot-audit-${randomUUID()}`),
+            botId: bot.id,
+            taskId: bot.activeTaskId,
+            threadId: ThreadId.makeUnsafe(input.context.callerThreadId),
+            capability: policy.capability,
+            action: input.tool.definition.name,
+            decision: "failed",
+            summary: `The allowed ${input.tool.definition.name} action returned an error.`,
+            detailJson: null,
+            createdAt: isoNow(),
+          });
+        }).pipe(Effect.catch((cause) => Effect.logError("Bot tool audit failed", cause)))
+    : undefined;
   return {
     handleMcpPost: makeAgentGatewayMcpTransport({
       credentials,
@@ -628,6 +747,8 @@ export const makeAgentGateway = Effect.gen(function* () {
       tools,
       instructions: AGENT_GATEWAY_INSTRUCTIONS,
       requireThreadShell,
+      ...(authorizeBotTool ? { authorizeTool: authorizeBotTool } : {}),
+      ...(observeBotToolResult ? { observeToolResult: observeBotToolResult } : {}),
     }),
   } satisfies AgentGatewayShape;
 });

@@ -3523,65 +3523,118 @@ describe("collab child conversation routing", () => {
     });
   });
 
-  it("preserves an unmapped child user-input route through the answered event", async () => {
-    const { manager, context, emitEvent, writeMessage } = createCollabNotificationHarness();
-
-    await handleServerRequestForTest(manager, context, {
-      id: 43,
-      method: "item/tool/requestUserInput",
-      params: {
-        threadId: "child_provider_unmapped",
-        turnId: "turn_child_unmapped",
-        itemId: "tool_child_unmapped",
-        questions: [
-          {
-            id: "scope",
-            header: "Scope",
-            question: "Which scope should this change target?",
-            options: [{ label: "child", description: "Only the child thread" }],
-          },
-        ],
-      },
-    });
-
-    const pendingRequest = Array.from(context.pendingUserInputs.values())[0];
-    expect(pendingRequest).toEqual(
-      expect.objectContaining({
-        providerThreadId: "child_provider_unmapped",
-        providerParentThreadId: "provider_parent",
-      }),
-    );
-    await manager.respondToUserInput(asThreadId("thread_1"), pendingRequest.requestId, {
-      scope: "child",
-    });
-
-    expect(writeMessage).toHaveBeenCalledWith(context, {
-      id: 43,
-      result: {
-        answers: {
-          scope: { answers: ["child"] },
+  it.each(["Approve once", "Decline", "unexpected"])(
+    "answers MCP tool confirmation with %s without widening permission",
+    async (answer) => {
+      const { manager, context, writeMessage } = createCollabNotificationHarness();
+      await handleServerRequestForTest(manager, context, {
+        id: 42,
+        method: "mcpServer/elicitation/request",
+        params: {
+          threadId: "provider_parent",
+          mode: "form",
+          message: "Allow saving progress?",
+          _meta: { codex_approval_kind: "mcp_tool_call", tool_params: { memory: "checkpoint" } },
+          requestedSchema: { type: "object", properties: {} },
         },
+      });
+      expect(writeMessage).not.toHaveBeenCalled();
+      const pending = Array.from(context.pendingUserInputs.values())[0];
+      await manager.respondToUserInput(asThreadId("thread_1"), pending.requestId, {
+        mcp_tool_confirmation: answer,
+      });
+      expect(writeMessage).toHaveBeenCalledWith(context, {
+        id: 42,
+        result:
+          answer === "Approve once"
+            ? { action: "accept", content: {} }
+            : { action: "decline", content: null },
+      });
+      expect(context.pendingUserInputs.size).toBe(0);
+    },
+  );
+
+  it("does not park unsupported MCP forms as an approval", async () => {
+    const { manager, context, writeMessage } = createCollabNotificationHarness();
+    await handleServerRequestForTest(manager, context, {
+      id: 42,
+      method: "mcpServer/elicitation/request",
+      params: {
+        mode: "form",
+        message: "Enter account",
+        _meta: { codex_approval_kind: "mcp_tool_call" },
+        requestedSchema: { type: "object", properties: { account: { type: "string" } } },
       },
     });
-    expect(emitEvent).toHaveBeenNthCalledWith(
-      1,
-      expect.objectContaining({
-        kind: "request",
-        method: "item/tool/requestUserInput",
-        providerThreadId: "child_provider_unmapped",
-        providerParentThreadId: "provider_parent",
-      }),
-    );
-    expect(emitEvent).toHaveBeenNthCalledWith(
-      2,
-      expect.objectContaining({
-        kind: "notification",
-        method: "item/tool/requestUserInput/answered",
-        providerThreadId: "child_provider_unmapped",
-        providerParentThreadId: "provider_parent",
-      }),
+    expect(context.pendingUserInputs.size).toBe(0);
+    expect(writeMessage).toHaveBeenCalledWith(
+      context,
+      expect.objectContaining({ id: 42, error: expect.any(Object) }),
     );
   });
+
+  it.each(["item/tool/requestUserInput", "tool/requestUserInput"])(
+    "preserves an unmapped child user-input route through %s",
+    async (method) => {
+      const { manager, context, emitEvent, writeMessage } = createCollabNotificationHarness();
+
+      await handleServerRequestForTest(manager, context, {
+        id: 43,
+        method,
+        params: {
+          threadId: "child_provider_unmapped",
+          turnId: "turn_child_unmapped",
+          itemId: "tool_child_unmapped",
+          questions: [
+            {
+              id: "scope",
+              header: "Scope",
+              question: "Which scope should this change target?",
+              options: [{ label: "child", description: "Only the child thread" }],
+            },
+          ],
+        },
+      });
+
+      const pendingRequest = Array.from(context.pendingUserInputs.values())[0];
+      expect(pendingRequest).toEqual(
+        expect.objectContaining({
+          providerThreadId: "child_provider_unmapped",
+          providerParentThreadId: "provider_parent",
+        }),
+      );
+      await manager.respondToUserInput(asThreadId("thread_1"), pendingRequest.requestId, {
+        scope: "child",
+      });
+
+      expect(writeMessage).toHaveBeenCalledWith(context, {
+        id: 43,
+        result: {
+          answers: {
+            scope: { answers: ["child"] },
+          },
+        },
+      });
+      expect(emitEvent).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({
+          kind: "request",
+          method,
+          providerThreadId: "child_provider_unmapped",
+          providerParentThreadId: "provider_parent",
+        }),
+      );
+      expect(emitEvent).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({
+          kind: "notification",
+          method: "item/tool/requestUserInput/answered",
+          providerThreadId: "child_provider_unmapped",
+          providerParentThreadId: "provider_parent",
+        }),
+      );
+    },
+  );
 
   it("preserves the inferred child route when session approvals resolve immediately", async () => {
     const { manager, context, emitEvent, writeMessage } = createCollabNotificationHarness();

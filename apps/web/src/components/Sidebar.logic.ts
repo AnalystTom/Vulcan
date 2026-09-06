@@ -47,17 +47,29 @@ export const THREAD_SELECTION_SAFE_SELECTOR = "[data-thread-item], [data-thread-
 export const SIDEBAR_THREAD_PREWARM_LIMIT = 10;
 export const DEBUG_FEATURE_FLAGS_MENU_STORAGE_KEY = "vulcan:show-debug-feature-flags-menu";
 export type SidebarNewThreadEnvMode = "local" | "worktree";
-export type SidebarView = "threads" | "studio";
+/**
+ * The app surface the sidebar is rendering for. Single owner of the route
+ * prefixes so a new surface can never be half-recognized by pathname checks
+ * scattered across the sidebar.
+ */
+export type SidebarSurface = "threads" | "bots" | "studio" | "settings";
+/** The surfaces the segmented surface picker can switch between. */
+export type SidebarView = Extract<SidebarSurface, "threads" | "bots" | "studio">;
 export type SidebarActionBadge = {
   readonly text: string;
   readonly accessibleLabel: string;
 };
 
-export function isProjectsSidebarSurface(input: {
-  readonly isOnSettings: boolean;
-  readonly isOnStudio: boolean;
-}): boolean {
-  return !input.isOnSettings && !input.isOnStudio;
+export function resolveSidebarSurface(pathname: string): SidebarSurface {
+  if (pathname === "/settings") return "settings";
+  if (pathname.startsWith("/studio")) return "studio";
+  if (pathname.startsWith("/bots")) return "bots";
+  return "threads";
+}
+
+/** The projects tree, the Chats list and the Activity toggle belong to the threads surface alone. */
+export function isProjectsSidebarSurface(surface: SidebarSurface): boolean {
+  return surface === "threads";
 }
 
 /** Keep partial review counts visible without presenting them as exact. */

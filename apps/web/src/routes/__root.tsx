@@ -1840,6 +1840,7 @@ function EventRouter() {
           homeDir: payload.homeDir,
           chatWorkspaceRoot: payload.chatWorkspaceRoot,
           studioWorkspaceRoot: payload.studioWorkspaceRoot,
+          botsWorkspaceRoot: payload.botsWorkspaceRoot,
         });
         await ensureScopedSubscriptions();
         if (disposed) {

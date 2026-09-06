@@ -5,6 +5,7 @@ import {
   setPinnedMessageDone,
   setPinnedMessageLabel,
 } from "@vulcan/shared/pinnedMessages";
+import { isLocalOnlyContainerProjectKind } from "@vulcan/shared/projectContainers";
 import {
   addThreadMarker,
   removeThreadMarker,
@@ -542,7 +543,8 @@ const makeOrchestrationProjectionPipeline = Effect.gen(function* () {
           const project = yield* projectionProjectRepository.getById({
             projectId: event.payload.projectId,
           });
-          const isStudio = Option.isSome(project) && project.value.kind === "studio";
+          const isStudio =
+            Option.isSome(project) && isLocalOnlyContainerProjectKind(project.value.kind);
           yield* projectionThreadRepository.upsert({
             threadId: event.payload.threadId,
             projectId: event.payload.projectId,
@@ -606,7 +608,8 @@ const makeOrchestrationProjectionPipeline = Effect.gen(function* () {
                 projectId: currentThread.value.projectId,
               })
             : Option.none();
-          const isStudio = Option.isSome(project) && project.value.kind === "studio";
+          const isStudio =
+            Option.isSome(project) && isLocalOnlyContainerProjectKind(project.value.kind);
           return yield* updateThreadProjection(event.payload.threadId, (thread) => {
             const nextCreateBranchFlowCompleted =
               event.payload.createBranchFlowCompleted !== undefined

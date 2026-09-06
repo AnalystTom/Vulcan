@@ -33,7 +33,11 @@ import {
   PROVIDER_RUNTIME_CALLBACK_TERMINAL_RESERVE,
   providerRuntimeEventBytes,
 } from "../providerRuntimeEventIngress.ts";
-import { parseOmpModelSlug, parseOmpModelsJson, toOmpProviderModelDescriptor } from "../ompModels.ts";
+import {
+  parseOmpModelSlug,
+  parseOmpModelsJson,
+  toOmpProviderModelDescriptor,
+} from "../ompModels.ts";
 import { OmpRpcClient, type OmpRpcFrame } from "../ompRpcClient.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 
@@ -308,8 +312,7 @@ const makeOmpAdapter = (options?: OmpAdapterLiveOptions) =>
     const startSession: OmpAdapterShape["startSession"] = (input) =>
       Effect.gen(function* () {
         const cwd = trimToUndefined(input.cwd) ?? serverConfig.cwd;
-        const executable =
-          trimToUndefined(input.providerOptions?.omp?.binaryPath) ?? "omp";
+        const executable = trimToUndefined(input.providerOptions?.omp?.binaryPath) ?? "omp";
         const agentDir = trimToUndefined(input.providerOptions?.omp?.agentDir);
         const model =
           input.modelSelection?.provider === "omp"

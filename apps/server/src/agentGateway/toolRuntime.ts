@@ -61,6 +61,13 @@ export interface ToolEntry {
   readonly handler: ToolHandler;
   readonly requiredCapability: AgentGatewayCapability;
   readonly requiresActiveTurn?: boolean;
+  /**
+   * Optional per-caller visibility predicate. Hidden tools are omitted from tools/list and
+   * behave as unknown tools on tools/call, so callers never see them advertised.
+   */
+  readonly visibleFor?: (
+    context: Pick<ToolContext, "callerThreadId" | "callerProvider">,
+  ) => Effect.Effect<boolean>;
 }
 
 export interface McpToolEntry<Context, Capability extends string> {

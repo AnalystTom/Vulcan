@@ -796,7 +796,8 @@ export function resolvePreferredComposerModelSelection(input: {
     (input.projectModelSelection?.provider === preferredProvider
       ? input.projectModelSelection
       : null) ?? {
-      provider: preferredProvider === "pi" || preferredProvider === "omp" ? "codex" : preferredProvider,
+      provider:
+        preferredProvider === "pi" || preferredProvider === "omp" ? "codex" : preferredProvider,
       model: getDefaultModel(
         preferredProvider === "pi" || preferredProvider === "omp" ? "codex" : preferredProvider,
       ),

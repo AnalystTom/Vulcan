@@ -127,19 +127,19 @@ are missing if not.
 
 ## Specified, not yet implemented
 
-| Area                                                     | Status                                                                                                                                                                        |
-| -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Pane modes: Browser, Diff, Trace, Lavish Review | Declared in the registry so layout, persistence, and automation share one taxonomy. They render an explicit "not available yet" surface and are kept out of the mode picker.  |
-| Work Item registry and RPC surface                       | Contract and projections exist; there is no persistence, no intake, and no board UI yet.                                                                                      |
-| Factory view UI                                          | Waterfall and activity board are computed and tested; nothing renders them.                                                                                                   |
-| Real agent/browser/Lavish executors                      | Not wired. Those capabilities are deliberately not reported by the local target, so routing refuses their nodes and raises an Attention Item naming what is missing.          |
-| Execution target enrolment                               | The local target registers itself and routing works. There is no remote worker, heartbeat, or enrolment flow, so "execute on the always-on server" is modelled but not built. |
-| Execution targets and leases                             | Modelled and routed over in the kernel. No enrolment, heartbeat, or remote worker exists.                                                                                     |
-| Real agent, browser, and Lavish executors                | The tracer bullet uses deterministic stand-ins. No provider adapter, Playwright harness, or Lavish sidecar is wired to a node.                                                |
-| Excalidraw workflow editor                               | The canonical YAML representation it would read and emit exists; the editor does not.                                                                                         |
-| Linear, Hermes, mobile intake                            | Work Item sources are modelled. No integration exists.                                                                                                                        |
-| Tapes, Skill Proposals, optimization experiments         | Not started. Explicitly downstream of the tracer bullet being trustworthy.                                                                                                    |
-| Packaged-app end-to-end verification                     | The issue's primary seam runs through the packaged desktop app; the current end-to-end test runs at the kernel seam.                                                          |
+| Area                                             | Status                                                                                                                                                                        |
+| ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Pane modes: Browser, Diff, Trace, Lavish Review  | Declared in the registry so layout, persistence, and automation share one taxonomy. They render an explicit "not available yet" surface and are kept out of the mode picker.  |
+| Work Item registry and RPC surface               | Contract and projections exist; there is no persistence, no intake, and no board UI yet.                                                                                      |
+| Factory view UI                                  | Waterfall and activity board are computed and tested; nothing renders them.                                                                                                   |
+| Real agent/browser/Lavish executors              | Not wired. Those capabilities are deliberately not reported by the local target, so routing refuses their nodes and raises an Attention Item naming what is missing.          |
+| Execution target enrolment                       | The local target registers itself and routing works. There is no remote worker, heartbeat, or enrolment flow, so "execute on the always-on server" is modelled but not built. |
+| Execution targets and leases                     | Modelled and routed over in the kernel. No enrolment, heartbeat, or remote worker exists.                                                                                     |
+| Real agent, browser, and Lavish executors        | The tracer bullet uses deterministic stand-ins. No provider adapter, Playwright harness, or Lavish sidecar is wired to a node.                                                |
+| Excalidraw workflow editor                       | The canonical YAML representation it would read and emit exists; the editor does not.                                                                                         |
+| Linear, Hermes, mobile intake                    | Work Item sources are modelled. No integration exists.                                                                                                                        |
+| Tapes, Skill Proposals, optimization experiments | Not started. Explicitly downstream of the tracer bullet being trustworthy.                                                                                                    |
+| Packaged-app end-to-end verification             | The issue's primary seam runs through the packaged desktop app; the current end-to-end test runs at the kernel seam.                                                          |
 
 ## Conventions worth knowing
 

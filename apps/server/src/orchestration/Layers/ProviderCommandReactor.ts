@@ -33,8 +33,10 @@ import {
   Effect,
   Equal,
   Exit,
+  FileSystem,
   Layer,
   Option,
+  Path,
   Queue,
   Schema,
   Semaphore,
@@ -73,6 +75,8 @@ import {
   ProviderServiceError,
 } from "../../provider/Errors.ts";
 import { buildInlineSkillInstructions } from "../../provider/skillPromptInjection.ts";
+import { resolveBotTurnPrompt } from "../../bots/botTurnPrompt.ts";
+import { BotRepository } from "../../persistence/Services/BotRepository.ts";
 import {
   appendThreadMentionContextBlocks,
   resolveThreadMentionPromptProjection,
@@ -306,7 +310,7 @@ const DEFAULT_RUNTIME_MODE: RuntimeMode = "full-access";
 const SIDECHAT_BOUNDARY_INSTRUCTION =
   "You are in a sidechat. Treat all prior conversation as reference-only context. Do not continue any prior task automatically. Do not mutate files, git, or the workspace and do not run workspace-changing commands unless the latest user message explicitly asks you to do so after this boundary. Use this sidechat for focused explanation, safety checks, summaries, and alternatives.";
 
-type ProviderContextTag = "handoff_context" | "sidechat_context" | "thread_context";
+type ProviderContextTag = "bot_persona" | "handoff_context" | "sidechat_context" | "thread_context";
 
 function wrapProviderContext(input: {
   readonly tag: ProviderContextTag;
@@ -489,6 +493,9 @@ const make = Effect.gen(function* () {
   const gatewayOperations = yield* AgentGatewayOperationRepository;
   const textGeneration = yield* TextGeneration;
   const serverSettings = yield* ServerSettingsService;
+  const botTurnPromptServices = yield* Effect.services<
+    BotRepository | FileSystem.FileSystem | Path.Path
+  >();
 
   const waitForGatewayOperationCompletion = Effect.fnUntraced(function* (operationId: string) {
     const completed = yield* Effect.gen(function* () {
@@ -1387,6 +1394,28 @@ const make = Effect.gen(function* () {
       // text-only subagent steering channel.
       const steerProvider = (providerThread.session?.providerName ??
         providerThread.modelSelection.provider) as ProviderKind;
+      // Bot identity/memory rides ahead of the user's message; resolveBotTurnPrompt
+      // returns "" for non-bot threads and degrades to "" on any failure, so this can
+      // never fail or bloat an ordinary steer.
+      const steerBotPersonaText = yield* resolveBotTurnPrompt({
+        threadId: input.threadId,
+        maxChars: Math.max(
+          0,
+          availableProviderContextChars({
+            tag: "bot_persona",
+            messageText,
+            wrapLatestUserMessage: true,
+          }) - PROVIDER_INPUT_SAFETY_MARGIN_CHARS,
+        ),
+      }).pipe(Effect.provideServices(botTurnPromptServices));
+      const steerMessageText = steerBotPersonaText
+        ? wrapProviderContext({
+            tag: "bot_persona",
+            contextText: steerBotPersonaText,
+            messageText,
+            wrapLatestUserMessage: true,
+          })
+        : messageText;
       const steerSkillInlineText =
         input.skills !== undefined && input.skills.length > 0
           ? yield* Effect.tryPromise(() =>
@@ -1396,7 +1425,7 @@ const make = Effect.gen(function* () {
                 maxChars: Math.max(
                   0,
                   PROVIDER_SEND_TURN_MAX_INPUT_CHARS -
-                    messageText.length -
+                    steerMessageText.length -
                     PROVIDER_INPUT_SAFETY_MARGIN_CHARS,
                 ),
               }),
@@ -1410,8 +1439,8 @@ const make = Effect.gen(function* () {
             )
           : "";
       const steerMessageWithSkills = steerSkillInlineText
-        ? `${messageText}\n\n${steerSkillInlineText}`
-        : messageText;
+        ? `${steerMessageText}\n\n${steerSkillInlineText}`
+        : steerMessageText;
       const normalizedSteerInput = toNonEmptyProviderInput(
         normalizeSkillMentionTextForProvider({
           provider: steerProvider,
@@ -1571,7 +1600,35 @@ const make = Effect.gen(function* () {
               wrapLatestUserMessage: true,
             })
           : boundaryMessageText;
-    const providerInputWithMentionContext = `${providerInput}${mentionContextSuffix}`;
+    // Bot persona/memory wraps the assembled input BEFORE the mention-context suffix and
+    // skill blocks: identity must lead the prompt, and the skill budget below already
+    // subtracts the full persona-wrapped length. resolveBotTurnPrompt returns "" for
+    // non-bot threads and degrades to "" on any failure, so a broken MEMORY.md can never
+    // fail a turn.
+    const botPersonaText = yield* resolveBotTurnPrompt({
+      threadId: input.threadId,
+      maxChars: Math.max(
+        0,
+        availableProviderContextChars({
+          tag: "bot_persona",
+          messageText: providerInput,
+          // A bootstrap (or the sidechat boundary) already wrapped the user's message;
+          // wrapping again would nest <latest_user_message> tags.
+          wrapLatestUserMessage: providerInput === input.messageText,
+        }) -
+          mentionContextSuffix.length -
+          PROVIDER_INPUT_SAFETY_MARGIN_CHARS,
+      ),
+    }).pipe(Effect.provideServices(botTurnPromptServices));
+    const providerInputWithBotPersona = botPersonaText
+      ? wrapProviderContext({
+          tag: "bot_persona",
+          contextText: botPersonaText,
+          messageText: providerInput,
+          wrapLatestUserMessage: providerInput === input.messageText,
+        })
+      : providerInput;
+    const providerInputWithMentionContext = `${providerInputWithBotPersona}${mentionContextSuffix}`;
     // Portable skills fallback: providers that cannot load the referenced skill
     // file natively get the skill instructions inlined into the prompt.
     const skillInlineText =

@@ -97,6 +97,7 @@ export interface ServerConfigShape extends ServerDerivedPaths {
   readonly homeDir: string;
   readonly chatWorkspaceRoot: string;
   readonly studioWorkspaceRoot: string;
+  readonly botsWorkspaceRoot: string;
   readonly baseDir: string;
   readonly staticDir: string | undefined;
   readonly devUrl: URL | undefined;
@@ -183,10 +184,20 @@ export function resolveDefaultStudioWorkspaceRoot(input: {
   return pathApi.join(resolveDefaultChatWorkspaceRoot(input), "Studio");
 }
 
+export function resolveDefaultBotsWorkspaceRoot(input: {
+  readonly homeDir: string;
+  readonly platform?: NodeJS.Platform;
+}): string {
+  const homeDir = input.homeDir.trim();
+  const pathApi = (input.platform ?? process.platform) === "win32" ? pathWin32 : pathPosix;
+  return pathApi.join(homeDir, "Vulcan", "Bots");
+}
+
 export interface ResolvedWorkspaceRoots {
   readonly homeDir: string;
   readonly chatWorkspaceRoot: string;
   readonly studioWorkspaceRoot: string;
+  readonly botsWorkspaceRoot: string;
 }
 
 /**
@@ -214,7 +225,10 @@ export const resolveCanonicalWorkspaceRoots = Effect.fn(function* (input: {
   const studioWorkspaceRoot = yield* realpathNearestExisting(
     resolveDefaultStudioWorkspaceRoot({ homeDir, platform }),
   );
-  return { homeDir, chatWorkspaceRoot, studioWorkspaceRoot };
+  const botsWorkspaceRoot = yield* realpathNearestExisting(
+    resolveDefaultBotsWorkspaceRoot({ homeDir, platform }),
+  );
+  return { homeDir, chatWorkspaceRoot, studioWorkspaceRoot, botsWorkspaceRoot };
 });
 
 /**
@@ -243,7 +257,7 @@ export class ServerConfig extends ServiceMap.Service<ServerConfig, ServerConfigS
 
         yield* Effect.sync(() => preparePrivateServerPaths(derivedPaths));
 
-        const { homeDir, chatWorkspaceRoot, studioWorkspaceRoot } =
+        const { homeDir, chatWorkspaceRoot, studioWorkspaceRoot, botsWorkspaceRoot } =
           yield* resolveCanonicalWorkspaceRoots({ homeDir: OS.homedir() });
 
         return {
@@ -251,6 +265,7 @@ export class ServerConfig extends ServiceMap.Service<ServerConfig, ServerConfigS
           homeDir,
           chatWorkspaceRoot,
           studioWorkspaceRoot,
+          botsWorkspaceRoot,
           baseDir,
           ...derivedPaths,
           mode: "web",

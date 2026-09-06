@@ -67,6 +67,7 @@ export const IMPLEMENTED_PANE_MODES = [
   "agent",
   "herdrTerminal",
   "factory",
+  "trace",
 ] as const satisfies readonly PaneMode[];
 
 /**

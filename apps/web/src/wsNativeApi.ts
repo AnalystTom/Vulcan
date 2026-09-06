@@ -45,6 +45,7 @@ import {
   type WsWelcomePayload,
   type WsBootstrapNegotiateResult,
   type AutomationStreamEvent,
+  type BotEvent,
 } from "@vulcan/contracts";
 import { VOICE_TRANSCRIPTION_UPLOAD_ROUTE_PATH } from "@vulcan/shared/binaryTransfer";
 
@@ -153,6 +154,7 @@ function omitNullUserInputAnswers(
 const terminalEventListeners = createListenerRegistry<TerminalEvent>();
 const projectDevServerEventListeners = createListenerRegistry<ProjectDevServerEvent>();
 const automationEventListeners = createListenerRegistry<AutomationStreamEvent>();
+const botEventListeners = createListenerRegistry<BotEvent>();
 const orchestrationDomainEventListeners = createListenerRegistry<OrchestrationEvent>();
 const orchestrationShellEventListeners = createListenerRegistry<OrchestrationShellStreamItem>();
 const orchestrationThreadEventListeners = createListenerRegistry<OrchestrationThreadStreamItem>();
@@ -172,6 +174,7 @@ function clearWsNativeApiListeners(): void {
   terminalEventListeners.clear();
   projectDevServerEventListeners.clear();
   automationEventListeners.clear();
+  botEventListeners.clear();
   orchestrationDomainEventListeners.clear();
   orchestrationShellEventListeners.clear();
   orchestrationThreadEventListeners.clear();
@@ -464,6 +467,9 @@ export function createWsNativeApi(): NativeApi {
   });
   transport.subscribe(WS_CHANNELS.automationEvent, (message) => {
     automationEventListeners.emit(message.data);
+  });
+  transport.subscribe(WS_CHANNELS.botEvent, (message) => {
+    botEventListeners.emit(message.data);
   });
   transport.subscribe(ORCHESTRATION_WS_CHANNELS.shellEvent, (message) => {
     orchestrationShellEventListeners.emit(message.data);
@@ -813,6 +819,27 @@ export function createWsNativeApi(): NativeApi {
       archiveRun: (input) => transport.request(WS_METHODS.automationArchiveRun, input),
       resolveProposal: (input) => transport.request(WS_METHODS.automationResolveProposal, input),
       onEvent: automationEventListeners.subscribe,
+    },
+    bots: {
+      list: (input = {}) => transport.request(WS_METHODS.botList, input),
+      create: (input) => transport.request(WS_METHODS.botCreate, input),
+      update: (input) => transport.request(WS_METHODS.botUpdate, input),
+      delete: (input) => transport.request(WS_METHODS.botDelete, input),
+      createTask: (input) => transport.request(WS_METHODS.botTaskCreate, input),
+      runTask: (input) => transport.request(WS_METHODS.botTaskRun, input),
+      setActiveTask: (input) => transport.request(WS_METHODS.botTaskSetActive, input),
+      archiveTask: (input) => transport.request(WS_METHODS.botTaskArchive, input),
+      getMemory: (input) => transport.request(WS_METHODS.botMemoryGet, input),
+      setMemory: (input) => transport.request(WS_METHODS.botMemorySet, input),
+      listMemoryTopics: (input) => transport.request(WS_METHODS.botMemoryTopicList, input),
+      getMemoryTopic: (input) => transport.request(WS_METHODS.botMemoryTopicGet, input),
+      control: (input) => transport.request(WS_METHODS.botControl, input),
+      listAudit: (input) => transport.request(WS_METHODS.botAuditList, input),
+      listCommsChannels: (input = {}) => transport.request(WS_METHODS.botCommsChannelList, input),
+      listCommsMessages: (input) => transport.request(WS_METHODS.botCommsMessageList, input),
+      listDelegations: (input = {}) => transport.request(WS_METHODS.botDelegationList, input),
+      respondPeerApproval: (input) => transport.request(WS_METHODS.botPeerApprovalRespond, input),
+      onEvent: botEventListeners.subscribe,
     },
     browser: {
       open: async (input) => {

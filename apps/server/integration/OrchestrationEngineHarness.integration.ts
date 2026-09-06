@@ -1,3 +1,5 @@
+import { BotRepositoryLive } from "../src/persistence/Layers/BotRepository";
+import { BotCommsRepositoryLive } from "../src/persistence/Layers/BotCommsRepository";
 import { execFileSync } from "node:child_process";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -339,6 +341,8 @@ export const makeOrchestrationIntegrationHarness = (
       Layer.provideMerge(threadGitMetadataReactorLayer),
     );
     const layer = orchestrationReactorLayer.pipe(
+      Layer.provideMerge(BotRepositoryLive),
+      Layer.provideMerge(BotCommsRepositoryLive),
       Layer.provide(persistenceLayer),
       Layer.provideMerge(ServerConfig.layerTest(workspaceDir, rootDir)),
       Layer.provideMerge(NodeServices.layer),

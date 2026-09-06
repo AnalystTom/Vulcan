@@ -84,6 +84,7 @@ import {
   LazyDiffPanel,
   noopChatSurfaceAction,
 } from "./ChatThreadSurfacePrimitives";
+import { TapesTracePane } from "../workspace/TapesTracePane";
 import { PanelStateMessage } from "./PanelStateMessage";
 import { RightDock } from "./RightDock";
 import { getRightDockPaneMeta, resolveRightDockLauncherItems } from "./rightDockPaneMeta";
@@ -836,6 +837,8 @@ export function SingleChatSurface(props: {
             />
           </Suspense>
         );
+      case "trace":
+        return <TapesTracePane isVisible={context.isVisible} />;
       case "sidechat":
         if (!pane.threadId) {
           return <RightDockPanePlaceholder kind="sidechat" />;
