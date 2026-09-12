@@ -30,6 +30,7 @@ import {
   type GitWorktreeSetupProgressEvent,
   type GitHubProjectProvisionProgressEvent,
   type GitHubProjectProvisionResult,
+  type HermesBotEvent,
   type OrchestrationEvent,
   type OrchestrationShellStreamItem,
   type OrchestrationThreadStreamItem,
@@ -352,6 +353,7 @@ export function shouldReconnectAfterStreamFailure(cause: Cause.Cause<unknown>): 
     const error = reason.error;
     if (!error || typeof error !== "object") return false;
     const code = "code" in error ? error.code : undefined;
+    if ("retryable" in error && error.retryable === false) return true;
     return typeof code === "string" && STREAM_ADMISSION_ERROR_CODES.has(code);
   });
 }
@@ -1320,6 +1322,14 @@ export class WsTransport {
             (event: BotEvent) => this.emit(WS_CHANNELS.botEvent, event),
             restartChannel,
           );
+        } else if (channel === WS_CHANNELS.hermesBotEvent) {
+          this.startStream(
+            client,
+            "hermes-bot.events",
+            client[WS_METHODS.subscribeHermesBotEvents]({}),
+            (event: HermesBotEvent) => this.emit(WS_CHANNELS.hermesBotEvent, event),
+            restartChannel,
+          );
         } else if (channel === ORCHESTRATION_WS_CHANNELS.domainEvent) {
           this.startStream(
             client,
@@ -1354,6 +1364,7 @@ export class WsTransport {
     else if (channel === WS_CHANNELS.projectDevServerEvent) this.stopStream("project.devServers");
     else if (channel === WS_CHANNELS.automationEvent) this.stopStream("automation.events");
     else if (channel === WS_CHANNELS.botEvent) this.stopStream("bot.events");
+    else if (channel === WS_CHANNELS.hermesBotEvent) this.stopStream("hermes-bot.events");
     else if (channel === ORCHESTRATION_WS_CHANNELS.domainEvent)
       this.stopStream("orchestration.domain");
   }

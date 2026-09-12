@@ -46,6 +46,7 @@ import {
   type WsBootstrapNegotiateResult,
   type AutomationStreamEvent,
   type BotEvent,
+  type HermesBotEvent,
 } from "@vulcan/contracts";
 import { VOICE_TRANSCRIPTION_UPLOAD_ROUTE_PATH } from "@vulcan/shared/binaryTransfer";
 
@@ -155,6 +156,7 @@ const terminalEventListeners = createListenerRegistry<TerminalEvent>();
 const projectDevServerEventListeners = createListenerRegistry<ProjectDevServerEvent>();
 const automationEventListeners = createListenerRegistry<AutomationStreamEvent>();
 const botEventListeners = createListenerRegistry<BotEvent>();
+const hermesBotEventListeners = createListenerRegistry<HermesBotEvent>();
 const orchestrationDomainEventListeners = createListenerRegistry<OrchestrationEvent>();
 const orchestrationShellEventListeners = createListenerRegistry<OrchestrationShellStreamItem>();
 const orchestrationThreadEventListeners = createListenerRegistry<OrchestrationThreadStreamItem>();
@@ -175,6 +177,7 @@ function clearWsNativeApiListeners(): void {
   projectDevServerEventListeners.clear();
   automationEventListeners.clear();
   botEventListeners.clear();
+  hermesBotEventListeners.clear();
   orchestrationDomainEventListeners.clear();
   orchestrationShellEventListeners.clear();
   orchestrationThreadEventListeners.clear();
@@ -430,6 +433,7 @@ export function createWsNativeApi(): NativeApi {
 
   const transport = new WsTransport();
   let unsubscribeDomainEventTransport: (() => void) | null = null;
+  let unsubscribeHermesBotEventTransport: (() => void) | null = null;
   transport.onStateChange((state) => emitWsTransportState(state));
   transport.onCompatibilityIssue((issue) => emitWsCompatibilityIssue(issue), {
     replayCurrent: true,
@@ -522,6 +526,27 @@ export function createWsNativeApi(): NativeApi {
     },
     herdr: {
       status: (input) => transport.request(WS_METHODS.herdrStatus, input),
+    },
+    hermesBots: {
+      status: () => transport.request(WS_METHODS.hermesBotStatus, {}),
+      connect: (input) => transport.request(WS_METHODS.hermesBotConnect, input),
+      request: (input) => transport.request(WS_METHODS.hermesBotRequest, input),
+      onEvent: (listener) => {
+        const unsubscribeListener = hermesBotEventListeners.subscribe(listener);
+        if (!unsubscribeHermesBotEventTransport) {
+          unsubscribeHermesBotEventTransport = transport.subscribe(
+            WS_CHANNELS.hermesBotEvent,
+            (message) => hermesBotEventListeners.emit(message.data),
+          );
+        }
+        return () => {
+          unsubscribeListener();
+          if (hermesBotEventListeners.size === 0) {
+            unsubscribeHermesBotEventTransport?.();
+            unsubscribeHermesBotEventTransport = null;
+          }
+        };
+      },
     },
     terminal: {
       open: (input) => transport.request(WS_METHODS.terminalOpen, input),

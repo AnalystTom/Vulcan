@@ -142,6 +142,29 @@ afterEach(() => {
 });
 
 describe("wsNativeApi", () => {
+  it("subscribes to owner-only Hermes events only while a listener is registered", async () => {
+    const { createWsNativeApi } = await import("./wsNativeApi");
+
+    const api = createWsNativeApi();
+    expect(channelListeners.has(WS_CHANNELS.hermesBotEvent)).toBe(false);
+
+    const listener = vi.fn();
+    const unsubscribe = api.hermesBots?.onEvent(listener);
+    expect(channelListeners.get(WS_CHANNELS.hermesBotEvent)?.size).toBe(1);
+
+    emitPush(WS_CHANNELS.hermesBotEvent, {
+      type: "message.complete",
+      payload: { session_id: "session-1" },
+    });
+    expect(listener).toHaveBeenCalledWith({
+      type: "message.complete",
+      payload: { session_id: "session-1" },
+    });
+
+    unsubscribe?.();
+    expect(channelListeners.has(WS_CHANNELS.hermesBotEvent)).toBe(false);
+  });
+
   it("delivers and caches valid server.welcome payloads", async () => {
     const { createWsNativeApi, onServerWelcome } = await import("./wsNativeApi");
 

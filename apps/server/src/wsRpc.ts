@@ -40,6 +40,7 @@ import { RpcMiddleware, RpcSchema, RpcSerialization, RpcServer } from "effect/un
 import { AutomationService } from "./automation/Services/AutomationService";
 import { BotCommsService } from "./bots/Services/BotCommsService";
 import { BotService } from "./bots/Services/BotService";
+import { HermesBotRuntime } from "./bots/hermesBotRuntime";
 import { authErrorResponse, makeEffectAuthRequest } from "./auth/effectHttp";
 import {
   ServerAuth,
@@ -331,6 +332,7 @@ const makeWsRpcHandlersLayer = () =>
       const checkpointDiffQuery = yield* CheckpointDiffQuery;
       const automationService = yield* AutomationService;
       const botService = yield* BotService;
+      const hermesBots = yield* HermesBotRuntime;
       const botCommsService = yield* BotCommsService;
       const config = yield* ServerConfig;
       const devServerManager = yield* DevServerManager;
@@ -861,6 +863,18 @@ const makeWsRpcHandlersLayer = () =>
           return yield* Effect.fail(
             new WsRpcError({
               message: "External MCP management is available only on a loopback-only instance.",
+            }),
+          );
+        }
+      });
+
+      const requireHermesOwner = Effect.gen(function* () {
+        if ((yield* CurrentWsSessionRole) !== "owner") {
+          return yield* Effect.fail(
+            new WsRpcError({
+              message: "Sign in as the owner to manage the Hermes team.",
+              code: "HERMES_OWNER_REQUIRED",
+              retryable: false,
             }),
           );
         }
@@ -2177,6 +2191,29 @@ const makeWsRpcHandlersLayer = () =>
           ),
         [WS_METHODS.botCreate]: (input) =>
           rpcEffect(botService.create(input), "Failed to create bot"),
+        [WS_METHODS.hermesBotStatus]: () =>
+          rpcEffect(
+            requireHermesOwner.pipe(Effect.andThen(hermesBots.status)),
+            "Could not check Hermes",
+          ),
+        [WS_METHODS.hermesBotConnect]: (input) =>
+          rpcEffect(
+            requireHermesOwner.pipe(Effect.andThen(hermesBots.connect(input))),
+            "Could not connect Hermes",
+          ),
+        [WS_METHODS.hermesBotRequest]: (input) =>
+          rpcEffect(
+            requireHermesOwner.pipe(Effect.andThen(hermesBots.request(input))),
+            "Hermes could not confirm this operation",
+          ),
+        [WS_METHODS.subscribeHermesBotEvents]: (_, { clientId }) =>
+          streamAdmission.guard(
+            clientId,
+            { key: "hermes-bot.events" },
+            Stream.unwrap(requireHermesOwner.pipe(Effect.as(hermesBots.events))).pipe(
+              Stream.mapError((cause) => toWsRpcError(cause, "Hermes event stream disconnected")),
+            ),
+          ),
         [WS_METHODS.botUpdate]: (input) =>
           rpcEffect(botService.update(input), "Failed to update bot"),
         [WS_METHODS.botDelete]: (input) =>

@@ -1,22 +1,48 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ensureNativeApi } from "~/nativeApi";
 import { newCommandId, newMessageId } from "~/lib/utils";
 import { BotAvatar } from "~/components/bots/BotAvatar";
 import { BotWorkGraph } from "~/components/bots/BotWorkGraph";
+import {
+  HermesBotsView,
+  type HermesBotsSelection,
+  type HermesBotsViewKind,
+} from "~/components/bots/HermesBotsView";
 import { NewBotChat } from "~/components/bots/NewBotChat";
 import { DEFAULT_BOT_AVATAR, type Bot, type BotTask } from "@vulcan/contracts";
 import { Button } from "~/components/ui/button";
 import { useBots } from "~/hooks/useBots";
+import { useHermesBotsApi, useHermesStatus } from "~/hooks/useHermesBots";
 import { useOpenBotChat } from "~/hooks/useOpenBotChat";
 import { BotIcon, PlusIcon } from "~/lib/icons";
 
-function BotsIndexRoute() {
+type BotsRuntime = "hermes" | "legacy";
+
+/** The same search without the one-shot `new` flag (exact optional types forbid `new: undefined`). */
+function withoutNewFlag(search: BotsIndexSearch): BotsIndexSearch {
+  return Object.fromEntries(
+    Object.entries(search).filter(([key]) => key !== "new"),
+  ) as BotsIndexSearch;
+}
+
+/**
+ * The legacy Vulcan-managed bots. Untouched until the migration gate: it never lists native
+ * Hermes profiles, and the native view never lists these.
+ */
+function LegacyBotsIndex({
+  search,
+  hermesAvailable,
+  onShowHermes,
+}: {
+  search: BotsIndexSearch;
+  hermesAvailable: boolean;
+  onShowHermes: () => void;
+}) {
   const bots = useBots();
   const navigate = useNavigate();
   const openBotChat = useOpenBotChat();
-  const search = Route.useSearch();
   const firstTurnIds = useRef({ commandId: newCommandId(), messageId: newMessageId() });
   const [draftBot, setDraftBot] = useState<Bot | null>(null);
   const [draftTask, setDraftTask] = useState<BotTask | null>(null);
@@ -27,8 +53,8 @@ function BotsIndexRoute() {
   useEffect(() => {
     if (search.new !== true) return;
     setCreateOpen(true);
-    void navigate({ to: "/bots", search: {}, replace: true });
-  }, [navigate, search.new]);
+    void navigate({ to: "/bots", search: withoutNewFlag(search), replace: true });
+  }, [navigate, search]);
 
   if (createOpen)
     return (
@@ -105,9 +131,16 @@ function BotsIndexRoute() {
               Pick an agent and chat — tasks are fresh contexts, not a separate instruct flow.
             </p>
           </div>
-          <Button onClick={() => setCreateOpen(true)}>
-            <PlusIcon /> New agent
-          </Button>
+          <div className="flex shrink-0 gap-2">
+            {hermesAvailable ? (
+              <Button variant="outline" onClick={onShowHermes}>
+                Hermes team
+              </Button>
+            ) : null}
+            <Button onClick={() => setCreateOpen(true)}>
+              <PlusIcon /> New agent
+            </Button>
+          </div>
         </div>
 
         {bots.isLoading ? (
@@ -169,12 +202,96 @@ function BotsIndexRoute() {
   );
 }
 
+function BotsIndexRoute() {
+  const search = Route.useSearch();
+  const navigate = useNavigate();
+  const hermesApi = useHermesBotsApi();
+  const status = useHermesStatus();
+
+  // Without a bridge the legacy view is the only view. With one, an explicit `runtime` wins;
+  // otherwise a configured gateway opens the native team and an unconfigured one stays legacy.
+  const runtime: BotsRuntime | null = !hermesApi
+    ? "legacy"
+    : (search.runtime ??
+      (status.data
+        ? status.data.configured
+          ? "hermes"
+          : "legacy"
+        : status.error
+          ? "legacy"
+          : null));
+
+  const setSearch = useCallback(
+    (next: BotsIndexSearch, replace = false) => navigate({ to: "/bots", search: next, replace }),
+    [navigate],
+  );
+  const selection: HermesBotsSelection = {
+    profile: search.profile ?? null,
+    room: search.room ?? null,
+    view: search.botView ?? "chat",
+  };
+  const selectNative = useCallback(
+    (next: Partial<HermesBotsSelection>) => {
+      const merged: HermesBotsSelection = {
+        profile: search.profile ?? null,
+        room: search.room ?? null,
+        view: search.botView ?? "chat",
+        ...next,
+      };
+      void setSearch({
+        runtime: "hermes",
+        ...(merged.profile ? { profile: merged.profile } : {}),
+        ...(merged.room ? { room: merged.room } : {}),
+        ...(merged.view !== "chat" ? { botView: merged.view } : {}),
+      });
+    },
+    [search, setSearch],
+  );
+  const consumeCreateRequest = useCallback(
+    () => void setSearch(withoutNewFlag(search), true),
+    [search, setSearch],
+  );
+
+  if (runtime === null) {
+    return <main className="p-8 text-sm text-muted-foreground">Checking the Hermes gateway…</main>;
+  }
+  if (runtime === "hermes") {
+    return (
+      <HermesBotsView
+        selection={selection}
+        onSelect={selectNative}
+        onShowLegacy={() => void setSearch({ runtime: "legacy" })}
+        createRequested={search.new === true}
+        onCreateRequestHandled={consumeCreateRequest}
+      />
+    );
+  }
+  return (
+    <LegacyBotsIndex
+      search={search}
+      hermesAvailable={hermesApi !== null}
+      onShowHermes={() => void setSearch({ runtime: "hermes" })}
+    />
+  );
+}
+
 export interface BotsIndexSearch {
   readonly new?: true;
+  readonly runtime?: BotsRuntime;
+  readonly profile?: string;
+  readonly room?: string;
+  readonly botView?: HermesBotsViewKind;
 }
 
 export const Route = createFileRoute("/_chat/bots/")({
-  validateSearch: (raw: Record<string, unknown>): BotsIndexSearch =>
-    raw.new === true || raw.new === "1" || raw.new === 1 ? { new: true } : {},
+  validateSearch: (raw: Record<string, unknown>): BotsIndexSearch => ({
+    ...(raw.new === true || raw.new === "1" || raw.new === 1 ? { new: true } : {}),
+    ...(raw.runtime === "hermes" || raw.runtime === "legacy" ? { runtime: raw.runtime } : {}),
+    ...(typeof raw.profile === "string" && raw.profile ? { profile: raw.profile } : {}),
+    ...(typeof raw.room === "string" && raw.room ? { room: raw.room } : {}),
+    ...(raw.botView === "chat" || raw.botView === "profile" || raw.botView === "routines"
+      ? { botView: raw.botView }
+      : {}),
+  }),
   component: BotsIndexRoute,
 });

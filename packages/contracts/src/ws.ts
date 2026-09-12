@@ -78,6 +78,7 @@ import {
   GitUnstageFilesInput,
   GitWorktreeSetupProgressEvent,
 } from "./git";
+import { HermesBotEvent, HermesBotRequest, HermesBotConnectInput } from "./hermesBot";
 import {
   TerminalAckOutputInput,
   TerminalClearInput,
@@ -315,6 +316,12 @@ export const WS_METHODS = {
   botDelegationList: "bot.delegationList",
   botPeerApprovalRespond: "bot.peerApprovalRespond",
   subscribeBotEvents: "bot.subscribe",
+
+  // Hermes Bot bridge methods
+  hermesBotStatus: "bot.hermes.status",
+  hermesBotConnect: "bot.hermes.connect",
+  hermesBotRequest: "bot.hermes.request",
+  subscribeHermesBotEvents: "bot.hermes.subscribe",
 } as const;
 
 // ── Push Event Channels ──────────────────────────────────────────────
@@ -322,6 +329,7 @@ export const WS_METHODS = {
 export const WS_CHANNELS = {
   automationEvent: "automation.event",
   botEvent: "bot.event",
+  hermesBotEvent: "bot.hermes.event",
   gitActionProgress: "git.actionProgress",
   gitWorktreeSetupProgress: "git.worktreeSetupProgress",
   projectProvisionProgress: "project.provisionProgress",
@@ -507,6 +515,12 @@ const WebSocketRequestBody = Schema.Union([
   tagRequestBody(WS_METHODS.botControl, BotControlInput),
   tagRequestBody(WS_METHODS.botAuditList, BotAuditListInput),
   tagRequestBody(WS_METHODS.subscribeBotEvents, Schema.Struct({})),
+
+  // Hermes Bot bridge methods
+  tagRequestBody(WS_METHODS.hermesBotStatus, Schema.Struct({})),
+  tagRequestBody(WS_METHODS.hermesBotConnect, HermesBotConnectInput),
+  tagRequestBody(WS_METHODS.hermesBotRequest, HermesBotRequest),
+  tagRequestBody(WS_METHODS.subscribeHermesBotEvents, Schema.Struct({})),
 ]);
 
 export const WebSocketRequest = Schema.Struct({
@@ -549,6 +563,7 @@ export interface WsPushPayloadByChannel {
   readonly [WS_CHANNELS.serverSettingsUpdated]: typeof ServerSettingsUpdatedPayload.Type;
   readonly [WS_CHANNELS.automationEvent]: typeof AutomationStreamEvent.Type;
   readonly [WS_CHANNELS.botEvent]: typeof BotEvent.Type;
+  readonly [WS_CHANNELS.hermesBotEvent]: typeof HermesBotEvent.Type;
   readonly [WS_CHANNELS.gitActionProgress]: typeof GitActionProgressEvent.Type;
   readonly [WS_CHANNELS.gitWorktreeSetupProgress]: typeof GitWorktreeSetupProgressEvent.Type;
   readonly [WS_CHANNELS.projectProvisionProgress]: typeof GitHubProjectProvisionProgressEvent.Type;
@@ -595,6 +610,7 @@ export const WsPushAutomationEvent = makeWsPushSchema(
   AutomationStreamEvent,
 );
 export const WsPushBotEvent = makeWsPushSchema(WS_CHANNELS.botEvent, BotEvent);
+export const WsPushHermesBotEvent = makeWsPushSchema(WS_CHANNELS.hermesBotEvent, HermesBotEvent);
 export const WsPushGitActionProgress = makeWsPushSchema(
   WS_CHANNELS.gitActionProgress,
   GitActionProgressEvent,
@@ -636,6 +652,7 @@ export const WsPushChannelSchema = Schema.Literals([
   WS_CHANNELS.serverSettingsUpdated,
   WS_CHANNELS.automationEvent,
   WS_CHANNELS.botEvent,
+  WS_CHANNELS.hermesBotEvent,
   WS_CHANNELS.terminalEvent,
   WS_CHANNELS.projectDevServerEvent,
   ORCHESTRATION_WS_CHANNELS.domainEvent,
@@ -652,6 +669,7 @@ export const WsPush = Schema.Union([
   WsPushServerSettingsUpdated,
   WsPushAutomationEvent,
   WsPushBotEvent,
+  WsPushHermesBotEvent,
   WsPushGitActionProgress,
   WsPushGitWorktreeSetupProgress,
   WsPushProjectProvisionProgress,

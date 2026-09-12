@@ -14,6 +14,7 @@ export * from "./browserAutomationToolCatalogue";
 export * from "./browserAnnotations";
 export * from "./ipc";
 export * from "./herdr";
+export * from "./hermesBot";
 export * from "./terminal";
 export * from "./provider";
 export * from "./providerDiscovery";

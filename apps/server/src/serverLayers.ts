@@ -46,6 +46,7 @@ import { ServerEnvironmentLive } from "./environment/Layers/ServerEnvironment";
 import { BotCommsServiceLive } from "./bots/Layers/BotCommsService";
 import { BotDelegationDrainerLive } from "./bots/Layers/BotDelegationDrainer";
 import { BotServiceLive } from "./bots/Layers/BotService";
+import { HermesBotRuntimeLive } from "./bots/hermesBotRuntime";
 import { BotThreadReconcilerLive } from "./bots/Layers/BotThreadReconciler";
 import { AutomationRepositoryLive } from "./persistence/Layers/AutomationRepository";
 import { BotCommsRepositoryLive } from "./persistence/Layers/BotCommsRepository";
@@ -246,6 +247,7 @@ export function makeServerRuntimeServicesLayer(
     automationSchedulerLayer,
     automationRunReactorLayer,
     botServiceLayer,
+    HermesBotRuntimeLive.pipe(Layer.provide(ServerSecretStoreLive)),
     botThreadReconcilerLayer,
     botCommsServiceLayer,
     botDelegationDrainerLayer,

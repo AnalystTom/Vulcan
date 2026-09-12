@@ -305,6 +305,52 @@ describe("WsTransport", () => {
     expect(emit).toHaveBeenNthCalledWith(2, WS_CHANNELS.projectProvisionProgress, completed);
   });
 
+  it("starts and stops the Hermes Bot event stream", async () => {
+    const transport = Object.create(WsTransport.prototype) as WsTransport;
+    const internals = transport as unknown as {
+      disposed: boolean;
+      sessionVersion: number;
+      listeners: Map<string, Set<unknown>>;
+      getClient: () => Promise<unknown>;
+      startStream: (...args: unknown[]) => void;
+      stopStream: (key: string) => void;
+    };
+    const stream = Stream.make({ type: "session.event", payload: {} });
+    const subscribe = vi.fn(() => stream);
+    const client = { [WS_METHODS.subscribeHermesBotEvents]: subscribe };
+    const startStream = vi.fn();
+    const stopStream = vi.fn();
+    Object.assign(internals, {
+      disposed: false,
+      sessionVersion: 1,
+      listeners: new Map([[WS_CHANNELS.hermesBotEvent, new Set()]]),
+      getClient: () => Promise.resolve(client),
+      startStream,
+      stopStream,
+    });
+
+    const startChannelStream = (
+      transport as unknown as { startChannelStream: (channel: string) => void }
+    ).startChannelStream.bind(transport);
+    const stopChannelStream = (
+      transport as unknown as { stopChannelStream: (channel: string) => void }
+    ).stopChannelStream.bind(transport);
+    startChannelStream(WS_CHANNELS.hermesBotEvent);
+    await Promise.resolve();
+
+    expect(subscribe).toHaveBeenCalledWith({});
+    expect(startStream).toHaveBeenCalledWith(
+      client,
+      "hermes-bot.events",
+      stream,
+      expect.any(Function),
+      expect.any(Function),
+    );
+
+    stopChannelStream(WS_CHANNELS.hermesBotEvent);
+    expect(stopStream).toHaveBeenCalledWith("hermes-bot.events");
+  });
+
   it("returns the completed worktree setup result and emits each progress event", async () => {
     const phase = {
       progressId: "progress-1",
@@ -373,6 +419,11 @@ describe("WsTransport", () => {
     expect(
       shouldReconnectAfterStreamFailure(
         Cause.fail({ code: "WS_PROTOCOL_INCOMPATIBLE", retryable: false }),
+      ),
+    ).toBe(false);
+    expect(
+      shouldReconnectAfterStreamFailure(
+        Cause.fail({ code: "HERMES_OWNER_REQUIRED", retryable: false }),
       ),
     ).toBe(false);
     expect(

@@ -9,6 +9,12 @@ import type {
   WorkflowRunId,
 } from "./factory";
 import type { HerdrStatus } from "./herdr";
+import type {
+  HermesBotConnectInput,
+  HermesBotEvent,
+  HermesBotRequest,
+  HermesBotStatus,
+} from "./hermesBot";
 import type { ProjectId, WorkspaceId } from "./baseSchemas";
 import type {
   StoredWorkspaceLayout,
@@ -653,6 +659,12 @@ export interface NativeApi {
   };
   herdr: {
     status: (input: { refresh?: boolean }) => Promise<HerdrStatus>;
+  };
+  hermesBots?: {
+    status: () => Promise<HermesBotStatus>;
+    connect: (input: HermesBotConnectInput) => Promise<HermesBotStatus>;
+    request: (input: HermesBotRequest) => Promise<unknown>;
+    onEvent: (callback: (event: HermesBotEvent) => void) => () => void;
   };
   terminal: {
     open: (input: TerminalOpenInput) => Promise<TerminalSessionSnapshot>;

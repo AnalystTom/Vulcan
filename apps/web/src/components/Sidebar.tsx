@@ -219,6 +219,7 @@ import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { useProviderStatusesForLocalConfig } from "../hooks/useProviderStatusesForLocalConfig";
 import { useThreadHandoff } from "../hooks/useThreadHandoff";
 import { useBots } from "../hooks/useBots";
+import { HermesBotsSidebar } from "./bots/HermesBotsView";
 import { BotAvatar } from "./bots/BotAvatar";
 import { useFeedbackDialogStore } from "../feedbackDialogStore";
 import { openExternalLink } from "~/lib/linkChips";
@@ -5851,7 +5852,7 @@ export default function Sidebar() {
                   {isOnBots ? (
                     <SidebarPrimaryAction
                       icon={BotIcon}
-                      label="New agent"
+                      label="New bot"
                       onClick={() => void navigate({ to: "/bots", search: { new: true } })}
                     />
                   ) : isOnStudio ? (
@@ -5908,37 +5909,39 @@ export default function Sidebar() {
               </SidebarGroup>
 
               {isOnBots ? (
-                <SidebarGroup className="px-1.5 py-1.5">
-                  {renderListSectionHeader("Agents", null)}
-                  <SidebarMenu className="gap-1">
-                    {botRoster.isLoading ? (
-                      <div className="px-2 pt-4 text-center text-xs text-muted-foreground">
-                        Loading agents…
-                      </div>
-                    ) : botRoster.data.bots.length === 0 ? (
-                      <div className="px-2 pt-4 text-center text-xs text-muted-foreground">
-                        No agents yet
-                      </div>
-                    ) : (
-                      botRoster.data.bots.map((bot) => (
-                        <SidebarMenuButton
-                          key={bot.id}
-                          isActive={pathname === `/bots/${bot.id}`}
-                          onClick={() =>
-                            void navigate({ to: "/bots/$botId", params: { botId: bot.id } })
-                          }
-                        >
-                          <BotAvatar
-                            avatar={bot.avatar}
-                            name={bot.name}
-                            className="size-6 text-[10px]"
-                          />
-                          <span className="min-w-0 flex-1 truncate">{bot.name}</span>
-                        </SidebarMenuButton>
-                      ))
-                    )}
-                  </SidebarMenu>
-                </SidebarGroup>
+                <HermesBotsSidebar>
+                  <SidebarGroup className="px-1.5 py-1.5">
+                    {renderListSectionHeader("Agents", null)}
+                    <SidebarMenu className="gap-1">
+                      {botRoster.isLoading ? (
+                        <div className="px-2 pt-4 text-center text-xs text-muted-foreground">
+                          Loading agents…
+                        </div>
+                      ) : botRoster.data.bots.length === 0 ? (
+                        <div className="px-2 pt-4 text-center text-xs text-muted-foreground">
+                          No agents yet
+                        </div>
+                      ) : (
+                        botRoster.data.bots.map((bot) => (
+                          <SidebarMenuButton
+                            key={bot.id}
+                            isActive={pathname === `/bots/${bot.id}`}
+                            onClick={() =>
+                              void navigate({ to: "/bots/$botId", params: { botId: bot.id } })
+                            }
+                          >
+                            <BotAvatar
+                              avatar={bot.avatar}
+                              name={bot.name}
+                              className="size-6 text-[10px]"
+                            />
+                            <span className="min-w-0 flex-1 truncate">{bot.name}</span>
+                          </SidebarMenuButton>
+                        ))
+                      )}
+                    </SidebarMenu>
+                  </SidebarGroup>
+                </HermesBotsSidebar>
               ) : isOnStudio ? (
                 // Studio is "just chats": a labeled Studio block holding a flat list of threads
                 // rooted at the Studio workspace (no project-folder chrome).

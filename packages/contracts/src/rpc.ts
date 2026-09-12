@@ -74,6 +74,12 @@ import {
 } from "./factory";
 import { HerdrStatus } from "./herdr";
 import {
+  HermesBotConnectInput,
+  HermesBotEvent,
+  HermesBotRequest,
+  HermesBotStatus,
+} from "./hermesBot";
+import {
   StoredWorkspaceLayout,
   WorkspaceLayoutWriteInput,
   WorkspaceLayoutWriteResult,
@@ -793,6 +799,31 @@ export const WsHerdrStatusRpc = Rpc.make(WS_METHODS.herdrStatus, {
   error: WsRpcError,
 });
 
+export const WsHermesBotStatusRpc = Rpc.make(WS_METHODS.hermesBotStatus, {
+  payload: Schema.Struct({}),
+  success: HermesBotStatus,
+  error: WsRpcError,
+});
+
+export const WsHermesBotConnectRpc = Rpc.make(WS_METHODS.hermesBotConnect, {
+  payload: HermesBotConnectInput,
+  success: HermesBotStatus,
+  error: WsRpcError,
+});
+
+export const WsHermesBotRequestRpc = Rpc.make(WS_METHODS.hermesBotRequest, {
+  payload: HermesBotRequest,
+  success: Schema.Json,
+  error: WsRpcError,
+});
+
+export const WsSubscribeHermesBotEventsRpc = Rpc.make(WS_METHODS.subscribeHermesBotEvents, {
+  payload: Schema.Struct({}),
+  success: HermesBotEvent,
+  error: WsRpcError,
+  stream: true,
+});
+
 export const WsTerminalOpenRpc = Rpc.make(WS_METHODS.terminalOpen, {
   payload: TerminalOpenInput,
   success: TerminalSessionSnapshot,
@@ -1419,6 +1450,10 @@ export const WsFeatureRpcGroup = RpcGroup.make(
   WsBotDelegationListRpc,
   WsBotPeerApprovalRespondRpc,
   WsSubscribeBotEventsRpc,
+  WsHermesBotStatusRpc,
+  WsHermesBotConnectRpc,
+  WsHermesBotRequestRpc,
+  WsSubscribeHermesBotEventsRpc,
 );
 
 /** @deprecated Use WsFeatureRpcGroup. Bootstrap is intentionally a separate endpoint/group. */
