@@ -76,6 +76,12 @@ The GUI patch passed ten focused SEO tests, changed-file ESLint, typecheck, buil
 
 This comparison demonstrates native delegation, attributable worker completions, operator review and corrected GUI-outage survival. It includes recovery interventions and different prospect choices, so it does not establish controlled timing superiority or complete migration acceptance.
 
+### Reviewed delivery
+
+The operator published the reviewed GUI team's result as [LaunchPost PR #143](https://github.com/AnalystTom/Hermes_hack/pull/143), commit [`bf1b98322ce51f722c83786f372485e05f743855`](https://github.com/AnalystTom/Hermes_hack/commit/bf1b98322ce51f722c83786f372485e05f743855). The final delivery branch starts at current main `c439bfadcb3ec0315e1e699557d3169f7aabf265`; the original comparison worktrees retain their frozen baseline. Review simplified redundant test path guards while preserving the actual asset-read check. The pre-commit hooks passed all 859 LaunchPost tests and typecheck, and the PR's lint/typecheck/test/build CI passed. Production deployment was skipped.
+
+The original Bot Chat received both PR links and the final commit at row 100, then returned a linked goal report at row 111. It correctly distinguished anonymous GitHub access from the operator's authenticated receipt. The host's existing authenticated GitHub CLI can read the private business PR without another login or credential copy.
+
 ### Remaining gates
 
 This PR does not close issue #3. Two consecutive representative runs through Vulcan, including controlled restart recovery without duplicate effects, remain required before migration. Existing team inventory/backups, ownership transfer, old-scheduler quiescence, schedule adoption, rollback and recurring-run acceptance remain separate gates. Distribution, Forkcast outreach/Rewind, site deployment and infrastructure monitoring have not been qualified by this SEO/prospect canary.

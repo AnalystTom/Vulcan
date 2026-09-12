@@ -39,6 +39,7 @@ describe("resolveRightDockLauncherItems", () => {
       ["browser", "Browser"],
       ["explorer", "Files"],
       ["sidechat", "Side chats"],
+      ["trace", "Agent traces"],
     ]);
   });
 
@@ -49,7 +50,7 @@ describe("resolveRightDockLauncherItems", () => {
         hasGitRepository: true,
         hasReview: true,
       }).map(({ kind }) => kind),
-    ).toEqual(["diff", "terminal", "browser", "explorer", "sidechat", "git"]);
+    ).toEqual(["diff", "terminal", "browser", "explorer", "sidechat", "git", "trace"]);
   });
 
   it("hides workspace-backed tools while no workspace is ready", () => {
@@ -59,7 +60,7 @@ describe("resolveRightDockLauncherItems", () => {
         hasGitRepository: false,
         hasReview: false,
       }).map(({ kind }) => kind),
-    ).toEqual(["terminal", "browser", "sidechat"]);
+    ).toEqual(["terminal", "browser", "sidechat", "trace"]);
   });
 
   it("hides review for a clean Git repository", () => {
@@ -69,6 +70,6 @@ describe("resolveRightDockLauncherItems", () => {
         hasGitRepository: true,
         hasReview: false,
       }).map(({ kind }) => kind),
-    ).toEqual(["terminal", "browser", "explorer", "sidechat", "git"]);
+    ).toEqual(["terminal", "browser", "explorer", "sidechat", "git", "trace"]);
   });
 });
