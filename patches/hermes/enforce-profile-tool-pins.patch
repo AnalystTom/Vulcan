@@ -1,0 +1,267 @@
+--- a/agent/coding_context.py
++++ b/agent/coding_context.py
+@@ -321,0 +322,5 @@
++        # A profile pin is the authoritative allowlist; let the shared resolver apply it after coding
++        # posture detection instead of replacing it with the ``coding`` toolset.
++        profile_tools = config.get("tools") if isinstance(config, dict) and isinstance(config.get("tools"), dict) else {}
++        if isinstance(profile_tools.get("enabled_toolsets"), list):
++            return None
+--- a/hermes_cli/tools_config.py
++++ b/hermes_cli/tools_config.py
+@@ -54,0 +55 @@
++    ("browser_without_vault", "🌐 Browser Automation (no vault)", "navigate, click, type, scroll"),
+@@ -95 +96,4 @@
+-_DEFAULT_OFF_TOOLSETS = {"homeassistant", "spotify", "discord", "discord_admin", "video", "video_gen", "x_search", "a2a"}
++_DEFAULT_OFF_TOOLSETS = {
++    "homeassistant", "spotify", "discord", "discord_admin", "video", "video_gen", "x_search", "a2a",
++    "browser_without_vault",
++}
+@@ -552 +556,5 @@
+-    """Resolve which individual toolset names are enabled for a platform."""
++    """Resolve which individual toolset names are enabled for a platform.
++
++    A profile editor pin in ``tools.enabled_toolsets`` is a profile-wide allowlist and takes precedence over
++    the platform's saved list. The profile RPC persists this field so the real agent must resolve it here.
++    """
+@@ -553,0 +562,6 @@
++    profile_tools = config.get("tools") if isinstance(config.get("tools"), dict) else {}
++    profile_pin = profile_tools.get("enabled_toolsets")
++    profile_pin_active = isinstance(profile_pin, list)
++    if profile_pin_active:
++        platform_toolsets = dict(platform_toolsets)
++        platform_toolsets[platform] = profile_pin
+@@ -579,2 +593,3 @@
+-    _recover_platform_native_toolsets(enabled_toolsets, platform, skip=configurable_keys | plugin_ts_keys | platform_default_keys)
+-    if plugin_ts_keys:
++    if not profile_pin_active:
++        _recover_platform_native_toolsets(enabled_toolsets, platform, skip=configurable_keys | plugin_ts_keys | platform_default_keys)
++    if plugin_ts_keys and not profile_pin_active:
+@@ -585 +600,2 @@
+-    if _context_engine_active(config) and not (explicitly_configured and not toolset_names):
++    if _context_engine_active(config) and not (explicitly_configured and not toolset_names) and (
++            not profile_pin_active or "context_engine" in toolset_names):
+@@ -590 +606,4 @@
+-    enabled_toolsets |= _merge_mcp_servers(config, toolset_names, explicit_passthrough, include_default_mcp_servers)
++    enabled_toolsets |= _merge_mcp_servers(
++        config, toolset_names, explicit_passthrough,
++        include_default_mcp_servers and not profile_pin_active,
++    )
+--- a/model_tools.py
++++ b/model_tools.py
+@@ -907,0 +908,8 @@
++    # The browser_without_vault session surface is a deliberate named subset of
++    # the browser tools. Direct registry dispatch must honor that subset too;
++    # otherwise a caller could invoke a vault tool that was absent from its
++    # model schema and valid_tool_names.
++    if (function_name.startswith("browser_vault_") and enabled_toolsets is not None
++            and function_name not in _select_tool_names(enabled_toolsets, disabled_toolsets, quiet_mode=True)):
++        return _emit(tool_error(f"'{function_name}' is not available in this session."))
++
+--- a/tests/agent/test_coding_context.py
++++ b/tests/agent/test_coding_context.py
+@@ -355,0 +356,9 @@
++
++
++def test_profile_toolset_pin_defers_to_shared_resolver_in_coding_focus(tmp_path):
++    _git_init(tmp_path)
++    cfg = {
++        "agent": {"coding_context": "focus"},
++        "tools": {"enabled_toolsets": ["browser_without_vault"]},
++    }
++    assert cc.coding_selection(platform="cli", cwd=tmp_path, config=cfg) is None
+--- a/tests/test_browser_vault.py
++++ b/tests/test_browser_vault.py
+@@ -21,0 +22 @@
++from types import SimpleNamespace
+@@ -24,0 +26 @@
++import yaml
+@@ -684,0 +687,116 @@
++def test_browser_without_vault_scopes_schema_dispatch_and_tool_search():
++    """The migration surface keeps browser research/control but cannot reach vault tools."""
++    import model_tools
++    import toolsets
++    from hermes_cli.tools_config import _get_effective_configurable_toolsets, _get_platform_tools
++    from tools.registry import registry
++    from tui_gateway.methods_profiles import _describe_toolsets
++
++    catalog_names = {name for name, _, _ in _get_effective_configurable_toolsets()}
++    assert "browser_without_vault" in catalog_names
++    described, pinned = _describe_toolsets(
++        {"tools": {"enabled_toolsets": ["browser_without_vault"]}}
++    )
++    assert pinned == {"browser_without_vault"}
++    assert any(row["name"] == "browser_without_vault" and row["enabled"] for row in described)
++    described_off, pinned_off = _describe_toolsets(
++        {"tools": {"enabled_toolsets": []}}
++    )
++    assert pinned_off == set()
++    assert any(row["name"] == "browser_without_vault" and not row["enabled"] for row in described_off)
++
++    native = _get_platform_tools(
++        {"platform_toolsets": {"cli": ["browser_without_vault"]}},
++        "cli",
++        include_default_mcp_servers=False,
++    )
++    assert "browser_without_vault" in native
++    default_native = _get_platform_tools(
++        {"platform_toolsets": {"cli": ["hermes-cli"]}},
++        "cli",
++        include_default_mcp_servers=False,
++    )
++    assert "browser" in default_native
++    assert "browser_without_vault" not in default_native
++    profile_native = _get_platform_tools(
++        {"tools": {"enabled_toolsets": ["browser_without_vault"]},
++         "platform_toolsets": {"cli": ["hermes-cli"]}},
++        "cli",
++        include_default_mcp_servers=False,
++    )
++    assert "browser_without_vault" in profile_native
++    assert "browser" not in profile_native
++    strict_profile = {
++        "tools": {"enabled_toolsets": ["browser_without_vault", "explicit_mcp"]},
++        "platform_toolsets": {"cli": ["hermes-cli"]},
++        "mcp_servers": {
++            "explicit_mcp": {"enabled": True},
++            "default_mcp": {"enabled": True},
++        },
++        "context": {"engine": "alternate"},
++    }
++    with patch("hermes_cli.tools_config._get_plugin_toolset_keys", return_value={"unmanaged_plugin"}):
++        strict_native = _get_platform_tools(strict_profile, "cli", include_default_mcp_servers=True)
++    assert {"browser_without_vault", "explicit_mcp"} <= strict_native
++    assert not {"browser", "default_mcp", "unmanaged_plugin", "context_engine"} & strict_native
++
++    toolset_tools = set(toolsets.resolve_toolset("browser_without_vault"))
++    assert {"browser_navigate", "browser_snapshot", "browser_click"} <= toolset_tools
++    assert not any(name.startswith("browser_vault_") for name in toolset_tools)
++
++    # Browser backends are intentionally unavailable in this hermetic test
++    # environment; make the registry availability pass observable here so the
++    # assertion exercises selected schemas rather than installation state.
++    with patch("tools.registry._memo_check", return_value=True):
++        definitions = model_tools.get_tool_definitions(
++            enabled_toolsets=["browser_without_vault"], quiet_mode=True,
++            skip_tool_search_assembly=True,
++        )
++    schema_names = {definition["function"]["name"] for definition in definitions}
++    assert {"browser_navigate", "browser_snapshot", "browser_click"} <= schema_names
++    assert not any(name.startswith("browser_vault_") for name in schema_names)
++    assert model_tools._tool_defs_cache_key(
++        ["browser"], None, True
++    ) != model_tools._tool_defs_cache_key(["browser_without_vault"], None, True)
++
++    with patch.object(registry, "dispatch", wraps=registry.dispatch) as dispatch:
++        direct = json.loads(model_tools.handle_function_call(
++            "browser_vault_list", {}, enabled_toolsets=["browser_without_vault"],
++        ))
++    assert "not available in this session" in direct["error"]
++    dispatch.assert_not_called()
++
++    stemmer = SimpleNamespace(stemWord=lambda word: word)
++    with patch.dict(sys.modules, {"snowballstemmer": SimpleNamespace(stemmer=lambda _: stemmer)}):
++        searched = json.loads(model_tools.handle_function_call(
++            "tool_search", {"queries": ["browser vault login"], "limit": 10},
++            enabled_toolsets=["browser_without_vault"],
++        ))
++    assert not any(name.startswith("browser_vault_") for name in searched["tools"])
++    blocked = json.loads(model_tools.handle_function_call(
++        "tool_call", {"name": "browser_vault_list", "arguments": {}},
++        enabled_toolsets=["browser_without_vault"],
++    ))
++    assert "not a deferrable tool" in blocked["error"]
++
++
++def test_browser_without_vault_profile_pin_is_saved_and_reaches_native_resolver(tmp_path, monkeypatch):
++    home = tmp_path / ".hermes"
++    home.mkdir()
++    monkeypatch.setenv("HERMES_HOME", str(home))
++
++    from hermes_cli.tools_config import _get_platform_tools
++    from tui_gateway import server
++
++    result = server._methods["profiles.configure"](
++        1, {"name": "default", "enabled_toolsets": ["browser_without_vault"]}
++    )
++    assert result["result"]["applied"]["toolsets"] is True
++
++    saved = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
++    assert saved["tools"]["enabled_toolsets"] == ["browser_without_vault"]
++    enabled = _get_platform_tools(saved, "cli", include_default_mcp_servers=False)
++    assert "browser_without_vault" in enabled
++    assert "browser" not in enabled
++
++
+--- a/tests/tui_gateway/test_make_agent_provider.py
++++ b/tests/tui_gateway/test_make_agent_provider.py
+@@ -352,0 +353,24 @@
++
++
++
++def test_profile_tool_pin_precedes_coding_and_environment_overrides(monkeypatch):
++    """The real gateway loader keeps a profile pin across code workspaces and env overrides."""
++    from hermes_cli.tools_config import _get_platform_tools
++    from tui_gateway import server
++
++    cfg = {
++        "tools": {"enabled_toolsets": ["browser_without_vault"]},
++        "platform_toolsets": {"cli": ["hermes-cli"]},
++    }
++    monkeypatch.setenv("HERMES_TUI_TOOLSETS", "browser")
++    with (
++        patch.object(server, "_load_cfg", return_value=cfg),
++        patch("hermes_cli.config.load_config", return_value=cfg),
++        patch("agent.coding_context.coding_selection", return_value=["coding"]),
++    ):
++        enabled = set(server._load_enabled_toolsets("desktop"))
++
++    expected = _get_platform_tools(cfg, "cli", include_default_mcp_servers=True)
++    assert "browser_without_vault" in enabled
++    assert "browser" not in enabled
++    assert expected <= enabled
+--- a/toolsets.py
++++ b/toolsets.py
+@@ -40,0 +41,4 @@
++_BROWSER_TOOLS = [tool for tool in _HERMES_CORE_TOOLS if tool.startswith("browser_")]
++_BROWSER_WITHOUT_VAULT_TOOLS = [
++    tool for tool in _BROWSER_TOOLS if not tool.startswith("browser_vault_")
++]
+@@ -113 +117,5 @@
+-        [t for t in _HERMES_CORE_TOOLS if t.startswith("browser_")],
++        _BROWSER_TOOLS,
++    ),
++    "browser_without_vault": _ts(
++        "Browser navigation, control, and research without credential-vault tools",
++        _BROWSER_WITHOUT_VAULT_TOOLS,
+--- a/tui_gateway/methods_profiles.py
++++ b/tui_gateway/methods_profiles.py
+@@ -393 +393,2 @@
+-                (ts_name in default_off or ts_name == "yuanbao") and not enabled):
++                (ts_name in default_off or ts_name == "yuanbao") and not enabled
++                and ts_name != "browser_without_vault"):
+--- a/tui_gateway/server.py
++++ b/tui_gateway/server.py
+@@ -1848,0 +1849,16 @@
++    # A profile editor pin is an explicit profile-wide allowlist. Resolve it before the coding posture or
++    # HERMES_TUI_TOOLSETS overrides so a workspace change or inherited process env cannot broaden the profile.
++    cfg = None
++    try:
++        from hermes_cli.config import load_config
++        cfg = load_config()
++    except Exception:
++        cfg = None
++    profile_tools = cfg.get("tools") if isinstance(cfg, dict) and isinstance(cfg.get("tools"), dict) else {}
++    if isinstance(profile_tools.get("enabled_toolsets"), list):
++        try:
++            from hermes_cli.tools_config import _get_platform_tools
++            enabled = _get_platform_tools(cfg, "cli", include_default_mcp_servers=True)
++        except Exception:
++            return []
++        return sorted(enabled | _gui_surface_toolsets(session_platform)) if enabled else []
+@@ -1865 +1880,0 @@
+-        from hermes_cli.config import load_config
+@@ -1867 +1882,3 @@
+-        cfg = load_config()
++        if cfg is None:
++            from hermes_cli.config import load_config
++            cfg = load_config()
