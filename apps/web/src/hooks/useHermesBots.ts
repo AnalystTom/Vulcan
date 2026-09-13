@@ -346,6 +346,7 @@ export interface HermesChatSnapshot {
   readonly messages: readonly HermesChatMessage[];
   readonly running: boolean;
   readonly status: string | null;
+  readonly failure: { readonly message: string; readonly retryable: boolean | null } | null;
   readonly pendingApproval: HermesPendingApproval | null;
   readonly pendingClarify: HermesPendingClarify | null;
   readonly loadedAtIso: string;
@@ -433,6 +434,15 @@ function parseResume(body: unknown, profile: string, storedSessionId: string): H
   const root = rec(body) ?? {};
   const runtimeSessionId = str(root.session_id);
   if (!runtimeSessionId) throw new Error("The gateway resumed the chat without a session id.");
+  // Native sessions become idle after a failed turn; its replayable outcome lives in inflight.
+  const inflight = rec(root.inflight);
+  const failure =
+    inflight?.status === "error"
+      ? {
+          message: str(inflight.error) ?? "The native turn failed without an error message.",
+          retryable: bool(rec(inflight.error_surface)?.retryable),
+        }
+      : null;
   return {
     profile,
     // `session_key` echoes the resume target, which may be a compressed lineage tip. The
@@ -442,7 +452,8 @@ function parseResume(body: unknown, profile: string, storedSessionId: string): H
     runtimeSessionId,
     messages: parseChatMessages(root.messages),
     running: bool(root.running) ?? false,
-    status: str(root.status),
+    status: failure ? "error" : str(root.status),
+    failure,
     pendingApproval: parsePendingApproval(root.pending_approval),
     pendingClarify: parsePendingClarify(root.pending_clarify),
     loadedAtIso: new Date().toISOString(),
@@ -537,6 +548,7 @@ export async function resolveCanonicalChat(profile: string, knownCanonicalId: st
     messages: [],
     running: false,
     status: null,
+    failure: null,
     pendingApproval: null,
     pendingClarify: null,
     loadedAtIso: new Date().toISOString(),

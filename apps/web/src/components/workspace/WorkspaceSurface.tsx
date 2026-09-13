@@ -34,9 +34,11 @@ import {
 import { FactoryPane } from "./FactoryPane";
 import { TapesTracePane } from "./TapesTracePane";
 import { useIsMobile } from "~/hooks/useMediaQuery";
+import { useHermesEventInvalidation } from "~/hooks/useHermesBots";
 import { ensureNativeApi } from "~/nativeApi";
 
 import { HerdrTerminalPane } from "./HerdrTerminalPane";
+import { HermesBotPane } from "./HermesBotPane";
 import { describePaneMode } from "./paneModeRegistry";
 import { WorkspaceGrid } from "./WorkspaceGrid";
 import { WorkspacePaneSwitcher } from "./WorkspacePaneSwitcher";
@@ -70,12 +72,13 @@ export function WorkspaceSurface({
   );
   const store = useWorkspaceLayoutStore();
   const isNarrow = useIsMobile();
+  useHermesEventInvalidation();
 
   useEffect(() => {
     void store.open({ workspaceId, projectId, threadId });
   }, [store, workspaceId, projectId, threadId]);
 
-  const layout = entry?.layout ?? null;
+  const layout = entry?.status === "loading" ? null : (entry?.layout ?? null);
   const focusedPaneId = layout?.focusedPaneId ?? null;
 
   /**
@@ -191,6 +194,18 @@ export function WorkspaceSurface({
                   // Recorded as a fallback, never as a Herdr session.
                   sessionName: null,
                   fallbackTerminalId: terminalId,
+                })
+              }
+            />
+          );
+        case "hermesBot":
+          return (
+            <HermesBotPane
+              pane={pane}
+              onSelectProfile={(profile) =>
+                void store.setPaneAttachment(workspaceId, pane.paneId, {
+                  mode: "hermesBot",
+                  profile,
                 })
               }
             />

@@ -47,14 +47,13 @@ export const WORKSPACE_LAYOUT_MIN_WEIGHT = 0.12;
 /**
  * The Pane Modes a Pane can display.
  *
- * `agent` and `herdrTerminal` are implemented. The rest are declared here so the
- * registry, persistence, and automation share one taxonomy as they are built --
- * the mode picker only offers the implemented ones, and an unimplemented mode
- * renders an explicit unavailable surface rather than an empty Pane.
+ * The registry, persistence, and automation share this taxonomy. The picker only
+ * offers IMPLEMENTED_PANE_MODES; other modes render an explicit unavailable surface.
  */
 export const PaneMode = Schema.Literals([
   "agent",
   "herdrTerminal",
+  "hermesBot",
   "browser",
   "diff",
   "factory",
@@ -66,6 +65,7 @@ export type PaneMode = typeof PaneMode.Type;
 export const IMPLEMENTED_PANE_MODES = [
   "agent",
   "herdrTerminal",
+  "hermesBot",
   "factory",
   "trace",
 ] as const satisfies readonly PaneMode[];
@@ -75,7 +75,7 @@ export const IMPLEMENTED_PANE_MODES = [
  *
  * Keyed by mode and kept for every mode the Pane has ever shown, because
  * switching modes must be reversible: switching away and back has to resume the
- * same Agent Session or terminal rather than start a new one.
+ * same Agent Session, terminal, or Hermes Bot Chat rather than start a new one.
  */
 export const AgentPaneAttachment = Schema.Struct({
   mode: Schema.Literal("agent"),
@@ -99,6 +99,13 @@ export const HerdrTerminalPaneAttachment = Schema.Struct({
 });
 export type HerdrTerminalPaneAttachment = typeof HerdrTerminalPaneAttachment.Type;
 
+/** A native Hermes profile whose durable Bot Chat this Pane displays. */
+export const HermesBotPaneAttachment = Schema.Struct({
+  mode: Schema.Literal("hermesBot"),
+  profile: Schema.NullOr(TrimmedNonEmptyString.check(Schema.isMaxLength(128))),
+});
+export type HermesBotPaneAttachment = typeof HermesBotPaneAttachment.Type;
+
 /** A mode that has no attachment state yet; carried so the mode is still remembered. */
 export const UnattachedPaneAttachment = Schema.Struct({
   mode: Schema.Literals(["browser", "diff", "factory", "trace", "lavishReview"]),
@@ -108,6 +115,7 @@ export type UnattachedPaneAttachment = typeof UnattachedPaneAttachment.Type;
 export const PaneAttachment = Schema.Union([
   AgentPaneAttachment,
   HerdrTerminalPaneAttachment,
+  HermesBotPaneAttachment,
   UnattachedPaneAttachment,
 ]);
 export type PaneAttachment = typeof PaneAttachment.Type;

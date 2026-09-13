@@ -159,7 +159,11 @@ export function HermesBotChat({ profile }: { profile: HermesProfile }) {
             {profile.model ? ` · ${profile.model}` : ""}
           </p>
         </div>
-        {snapshot?.running ? <StatusPill tone="info">Running</StatusPill> : null}
+        {snapshot?.failure ? (
+          <StatusPill tone="error">Needs attention</StatusPill>
+        ) : snapshot?.running ? (
+          <StatusPill tone="info">Running</StatusPill>
+        ) : null}
         {snapshot?.running ? (
           <Button
             size="sm"
@@ -196,6 +200,17 @@ export function HermesBotChat({ profile }: { profile: HermesProfile }) {
             />
           ))
         )}
+        {snapshot?.failure ? (
+          <Alert variant="error" size="sm">
+            <AlertTitle>Bot could not complete this turn</AlertTitle>
+            <AlertDescription>
+              <p className="break-words">{snapshot.failure.message}</p>
+              {snapshot.failure.retryable === false ? (
+                <p>Resolve this error before sending another message.</p>
+              ) : null}
+            </AlertDescription>
+          </Alert>
+        ) : null}
         {snapshot?.pendingApproval ? (
           <ApprovalCard
             approval={snapshot.pendingApproval}
@@ -266,12 +281,10 @@ export function HermesBotChat({ profile }: { profile: HermesProfile }) {
         <Textarea
           aria-label={`Message ${label}`}
           placeholder={
-            snapshot?.running
-              ? "Wait for this turn to finish, or interrupt it."
-              : `Message ${label}`
+            snapshot?.running ? "Draft a follow-up while this bot works…" : `Message ${label}`
           }
           value={draft}
-          disabled={!snapshot || busy || snapshot.running || deliveryUnconfirmed}
+          disabled={!snapshot || busy || deliveryUnconfirmed}
           onChange={(event) => setDraft(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {

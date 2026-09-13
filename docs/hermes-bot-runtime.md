@@ -82,6 +82,64 @@ The operator published the reviewed GUI team's result as [LaunchPost PR #143](ht
 
 The original Bot Chat received both PR links and the final commit at row 100, then returned a linked goal report at row 111. It correctly distinguished anonymous GitHub access from the operator's authenticated receipt. The host's existing authenticated GitHub CLI can read the private business PR without another login or credential copy.
 
+### Failed-turn recovery and current model access
+
+The next Chief check-in on 2026-09-12 at 23:12:57 UTC failed with Anthropic HTTP 403: OAuth authentication is not allowed for the organization. Native session `20260913_001257_755df6` retained one user message and no assistant reply. Its outer session state was `idle`, while `session.resume.inflight` retained `status: error`, the provider error, and `error_surface.retryable: false`. Vulcan previously discarded that retained outcome. The Bot Chat now projects it as **Needs attention** with the actual error and recovery guidance. It does not infer completion from an idle session or resubmit the message.
+
+The focused response-boundary suite passes 11 tests, including failure replay, absence of a resend, and clearing the failure once the native outcome clears. A fresh Playwright context against the rebuilt remote GUI verified the real Chief error before and after reload. Read-only SQLite inspection still found exactly one user message in the failed session.
+
+![Native failed turn after reload](images/hermes-bot-mode/failure-replay.png)
+
+The gateway's model catalog reports Anthropic as authenticated despite this rejected turn; catalog presence is not successful model execution. OpenAI Codex Luna remains the working provider for the acceptance workers. The same inventory reports xAI unauthenticated with no models, and neither execution machine exposes a Grok CLI on PATH. Grok execution remains unqualified.
+
+### Busy canonical recipient
+
+The corrected native test `native_busy_20260912_232844` resolved the existing GUI SEO Bot Chat (`20260912_131104_9b74f1`, live `87ee557d`) instead of creating a similarly titled substitute. While SEO ran `sleep 25`, GUI Research (`20260912_131037_e4b321`, live `811de283`) called native `message_agent` once. The durable receipt `bbe35a1e17a1600efa0f9ad5cf62e71e9d834cb6375e128b2cc766b1501d356d` progressed `queued → claimed → settled`; SEO's history puts its original completion before the incoming DM and the attributable acknowledgment. No interrupt or cleanup close was issued. Both sessions became idle. The model needed native recovery after two internal-only incomplete responses before producing its visible reply; that recovery is part of this result.
+
+The target's native `config.set` changed `display.busy_input_mode` to `queue`. Hermes already owns the durable peer mailbox, so this required no Vulcan queue. The earlier `fault-busy.py` canary created a different session and explicitly interrupted that substitute; its result is not evidence of a broken native peer queue.
+
+### Original SEO review recovery
+
+Goal `LP-ORIGINAL-SEO-20260913-A` exercised the existing read-only LaunchPost SEO authority review, rather than treating the earlier patch canary as completion of that routine. Chief session `20260913_001257_755df6` first returned a plan without dispatching workers under Luna. The operator changed Chief to OpenAI Codex `gpt-6-astra` with high reasoning and supplied an execution correction through Vulcan at 23:35:17 UTC. This intervention prevents counting the result as a clean autonomous run.
+
+Chief delegated to GUI Research, which delegated to GUI SEO and GUI Prospects. Research requested one native Prospects correction (`proc_ea84b6b103da`, recipient session `20260912_131104_9c2ca3`, reply row 262), joined both substantive replies, and returned its report to Chief through settled receipt `a5cc3fc64d760901f7f488d5a165864462770f86cb0b7773552b2baaf344121f`. The remote report `runtime/launchpost-original-seo-20260913-A.md` was finalized at 23:48:50 UTC. It records production observations, content intent hypotheses, and sourced Product Hunt, Indie Hackers and DEV authority opportunities. No external write or schedule adoption occurred.
+
+SEO's persisted `browser_exec` calls used the real Browser Use CLI and a CDP browser. Its `shared-default` context label was model-produced, however, and does not establish a fresh isolated browser context. Chief's independent verification has an attributable local browser session, `h_218a008145`, for task `bu-named-chief-lp-original-verify`. The report's stronger claims about SEO browser isolation are not accepted as evidence. Independent checks confirmed the public admin password prompt and the old logo's 404 versus the replacement PNG's 200; these observations do not establish Google indexing, ranking, traffic or acquired leads.
+
+The native job continued during a Vulcan GUI service restart from 23:42:05 to 23:43:37 UTC. Hermes itself was not restarted. Runtime restart recovery, an intervention-free repeat, authenticated analytics and Linear read-back remain unproven by this run.
+
+### Existing ownership inventory
+
+Read-only inspection of the original `.vulcan/bot-dev/dev/state.sqlite` found nine unarchived Workers, 83 total task records, and no Vulcan automation definitions or runs. The original Chief, five marketing Workers and three operations Workers retain their identities and local workspaces. The separate `.vulcan/issue3` database contains overlapping identities and must not be counted as a second original team.
+
+Eight relevant Codex automation configurations were found outside Vulcan: Forkcast SEO, LaunchPost SEO, LaunchPost traffic/GSC review, directory submissions, Forkcast organizer/attendee confirmation, Forkcast UX analysis, unified product telemetry and TikTok review monitoring. Their configured `ACTIVE` values are not proof of execution or a future due run (the traffic review has a one-occurrence schedule). They remain owned by Codex; no replacement schedule has been started. Adoption must preserve their actual prompts, policies, target tasks, cadence and receipts, then verify old-owner quiescence before enabling Hermes scheduling.
+
+### Coding, Hermes and Herdr in one workspace
+
+The chat context menu's **Open workspace** action opens the existing coding session in a persisted pane grid. **Hermes Bot** is a pane mode using the native profile roster and the same canonical Bot Chat as the Bots page. Profile attachments survive mode switches and reloads; changing profile remounts its composer so an unsent draft cannot cross into a different bot. A running bot permits draft preparation while Send remains gated.
+
+Fresh-browser qualification exposed shared workspace defects: overlapping focus/mode saves caused false compare-and-set conflicts; cold navigation did not subscribe to coding transcripts; the pane content wrapper collapsed ChatView; and xterm styles were loaded only by the terminal drawer. The fixes serialize layout edits per workspace, make repeated focus a no-op, register visible workspace chats in the existing detail-subscription manager, and use the shared flex and terminal-style paths. Actual cross-client conflicts remain visible. The layout save queue does not schedule bot work.
+
+The existing connection limit admits eight coding conversation streams. When a nine-pane workspace exceeds that limit, the focused coding pane receives priority and the extra pane offers an explicit focus action to load its conversation. Switching focus does not stop the underlying jobs.
+
+On 13 September, an actual Vulcan Codex session `dbfa0a55-3320-44f1-9492-0f408f668bb4` ran Luna high in the isolated `mixed-workspace` project. It read the completed native SEO report and wrote a 239-word `seo-review-summary.md`, explicitly separating PR work from deployment, prospects from acquired leads, and the recovered run from a clean autonomy pass. Its reported source SHA-256 was independently matched to the file: `52b7482d5e67a0ff32d0973569a374b43073269fc99b280ab5aa6ed7e7d81152`.
+
+Fresh Playwright contexts opened this session through the visible workspace menu, confirmed the coding result inside the pane bounds, loaded GUI Research's actual canonical history, and verified Herdr's styled terminal output. Herdr 0.7.4/protocol 16 reattached to the same observed process `1470293` in the isolated project directory. The three panes, selected profile and conversations replayed after reload. Separate interaction checks passed for busy drafting, cross-profile draft isolation, mode restoration and absence of same-client layout conflicts. This proves the combined interface and these specific interactions; it does not qualify every Herdr workflow or Grok execution.
+
+![Real Codex result, Herdr terminal and native Hermes chat](images/hermes-bot-mode/mixed-workspace.png)
+
+### Clean repeat B: report delivery gap
+
+`LP-ORIGINAL-SEO-20260913-B` was submitted once through Vulcan at 23:55:37 UTC, with no subsequent operator routing or correction. Native workers produced the report, but Chief did not receive and independently verify its completion. Chief's delivery `proc_5abcdd435bc2` exited normally with Research's initial dispatch acknowledgment; Research later finished its separate turn without a final native message back to Chief. This is a failed Goal acceptance run, despite the written report.
+
+Pinned Hermes `message_agent` is fire-and-forget: its completion notification covers that delivery, not every later recipient turn. The successful recovery A explicitly returned its final report with `message_agent`; B's delegation omitted that return obligation. Crash auto-continue was not involved. The isolated team's persistent coordination instructions are being qualified with an explicit return-owner contract; two consecutive clean runs and controlled restart acceptance remain outstanding.
+
+### Clean repeat C: return delivered, verification blocked
+
+The four isolated canonical profiles received an explicit final-return obligation through Hermes's supported profile SOUL endpoint. `LP-ORIGINAL-SEO-20260913-C` was submitted once through Vulcan at 00:17:32 UTC on 13 September. Chief, Research, SEO and Prospects coordinated without subsequent operator routing, corrections, resends, model changes or restarts. Chief → Research (`proc_8cc59c72a6cb`), Research → SEO (`proc_bfce130eaab7`), SEO → Research (`proc_c8c7011e6e17`), Prospects → Research (`proc_3cd328b83bb6`) and Research → Chief (`proc_7138d3844f06`) all have settled native delivery receipts. Research wrote the 16,937-byte report `runtime/launchpost-original-seo-20260913-C.md`.
+
+Chief nevertheless blocked acceptance. SEO's persisted `browser_exec` tool arguments contained only `code`: a session label printed inside that code did not establish use of the native top-level `session` argument. Chief independently checked the public admin route through a separate CDP-backed browser, but that could not substitute for the worker's required fresh context. Some final receipts were also not yet settled when Chief checked them; later durable settlement does not retroactively establish a successful acceptance decision. C proves autonomous return delivery and a truthful verification failure, not a clean Goal pass. The next trial must use and verify actual native browser session arguments before acceptance.
+
 ### Remaining gates
 
 This PR does not close issue #3. Two consecutive representative runs through Vulcan, including controlled restart recovery without duplicate effects, remain required before migration. Existing team inventory/backups, ownership transfer, old-scheduler quiescence, schedule adoption, rollback and recurring-run acceptance remain separate gates. Distribution, Forkcast outreach/Rewind, site deployment and infrastructure monitoring have not been qualified by this SEO/prospect canary.

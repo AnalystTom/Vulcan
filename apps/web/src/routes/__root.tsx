@@ -18,6 +18,7 @@ import {
   useNavigate,
   useParams,
   useRouterState,
+  useSearch,
 } from "@tanstack/react-router";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { QueryClient, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -114,6 +115,7 @@ import {
 import { useProviderStatusRefresh } from "../hooks/useProviderStatusRefresh";
 import { resolveSplitViewThreadIds, selectSplitView, useSplitViewStore } from "../splitViewStore";
 import { useRightDockStore } from "../rightDockStore";
+import { resolveWorkspaceThreadIds, useWorkspaceLayoutStore } from "../workspaceLayoutStore";
 import { resolveVisibleDockSidechatThreadIds } from "../rightDockStore.logic";
 import { arraysShallowEqual } from "../storeNormalization";
 import { providerModelDiscoveryInvalidationFingerprint } from "../lib/providerDiscoveryInvalidation";
@@ -1013,17 +1015,33 @@ function EventRouter() {
     select: (params) => (params.threadId ? ThreadId.makeUnsafe(params.threadId) : null),
   });
   const routeSearch = useDiffRouteSearch();
+  const workspaceId = useParams({
+    strict: false,
+    select: (params) => params.workspaceId ?? null,
+  });
+  const workspaceThreadId = useSearch({
+    strict: false,
+    select: (search) =>
+      "threadId" in search && typeof search.threadId === "string"
+        ? ThreadId.makeUnsafe(search.threadId)
+        : null,
+  });
+  const workspaceLayout = useWorkspaceLayoutStore((store) =>
+    workspaceId ? (store.entries[workspaceId]?.layout ?? null) : null,
+  );
   const activeSplitView = useSplitViewStore(
     useMemo(() => selectSplitView(routeSearch.splitViewId ?? null), [routeSearch.splitViewId]),
   );
   const hostThreadIds = useMemo(
     () =>
-      activeSplitView
-        ? resolveSplitViewThreadIds(activeSplitView)
-        : routeThreadId
-          ? [routeThreadId]
-          : [],
-    [activeSplitView, routeThreadId],
+      workspaceId
+        ? resolveWorkspaceThreadIds(workspaceLayout, workspaceThreadId)
+        : activeSplitView
+          ? resolveSplitViewThreadIds(activeSplitView)
+          : routeThreadId
+            ? [routeThreadId]
+            : [],
+    [activeSplitView, routeThreadId, workspaceId, workspaceLayout, workspaceThreadId],
   );
   // Right-dock sidechat panes render a full ChatView for their embedded thread,
   // so they need a detail lease exactly like split-view panes: without one the
@@ -1033,12 +1051,12 @@ function EventRouter() {
     () => [
       ...hostThreadIds,
       ...resolveVisibleDockSidechatThreadIds({
-        dockRendered: routeSearch.view !== "editor",
+        dockRendered: !workspaceId && routeSearch.view !== "editor",
         dockStateByThreadId,
         hostThreadIds,
       }),
     ],
-    [dockStateByThreadId, hostThreadIds, routeSearch.view],
+    [dockStateByThreadId, hostThreadIds, routeSearch.view, workspaceId],
   );
   const retainedThreadIds = useRetainedThreadDetailIds();
   const serverThreadIdSet = useMemo(() => new Set(serverThreadIds), [serverThreadIds]);

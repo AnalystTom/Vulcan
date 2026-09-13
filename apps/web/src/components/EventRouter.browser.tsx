@@ -1,9 +1,14 @@
 import "../index.css";
 
+// Compile the chat route before timed browser assertions on a cold Vite cache.
+import "./ChatView";
+
 import {
   EventId,
   MessageId,
   ORCHESTRATION_WS_METHODS,
+  PaneId,
+  PaneRowId,
   ProjectId,
   ThreadId,
   TurnId,
@@ -14,7 +19,9 @@ import {
   type ServerConfig,
   type WsWelcomePayload,
   WS_METHODS,
+  WorkspaceId,
 } from "@vulcan/contracts";
+import { createPane, createWorkspaceLayout } from "@vulcan/shared/workspaceLayout";
 import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
 import { HttpResponse, http, ws } from "msw";
 import { setupWorker } from "msw/browser";
@@ -60,6 +67,7 @@ import { createBrowserTestServerConfig, createFullscreenTestHost } from "../test
 import { getThreadFromState } from "../threadDerivation";
 import { resetThreadDetailResumeCursorsForTests } from "../threadDetailResumeCursors";
 import { useWorkspacePathsStore } from "../workspacePathsStore";
+import { useWorkspaceLayoutStore } from "../workspaceLayoutStore";
 import { resetWsNativeApiForTest } from "../wsNativeApi";
 
 const THREAD_ID = ThreadId.makeUnsafe("thread-root-browser-test");
@@ -292,6 +300,8 @@ const worker = setupWorker(
         method === WS_METHODS.subscribeServerProviderStatuses ||
         method === WS_METHODS.subscribeServerSettings ||
         method === WS_METHODS.subscribeTerminalEvents ||
+        method === WS_METHODS.subscribeBotEvents ||
+        method === WS_METHODS.subscribeHermesBotEvents ||
         method === WS_METHODS.subscribeOrchestrationDomainEvents ||
         method === WS_METHODS.subscribeProjectDevServerEvents ||
         method === WS_METHODS.subscribeAutomationEvents
@@ -347,11 +357,14 @@ const worker = setupWorker(
 async function mountApp(options?: {
   routeThreadId?: ThreadId;
   waitForThreadId?: ThreadId | null;
+  initialPath?: string;
 }): Promise<{ cleanup: () => Promise<void> }> {
   const host = createFullscreenTestHost();
 
   const routeThreadId = options?.routeThreadId ?? THREAD_ID;
-  const router = getRouter(createMemoryHistory({ initialEntries: [`/${routeThreadId}`] }));
+  const router = getRouter(
+    createMemoryHistory({ initialEntries: [options?.initialPath ?? `/${routeThreadId}`] }),
+  );
   const screen = await render(<RouterProvider router={router} />, { container: host });
 
   try {
@@ -439,6 +452,36 @@ function sendShellEventPush(event: OrchestrationShellStreamItem) {
 }
 
 describe("EventRouter scoped orchestration sync", () => {
+  it("hydrates an agent pane on a fresh workspace route", async () => {
+    const workspaceId = WorkspaceId.makeUnsafe("workspace-detail-reload");
+    const layout = createWorkspaceLayout(
+      workspaceId,
+      PaneRowId.makeUnsafe("workspace-row"),
+      createPane(PaneId.makeUnsafe("workspace-agent"), "agent"),
+    );
+    useWorkspaceLayoutStore.setState({
+      entries: {
+        [workspaceId]: {
+          layout,
+          projectId: PROJECT_ID,
+          threadId: THREAD_ID,
+          syncedRevision: layout.revision,
+          status: "ready",
+          lastRejection: null,
+          errorMessage: null,
+        },
+      },
+    });
+    try {
+      const app = await mountApp({
+        initialPath: `/workspace/${workspaceId}?projectId=${PROJECT_ID}&threadId=${THREAD_ID}`,
+      });
+      await app.cleanup();
+    } finally {
+      useWorkspaceLayoutStore.setState({ entries: {} });
+    }
+  });
+
   beforeAll(async () => {
     fixture = buildFixture();
     await worker.start({

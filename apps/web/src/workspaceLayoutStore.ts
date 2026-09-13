@@ -43,6 +43,7 @@ import {
   planAutomationPlacement,
   type PaneLayoutResult,
   removePane,
+  readPaneAttachment,
   setCellWidthWeights,
   setPaneAttachment,
   setPaneMode,
@@ -138,6 +139,7 @@ interface WorkspaceLayoutStoreState {
 }
 
 export const useWorkspaceLayoutStore = create<WorkspaceLayoutStoreState>((set, get) => {
+  const mutationQueues = new Map<WorkspaceId, Promise<void>>();
   const readEntry = (workspaceId: WorkspaceId): WorkspaceLayoutEntry | undefined =>
     get().entries[workspaceId];
 
@@ -147,6 +149,18 @@ export const useWorkspaceLayoutStore = create<WorkspaceLayoutStoreState>((set, g
       if (!existing) return state;
       return { entries: { ...state.entries, [workspaceId]: { ...existing, ...changes } } };
     });
+  };
+
+  /** Keep one client's layout mutations in revision order for each Workspace. */
+  const enqueue = (workspaceId: WorkspaceId, operation: () => Promise<void>): Promise<void> => {
+    const previous = mutationQueues.get(workspaceId) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(operation);
+    mutationQueues.set(workspaceId, next);
+    const cleanup = () => {
+      if (mutationQueues.get(workspaceId) === next) mutationQueues.delete(workspaceId);
+    };
+    void next.then(cleanup, cleanup);
+    return next;
   };
 
   /**
@@ -194,7 +208,7 @@ export const useWorkspaceLayoutStore = create<WorkspaceLayoutStoreState>((set, g
   };
 
   /** Applies a layout operation, saving it when accepted and recording the refusal when not. */
-  const apply = async (
+  const applyOperation = async (
     workspaceId: WorkspaceId,
     operation: (layout: WorkspaceLayout) => PaneLayoutResult,
   ): Promise<void> => {
@@ -205,60 +219,68 @@ export const useWorkspaceLayoutStore = create<WorkspaceLayoutStoreState>((set, g
       patch(workspaceId, { lastRejection: result.rejection });
       return;
     }
+    if (result.layout === entry.layout) return;
     patch(workspaceId, { layout: result.layout, lastRejection: null });
     await persist(workspaceId);
   };
 
+  const apply = (
+    workspaceId: WorkspaceId,
+    operation: (layout: WorkspaceLayout) => PaneLayoutResult,
+  ): Promise<void> => enqueue(workspaceId, () => applyOperation(workspaceId, operation));
+
   return {
     entries: {},
 
-    open: async ({ workspaceId, projectId, threadId }) => {
-      const existing = readEntry(workspaceId);
-      if (existing && existing.status !== "error") return;
+    open: ({ workspaceId, projectId, threadId }) =>
+      enqueue(workspaceId, async () => {
+        const existing = readEntry(workspaceId);
+        if (existing && existing.status !== "error") return;
 
-      set((state) => ({
-        entries: {
-          ...state.entries,
-          [workspaceId]: {
-            layout: createWorkspaceLayout(
-              workspaceId,
-              mintRowId(),
-              createPane(mintPaneId(), "agent"),
-            ),
-            projectId,
-            threadId,
-            syncedRevision: null,
-            status: "loading",
-            lastRejection: null,
-            errorMessage: null,
+        set((state) => ({
+          entries: {
+            ...state.entries,
+            [workspaceId]: {
+              layout: createWorkspaceLayout(
+                workspaceId,
+                mintRowId(),
+                createPane(mintPaneId(), "agent"),
+              ),
+              projectId,
+              threadId,
+              syncedRevision: null,
+              status: "loading",
+              lastRejection: null,
+              errorMessage: null,
+            },
           },
-        },
-      }));
+        }));
 
-      try {
-        const stored = await ensureNativeApi().workspaceLayouts.read({ workspaceId });
-        if (stored) {
+        try {
+          const stored = await ensureNativeApi().workspaceLayouts.read({ workspaceId });
+          if (stored) {
+            patch(workspaceId, {
+              layout: stored.layout,
+              projectId: stored.projectId,
+              threadId: stored.threadId,
+              syncedRevision: stored.layout.revision,
+              status: "ready",
+            });
+            return;
+          }
+          // First time this Workspace has been opened. Seed it with one Agent Pane
+          // and store that, so a reload restores the same grid rather than seeding
+          // a second one.
+          patch(workspaceId, { status: "ready" });
+          await persist(workspaceId);
+        } catch (cause) {
           patch(workspaceId, {
-            layout: stored.layout,
-            projectId: stored.projectId,
-            threadId: stored.threadId,
-            syncedRevision: stored.layout.revision,
-            status: "ready",
+            status: "error",
+            errorMessage:
+              cause instanceof Error ? cause.message : "Failed to load the pane layout.",
           });
-          return;
         }
-        // First time this Workspace has been opened. Seed it with one Agent Pane
-        // and store that, so a reload restores the same grid rather than seeding
-        // a second one.
-        patch(workspaceId, { status: "ready" });
-        await persist(workspaceId);
-      } catch (cause) {
-        patch(workspaceId, {
-          status: "error",
-          errorMessage: cause instanceof Error ? cause.message : "Failed to load the pane layout.",
-        });
-      }
-    },
+      }),
 
     addPane: (workspaceId, mode) =>
       apply(workspaceId, (layout) => addPane(layout, createPane(mintPaneId(), mode), mintRowId())),
@@ -290,32 +312,38 @@ export const useWorkspaceLayoutStore = create<WorkspaceLayoutStoreState>((set, g
     setCellWidths: (workspaceId, rowId, weights) =>
       apply(workspaceId, (layout) => setCellWidthWeights(layout, rowId, weights)),
 
-    requestPaneForMode: async (workspaceId, mode) => {
-      const entry = readEntry(workspaceId);
-      if (!entry) return "attention";
+    requestPaneForMode: (workspaceId, mode) => {
+      let outcome: AutomationPlacement["kind"] = "attention";
+      return enqueue(workspaceId, async () => {
+        const entry = readEntry(workspaceId);
+        if (!entry) return;
 
-      const placement = planAutomationPlacement(entry.layout, mode);
-      switch (placement.kind) {
-        case "focus-existing":
-          await apply(workspaceId, (layout) => focusPane(layout, placement.paneId));
-          return placement.kind;
-        case "reuse":
-          // Repurposing an existing Pane, never a pinned one: the kernel has
-          // already excluded pinned Panes before returning this placement.
-          await apply(workspaceId, (layout) => setPaneMode(layout, placement.paneId, mode));
-          await apply(workspaceId, (layout) => focusPane(layout, placement.paneId));
-          return placement.kind;
-        case "add":
-          await apply(workspaceId, (layout) =>
-            addPane(layout, createPane(mintPaneId(), mode), mintRowId()),
-          );
-          return placement.kind;
-        case "attention":
-          // The grid is full and every Pane is pinned. Recorded as a refusal so
-          // the surface can say so rather than appearing to ignore the request.
-          patch(workspaceId, { lastRejection: placement.rejection });
-          return placement.kind;
-      }
+        const placement = planAutomationPlacement(entry.layout, mode);
+        outcome = placement.kind;
+        switch (placement.kind) {
+          case "focus-existing":
+            await applyOperation(workspaceId, (layout) => focusPane(layout, placement.paneId));
+            return;
+          case "reuse":
+            // Repurposing an existing Pane, never a pinned one: the kernel has
+            // already excluded pinned Panes before returning this placement.
+            await applyOperation(workspaceId, (layout) =>
+              setPaneMode(layout, placement.paneId, mode),
+            );
+            await applyOperation(workspaceId, (layout) => focusPane(layout, placement.paneId));
+            return;
+          case "add":
+            await applyOperation(workspaceId, (layout) =>
+              addPane(layout, createPane(mintPaneId(), mode), mintRowId()),
+            );
+            return;
+          case "attention":
+            // The grid is full and every Pane is pinned. Recorded as a refusal so
+            // the surface can say so rather than appearing to ignore the request.
+            patch(workspaceId, { lastRejection: placement.rejection });
+            return;
+        }
+      }).then(() => outcome);
     },
 
     clearRejection: (workspaceId) => patch(workspaceId, { lastRejection: null }),
@@ -326,6 +354,23 @@ export const selectWorkspaceLayout =
   (workspaceId: WorkspaceId | null) =>
   (state: WorkspaceLayoutStoreState): WorkspaceLayoutEntry | null =>
     workspaceId ? (state.entries[workspaceId] ?? null) : null;
+
+/** The focused coding pane gets first admission when visible chats exceed the stream budget. */
+export function resolveWorkspaceThreadIds(
+  layout: WorkspaceLayout | null,
+  fallbackThreadId: ThreadId | null,
+): ThreadId[] {
+  const panes = layout?.panes ?? [];
+  const focused = panes.find((pane) => pane.paneId === layout?.focusedPaneId);
+  return [
+    ...new Set(
+      (focused ? [focused, ...panes] : panes)
+        .filter((pane) => pane.mode === "agent")
+        .map((pane) => readPaneAttachment(pane, "agent")?.threadId ?? fallbackThreadId)
+        .filter((id): id is ThreadId => id !== null),
+    ),
+  ];
+}
 
 /** Operator-facing explanation for each refusal, so a no-op is never unexplained. */
 export function describePaneLayoutRejection(rejection: PaneLayoutRejection): string {

@@ -1389,6 +1389,8 @@ const worker = setupWorker(
         method === WS_METHODS.subscribeServerProviderStatuses ||
         method === WS_METHODS.subscribeServerSettings ||
         method === WS_METHODS.subscribeTerminalEvents ||
+        method === WS_METHODS.subscribeBotEvents ||
+        method === WS_METHODS.subscribeHermesBotEvents ||
         method === WS_METHODS.subscribeOrchestrationDomainEvents ||
         method === WS_METHODS.subscribeProjectDevServerEvents ||
         method === WS_METHODS.subscribeAutomationEvents

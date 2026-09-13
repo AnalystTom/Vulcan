@@ -205,6 +205,8 @@ function emptyAttachment(mode: PaneMode): WorkspacePane["attachments"][number] {
       return { mode, threadId: null };
     case "herdrTerminal":
       return { mode, sessionName: null, fallbackTerminalId: null };
+    case "hermesBot":
+      return { mode, profile: null };
     default:
       return { mode };
   }
@@ -542,8 +544,8 @@ export function setCellWidthWeights(
  * Switches a Pane's mode, keeping the attachment the outgoing mode was using.
  *
  * Retaining the attachment is what makes a mode switch non-destructive: the Agent
- * Session or terminal behind the previous mode keeps running and is resumed
- * verbatim when the operator switches back.
+ * Session, terminal, or Hermes Bot Chat behind the previous mode keeps running and
+ * is resumed verbatim when the operator switches back.
  */
 export function setPaneMode(
   layout: WorkspaceLayout,
@@ -607,6 +609,7 @@ export function setPanePinned(
 
 export function focusPane(layout: WorkspaceLayout, paneId: PaneId): PaneLayoutResult {
   if (!findPane(layout, paneId)) return reject("pane-not-found");
+  if (layout.focusedPaneId === paneId) return { ok: true, layout };
   return accept({ ...layout, focusedPaneId: paneId });
 }
 

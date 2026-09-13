@@ -294,6 +294,13 @@ describe("workspace layout resizing", () => {
 });
 
 describe("workspace pane state", () => {
+  it("does not advance the revision when focusing the focused pane", () => {
+    const layout = singlePaneLayout();
+    const result = focusPane(layout, paneId("pane-1"));
+
+    expect(result).toEqual({ ok: true, layout });
+  });
+
   it("keeps the previous mode's attachment so switching back resumes it", () => {
     let layout = singlePaneLayout();
     layout = expectAccepted(
@@ -316,6 +323,22 @@ describe("workspace pane state", () => {
     expect(pane?.mode).toBe("agent");
     expect(readPaneAttachment(pane!, "agent")?.threadId).toBe("thread-7");
     expect(readPaneAttachment(pane!, "herdrTerminal")?.sessionName).toBe("herdr-session-1");
+  });
+
+  it("keeps a native Hermes profile attached across mode switches", () => {
+    let layout = singlePaneLayout();
+    layout = expectAccepted(setPaneMode(layout, paneId("pane-1"), "hermesBot"));
+    layout = expectAccepted(
+      setPaneAttachment(layout, paneId("pane-1"), {
+        mode: "hermesBot",
+        profile: "research",
+      }),
+    );
+    layout = expectAccepted(setPaneMode(layout, paneId("pane-1"), "agent"));
+    layout = expectAccepted(setPaneMode(layout, paneId("pane-1"), "hermesBot"));
+
+    const pane = findPane(layout, paneId("pane-1"));
+    expect(readPaneAttachment(pane!, "hermesBot")?.profile).toBe("research");
   });
 
   it("records an accepted fallback terminal separately from a Herdr session", () => {
@@ -454,8 +477,9 @@ describe("workspace layout normalization", () => {
     expectLayoutInvariants(layout);
   });
 
-  it("increments the revision on every accepted change so stale writes can be rejected", () => {
-    const layout = singlePaneLayout();
+  it("increments the revision when focus changes so stale writes can be rejected", () => {
+    let layout = singlePaneLayout();
+    layout = expectAccepted(addPane(layout, createPane(paneId("pane-2"), "agent"), rowId("row-2")));
     const next = expectAccepted(focusPane(layout, paneId("pane-1")));
     expect(next.revision).toBe(layout.revision + 1);
   });

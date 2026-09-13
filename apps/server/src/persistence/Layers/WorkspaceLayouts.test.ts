@@ -76,6 +76,31 @@ layer("WorkspaceLayouts", (it) => {
     }),
   );
 
+  it.effect("round-trips a native Hermes profile attachment", () =>
+    Effect.gen(function* () {
+      const layouts = yield* WorkspaceLayouts;
+      const pane = PaneId.makeUnsafe("hermes-profile-pane");
+      let layout = seed("hermes-profile");
+      layout = accepted(setPaneMode(layout, pane, "hermesBot"));
+      layout = accepted(
+        setPaneAttachment(layout, pane, {
+          mode: "hermesBot",
+          profile: "research",
+        }),
+      );
+
+      yield* layouts.upsert({
+        layout,
+        projectId: projectA,
+        threadId: null,
+        expectedRevision: null,
+      });
+
+      const stored = yield* layouts.read(layout.workspaceId);
+      assert.deepStrictEqual(stored?.layout.panes, layout.panes);
+    }),
+  );
+
   it.effect("stores a full nine-pane grid", () =>
     Effect.gen(function* () {
       const layouts = yield* WorkspaceLayouts;

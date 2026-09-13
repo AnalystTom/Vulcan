@@ -5,6 +5,7 @@
 
 import { SearchAddon } from "@xterm/addon-search";
 import { Terminal } from "@xterm/xterm";
+import "@xterm/xterm/css/xterm.css";
 
 import {
   attachRuntimeToContainer,

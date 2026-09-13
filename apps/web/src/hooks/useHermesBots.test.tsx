@@ -269,6 +269,53 @@ describe("Hermes native response boundaries", () => {
     );
   });
 
+  it("replays a failed native turn instead of presenting its idle session as successful", async () => {
+    // Captured shape from the pinned gateway after an Anthropic HTTP 403.
+    mocks.request.mockImplementation(async ({ method }: { method: string }) =>
+      method === "session.list"
+        ? { sessions: [{ id: "stored-chief", title: "Bot Chat" }] }
+        : {
+            session_id: "runtime-chief",
+            status: "idle",
+            running: false,
+            messages: [{ row_id: 5, role: "user", text: "Coordinate the goal" }],
+            inflight: {
+              status: "error",
+              error:
+                "HTTP 403: OAuth authentication is currently not allowed for this organization.",
+              recoverable: true,
+              error_surface: { layer: "auth", retryable: false },
+            },
+          },
+    );
+
+    for (let refresh = 0; refresh < 2; refresh++) {
+      const chat = await resolveCanonicalChat("chief", "stored-chief");
+      expect(chat.status).toBe("error");
+      expect(chat.failure).toEqual({
+        message: "HTTP 403: OAuth authentication is currently not allowed for this organization.",
+        retryable: false,
+      });
+      expect(chat.messages).toHaveLength(1);
+      expect(chat.running).toBe(false);
+    }
+    expect(mocks.request.mock.calls.map(([request]) => request.method)).toEqual([
+      "session.list",
+      "session.resume",
+      "session.list",
+      "session.resume",
+    ]);
+
+    mocks.request.mockImplementation(async ({ method }: { method: string }) =>
+      method === "session.list"
+        ? { sessions: [{ id: "stored-chief", title: "Bot Chat" }] }
+        : { session_id: "runtime-chief", status: "idle", running: false, inflight: null },
+    );
+    const recovered = await resolveCanonicalChat("chief", "stored-chief");
+    expect(recovered.failure).toBeNull();
+    expect(recovered.status).toBe("idle");
+  });
+
   it("does not resume an unrelated session when the exact Bot Chat title is absent", async () => {
     mocks.request.mockResolvedValue({ sessions: [{ id: "other", title: "Other Chat" }] });
 

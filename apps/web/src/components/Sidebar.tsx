@@ -2948,6 +2948,7 @@ export default function Sidebar() {
             ? [{ id: "clear-notification", label: "Clear notification" }]
             : []),
           { id: "mark-unread", label: "Mark unread" },
+          { id: "open-workspace", label: "Open workspace" },
           ...handoffItems,
           { id: "copy-path", label: "Copy Path", separatorBefore: true },
           ...(threadWorkspacePath
@@ -2973,6 +2974,14 @@ export default function Sidebar() {
 
       if (clicked === "rename") {
         openRenameThreadDialog(threadId);
+        return;
+      }
+      if (clicked === "open-workspace") {
+        await navigate({
+          to: "/workspace/$workspaceId",
+          params: { workspaceId: `thread-${threadId}` },
+          search: { projectId: thread.projectId, threadId },
+        });
         return;
       }
       if (clicked === "toggle-pin") {

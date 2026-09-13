@@ -17,6 +17,7 @@ import {
   IconRoute,
   IconSitemap,
   IconTerminal2,
+  IconRobot,
   type Icon,
   IconEye,
 } from "@tabler/icons-react";
@@ -44,6 +45,12 @@ const DESCRIPTORS: readonly Omit<PaneModeDescriptor, "implemented">[] = [
     label: "Herdr Terminal",
     description: "A durable Herdr terminal that survives restarts and reconnects.",
     Icon: IconTerminal2,
+  },
+  {
+    mode: "hermesBot",
+    label: "Hermes Bot",
+    description: "A native Hermes Bot Chat backed by the gateway profile roster.",
+    Icon: IconRobot,
   },
   {
     mode: "browser",
