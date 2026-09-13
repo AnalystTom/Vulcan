@@ -1,0 +1,509 @@
+--- a/agent/turn_context.py
++++ b/agent/turn_context.py
+@@ -445 +445,2 @@
+-    flapping ``check_fn`` can't fork the cache."""
++    flapping ``check_fn`` can't fork the cache. Explicit grant changes rebuild the
++    snapshot so revoked tools and changed schemas take effect."""
+@@ -447,4 +448,4 @@
+-        # Import-cost gate: MCP tools are only registered by code that already imported
+-        # ``tools.mcp_tool`` (~0.4s); not in sys.modules => nothing to do.
+-        if not getattr(agent, "_skip_mcp_refresh", False) and "tools.mcp_tool" in sys.modules:
+-            from tools.mcp_tool_discovery import has_registered_mcp_tools
++        pending = bool(getattr(agent, "_mcp_refresh_pending", False))
++        pending_generation = getattr(agent, "_mcp_refresh_generation", None)
++        if not getattr(agent, "_skip_mcp_refresh", False) and (pending or "tools.mcp_tool" in sys.modules):
++            from tools.mcp_tool_discovery import discover_mcp_tools, get_mcp_status, has_registered_mcp_tools
+@@ -452 +453,26 @@
+-            if has_registered_mcp_tools():
++            if pending:
++                discover_mcp_tools()
++                enabled_toolsets = getattr(agent, "_mcp_refresh_enabled_toolsets", None)
++                if enabled_toolsets is None:
++                    agent.enabled_toolsets = None
++                    refresh_agent_mcp_tools(agent, quiet_mode=True, content_aware=True, preserve_prefix=False)
++                else:
++                    refresh_agent_mcp_tools(
++                        agent, enabled_override=enabled_toolsets,
++                        quiet_mode=True, content_aware=True, preserve_prefix=False)
++                required_servers = set(getattr(agent, "_mcp_refresh_required_servers", ()) or ())
++                if required_servers:
++                    statuses = get_mcp_status(include_runtime=True)
++                    ready_servers = {entry.get("name") for entry in statuses if entry.get("connected")}
++                    refresh_ready = required_servers <= ready_servers
++                else:
++                    # Older in-memory agents have no required-server field; their refresh is
++                    # best-effort and should not retain a stale pending marker forever.
++                    refresh_ready = True
++                if refresh_ready and (
++                        getattr(agent, "_mcp_refresh_generation", None) == pending_generation):
++                    agent._mcp_refresh_pending = False
++                    agent._mcp_refresh_generation = None
++                    agent._mcp_refresh_enabled_toolsets = None
++                    agent._mcp_refresh_required_servers = None
++            elif has_registered_mcp_tools():
+--- a/tui_gateway/methods_profiles.py
++++ b/tui_gateway/methods_profiles.py
+@@ -7,0 +8 @@
++import threading
+@@ -12,0 +14,3 @@
++
++_mcp_grant_refresh_lock = threading.Lock()
++_mcp_grant_refresh_generations = {}
+@@ -568,0 +573,111 @@
++def _claim_profile_mcp_refresh_generation(profile_home) -> int:
++    profile_home = str(Path(profile_home).resolve())
++    with _mcp_grant_refresh_lock:
++        generation = int(_mcp_grant_refresh_generations.get(profile_home, 0)) + 1
++        _mcp_grant_refresh_generations[profile_home] = generation
++        return generation
++
++
++def _profile_mcp_refresh_is_current(profile_home, generation: int) -> bool:
++    return _mcp_grant_refresh_generations.get(str(Path(profile_home).resolve())) == generation
++
++
++def _refresh_profile_mcp_grant(profile_dir, generation: int | None = None) -> None:
++    """Discover one profile's newly granted MCP servers and refresh its idle sessions.
++
++    A live turn owns its tool snapshot until the next turn boundary. Marking that agent
++    pending lets the boundary hook retry discovery without changing tools mid-request.
++    """
++    profile_home = str(Path(profile_dir).resolve())
++    if generation is None:
++        generation = _claim_profile_mcp_refresh_generation(profile_home)
++    scopes = _bind_build_profile_scopes(profile_home)
++    try:
++        from hermes_cli.config import load_config
++        from hermes_cli.tools_config import enabled_mcp_server_names
++        from tools.mcp_tool_agent import reprobe_tool_availability, refresh_agent_mcp_tools
++        from tools.mcp_tool_discovery import discover_mcp_tools, get_mcp_status
++
++        with _mcp_grant_refresh_lock:
++            if not _profile_mcp_refresh_is_current(profile_home, generation):
++                return
++            enabled_toolsets = _load_enabled_toolsets()
++            config = load_config() or {}
++            configured_mcp = enabled_mcp_server_names(config)
++            required_mcp = (configured_mcp if enabled_toolsets is None
++                            else configured_mcp.intersection(enabled_toolsets))
++            mcp_servers = config.get("mcp_servers") if isinstance(config.get("mcp_servers"), dict) else {}
++            required_configs = {name: mcp_servers[name] for name in required_mcp
++                                if isinstance(mcp_servers.get(name), dict)}
++            with _sessions_lock:
++                sessions = list(_sessions.items())
++            matching = []
++            for sid, session in sessions:
++                session_home = str(Path(session.get("profile_home") or _hermes_home).resolve())
++                if session_home != profile_home:
++                    continue
++                agent = session.get("agent")
++                if agent is None:
++                    continue
++                matching.append((sid, session, agent))
++                with session["history_lock"]:
++                    if _sessions.get(sid) is session:
++                        agent._mcp_refresh_pending = True
++                        agent._mcp_refresh_generation = generation
++                        agent._mcp_refresh_enabled_toolsets = enabled_toolsets
++                        agent._mcp_refresh_required_servers = set(required_mcp)
++
++        reprobe_tool_availability()
++        discover_mcp_tools()
++        statuses = get_mcp_status(required_configs, include_runtime=True) if required_mcp else []
++        ready_servers = {entry.get("name") for entry in statuses if entry.get("connected")}
++        refresh_ready = not required_mcp or required_mcp <= ready_servers
++
++        updates = []
++        for sid, session, agent in matching:
++            with _mcp_grant_refresh_lock:
++                if not _profile_mcp_refresh_is_current(profile_home, generation):
++                    return
++                with session["history_lock"]:
++                    if _sessions.get(sid) is not session:
++                        continue
++                    if session.get("running"):
++                        continue
++                    before = json.dumps(getattr(agent, "tools", []) or [], sort_keys=True, default=str)
++                    if enabled_toolsets is None:
++                        agent.enabled_toolsets = None
++                        refresh_agent_mcp_tools(agent, quiet_mode=True, content_aware=True, preserve_prefix=False)
++                    else:
++                        refresh_agent_mcp_tools(
++                            agent, enabled_override=enabled_toolsets,
++                            quiet_mode=True, content_aware=True, preserve_prefix=False)
++                    after = json.dumps(getattr(agent, "tools", []) or [], sort_keys=True, default=str)
++                    if before != after:
++                        updates.append((sid, _session_info(agent, session)))
++                    if refresh_ready:
++                        agent._mcp_refresh_pending = False
++                        agent._mcp_refresh_generation = None
++                        agent._mcp_refresh_enabled_toolsets = None
++                        agent._mcp_refresh_required_servers = None
++        for sid, info in updates:
++            with _mcp_grant_refresh_lock:
++                if not _profile_mcp_refresh_is_current(profile_home, generation):
++                    return
++                _emit("session.info", sid, info)
++    except Exception as exc:
++        logger.warning("Profile MCP grant refresh failed for %s: %s", profile_home, exc)
++    finally:
++        _release_build_profile_scopes(scopes)
++
++
++def _schedule_profile_mcp_grant_refresh(profile_dir) -> None:
++    profile_home = str(Path(profile_dir).resolve())
++    generation = _claim_profile_mcp_refresh_generation(profile_home)
++    threading.Thread(
++        target=_refresh_profile_mcp_grant,
++        args=(profile_home, generation),
++        name="tui-profile-mcp-grant-refresh",
++        daemon=True,
++    ).start()
++
++
+@@ -588,0 +704,2 @@
++    if applied.get("mcp_servers") or applied.get("toolsets"):
++        _schedule_profile_mcp_grant_refresh(profile_dir)
+--- a/tui_gateway/methods_tools.py
++++ b/tui_gateway/methods_tools.py
+@@ -104,0 +105,4 @@
++
++
++def _schedule_current_profile_mcp_refresh() -> None:
++    _schedule_profile_mcp_grant_refresh(_tools_mod("hermes_constants").get_hermes_home())
+@@ -1208,0 +1213 @@
++    _schedule_current_profile_mcp_refresh()
+@@ -1240,0 +1246 @@
++    _schedule_current_profile_mcp_refresh()
+@@ -1279,0 +1286 @@
++    _schedule_current_profile_mcp_refresh()
+@@ -1312 +1319,4 @@
+-    return _ok(rid, {"ok": True, **poll(_str_arg(params, "session_id"), _str_arg(params, "name"))})
++    result = poll(_str_arg(params, "session_id"), _str_arg(params, "name"))
++    if result.get("status") == "approved":
++        _schedule_current_profile_mcp_refresh()
++    return _ok(rid, {"ok": True, **result})
+--- a/tests/tui_gateway/test_profiles_mcp_grants.py
++++ b/tests/tui_gateway/test_profiles_mcp_grants.py
+@@ -6,0 +7 @@
++import threading
+@@ -112,0 +114,2 @@
++    scheduled = []
++    monkeypatch.setattr(server, "_schedule_profile_mcp_grant_refresh", scheduled.append)
+@@ -120,0 +124,244 @@
++    assert scheduled == [tmp_path]
++
++    scheduled.clear()
++    result = server._methods["profiles.configure"](
++        "configure", {"name": "default", "enabled_toolsets": ["safe"]}
++    )
++    assert result["result"]["applied"]["toolsets"] is True
++    assert scheduled == [tmp_path]
++
++
++def test_profile_mcp_grant_discovers_scoped_and_defers_running_agents(tmp_path, monkeypatch):
++    from tui_gateway import server
++
++    sibling = tmp_path / "sibling"
++    sibling.mkdir()
++    idle_agent = SimpleNamespace(tools=[{"name": "old"}], _mcp_refresh_pending=False)
++    running_agent = SimpleNamespace(tools=[{"name": "old"}], _mcp_refresh_pending=False)
++    sibling_agent = SimpleNamespace(tools=[{"name": "old"}], _mcp_refresh_pending=False)
++    default_agent = SimpleNamespace(tools=[{"name": "old"}], _mcp_refresh_pending=False)
++    sessions = {
++        "idle": {"profile_home": str(tmp_path), "agent": idle_agent, "running": False,
++                 "history_lock": threading.Lock()},
++        "running": {"profile_home": str(tmp_path), "agent": running_agent, "running": True,
++                    "history_lock": threading.Lock()},
++        "sibling": {"profile_home": str(sibling), "agent": sibling_agent, "running": False,
++                    "history_lock": threading.Lock()},
++        "default": {"profile_home": None, "agent": default_agent, "running": False,
++                    "history_lock": threading.Lock()},
++    }
++    discovered = []
++    refreshed = []
++    refresh_kwargs = []
++    emitted = []
++    monkeypatch.setattr(server, "_sessions", sessions)
++    monkeypatch.setattr(server, "_hermes_home", tmp_path)
++    monkeypatch.setattr(server, "_bind_build_profile_scopes", lambda _home: object())
++    monkeypatch.setattr(server, "_release_build_profile_scopes", lambda _scopes: None)
++    monkeypatch.setattr(server, "_load_enabled_toolsets", lambda: ["grant-canary"])
++    monkeypatch.setattr(server, "_session_info", lambda agent, _session: {"agent": agent})
++    monkeypatch.setattr(server, "_emit", lambda event, sid, info: emitted.append((event, sid, info)))
++    monkeypatch.setattr("tools.mcp_tool_agent.reprobe_tool_availability", lambda: None)
++    monkeypatch.setattr("tools.mcp_tool_discovery.discover_mcp_tools",
++                        lambda: discovered.append("profile") or ["mcp__grant-canary__identity"])
++    def fake_refresh(agent, **kwargs):
++        refreshed.append(agent)
++        refresh_kwargs.append(kwargs)
++        agent.tools = [{"name": "new"}]
++        return {"new"}
++
++    monkeypatch.setattr("tools.mcp_tool_agent.refresh_agent_mcp_tools", fake_refresh)
++
++    server._refresh_profile_mcp_grant(tmp_path)
++
++    assert discovered == ["profile"]
++    assert refreshed == [idle_agent, default_agent]
++    assert [kwargs["enabled_override"] for kwargs in refresh_kwargs] == [["grant-canary"], ["grant-canary"]]
++    assert idle_agent._mcp_refresh_pending is False
++    assert default_agent._mcp_refresh_pending is False
++    assert running_agent._mcp_refresh_pending is True
++    assert running_agent._mcp_refresh_generation == 1
++    assert running_agent._mcp_refresh_enabled_toolsets == ["grant-canary"]
++    assert sibling_agent._mcp_refresh_pending is False
++    assert emitted == [
++        ("session.info", "idle", {"agent": idle_agent}),
++        ("session.info", "default", {"agent": default_agent}),
++    ]
++
++
++def test_profile_mcp_discovery_failure_leaves_running_agent_pending(tmp_path, monkeypatch):
++    from tui_gateway import server
++    import hermes_cli.config as config
++    import hermes_cli.tools_config as tools_config
++
++    agent = SimpleNamespace(tools=[], _mcp_refresh_pending=False)
++    session = {"profile_home": str(tmp_path), "agent": agent, "running": True,
++               "history_lock": threading.Lock()}
++    monkeypatch.setattr(server, "_sessions", {"running": session})
++    monkeypatch.setattr(server, "_hermes_home", tmp_path)
++    monkeypatch.setattr(server, "_bind_build_profile_scopes", lambda _home: object())
++    monkeypatch.setattr(server, "_release_build_profile_scopes", lambda _scopes: None)
++    monkeypatch.setattr(server, "_load_enabled_toolsets", lambda: ["grant-canary"])
++    monkeypatch.setattr(config, "load_config",
++                        lambda: {"mcp_servers": {"grant-canary": {"enabled": True}}})
++    monkeypatch.setattr(tools_config, "enabled_mcp_server_names",
++                        lambda _config: {"grant-canary"})
++    monkeypatch.setattr("tools.mcp_tool_agent.reprobe_tool_availability", lambda: None)
++
++    def fail_discovery():
++        raise RuntimeError("temporary MCP outage")
++
++    monkeypatch.setattr("tools.mcp_tool_discovery.discover_mcp_tools", fail_discovery)
++
++    server._refresh_profile_mcp_grant(tmp_path)
++
++    assert agent._mcp_refresh_pending is True
++    assert agent._mcp_refresh_enabled_toolsets == ["grant-canary"]
++
++
++def test_out_of_order_profile_refresh_cannot_publish_stale_tool_selection(tmp_path, monkeypatch):
++    from tui_gateway import server
++    import hermes_cli.config as config
++    import hermes_cli.tools_config as tools_config
++    import model_tools
++
++    agent = SimpleNamespace(
++        tools=[{"type": "function", "function": {"name": "old_tool"}}],
++        valid_tool_names={"old_tool"}, enabled_toolsets=["old_tool"],
++        disabled_toolsets=None, _tool_snapshot_generation=0)
++    session = {"profile_home": str(tmp_path), "agent": agent, "running": False,
++               "history_lock": threading.Lock()}
++    selected = ["old_tool"]
++    description = ["original schema"]
++    entered = threading.Event()
++    release = threading.Event()
++    monkeypatch.setattr(server, "_sessions", {"session": session})
++    monkeypatch.setattr(server, "_hermes_home", tmp_path)
++    monkeypatch.setattr(server, "_bind_build_profile_scopes", lambda _home: object())
++    monkeypatch.setattr(server, "_release_build_profile_scopes", lambda _scopes: None)
++    monkeypatch.setattr(server, "_load_enabled_toolsets", lambda: list(selected))
++    monkeypatch.setattr(config, "load_config",
++                        lambda: {"mcp_servers": {"new_tool": {"enabled": True}}})
++    monkeypatch.setattr(tools_config, "enabled_mcp_server_names",
++                        lambda _config: {"new_tool"})
++    monkeypatch.setattr("tools.mcp_tool_agent.reprobe_tool_availability", lambda: None)
++    def discover():
++        if threading.current_thread().name == "older-refresh":
++            entered.set()
++            assert release.wait(10), "newer refresh did not complete"
++        return ["mcp__new_tool__identity"]
++
++    monkeypatch.setattr("tools.mcp_tool_discovery.discover_mcp_tools", discover)
++    monkeypatch.setattr("tools.mcp_tool_discovery.get_mcp_status", lambda *_args, **_kwargs: [
++        {"name": "new_tool", "connected": True},
++    ])
++    monkeypatch.setattr("tools.registry.registry.get_all_entries",
++                        lambda: [SimpleNamespace(name="old_tool")])
++    monkeypatch.setattr(server, "_session_info", lambda *_args: {})
++    monkeypatch.setattr(server, "_emit", lambda *_args: None)
++
++    def tool_defs(*, enabled_toolsets, **_kwargs):
++        name = "mcp__new_tool__identity" if "new_tool" in (enabled_toolsets or ()) else "old_tool"
++        return [{"type": "function", "function": {
++            "name": name, "description": description[0],
++            "parameters": {"type": "object", "properties": {}},
++        }}]
++
++    monkeypatch.setattr(model_tools, "get_tool_definitions", tool_defs)
++    monkeypatch.setattr("tools.mcp_tool_agent._reinject_post_build_tools",
++                        lambda *_args: set())
++    monkeypatch.setattr("tools.mcp_tool_agent._reinject_authorized_dynamic_tools",
++                        lambda *_args: None)
++
++    old_generation = server._claim_profile_mcp_refresh_generation(tmp_path)
++    older = threading.Thread(target=server._refresh_profile_mcp_grant,
++                             args=(tmp_path, old_generation), name="older-refresh")
++    older.start()
++    try:
++        assert entered.wait(10), "older refresh did not enter discovery"
++        selected[:] = ["new_tool"]
++        new_generation = server._claim_profile_mcp_refresh_generation(tmp_path)
++        server._refresh_profile_mcp_grant(tmp_path, new_generation)
++        assert agent.enabled_toolsets == ["new_tool"]
++        assert agent._mcp_refresh_pending is False
++    finally:
++        release.set()
++        older.join(10)
++    assert not older.is_alive()
++    assert agent._mcp_refresh_pending is False
++
++    assert agent.enabled_toolsets == ["new_tool"]
++    assert {entry["function"]["name"] for entry in agent.tools} == {
++        "mcp__new_tool__identity"}
++
++    # A schema change under the same name must publish too.
++    description[:] = ["updated schema"]
++    server._refresh_profile_mcp_grant(tmp_path)
++    assert agent.tools[0]["function"]["description"] == "updated schema"
++
++
++def test_next_turn_keeps_newer_pending_refresh_state(monkeypatch):
++    from agent.turn_context import _refresh_mcp_tools_between_turns
++
++    agent = SimpleNamespace(
++        _mcp_refresh_pending=True, _mcp_refresh_generation=1,
++        _mcp_refresh_enabled_toolsets=["old_tool"],
++        enabled_toolsets=["old_tool"], disabled_toolsets=None, tools=[],
++        valid_tool_names=set(), _tool_snapshot_generation=0, _skip_mcp_refresh=False)
++    calls = []
++
++    def discover():
++        agent._mcp_refresh_generation = 2
++        agent._mcp_refresh_enabled_toolsets = ["new_tool"]
++        return ["mcp__new_tool__identity"]
++
++    monkeypatch.setattr("tools.mcp_tool_discovery.discover_mcp_tools", discover)
++    monkeypatch.setattr("tools.mcp_tool_agent.refresh_agent_mcp_tools",
++                        lambda current, **kwargs: calls.append((current, kwargs)))
++
++    _refresh_mcp_tools_between_turns(agent)
++
++    assert calls[0][1]["enabled_override"] == ["new_tool"]
++    assert agent._mcp_refresh_pending is True
++    assert agent._mcp_refresh_generation == 2
++    assert agent._mcp_refresh_enabled_toolsets == ["new_tool"]
++
++
++def test_running_profile_grant_refreshes_at_next_turn_boundary(monkeypatch):
++    import sys
++    from agent.turn_context import _refresh_mcp_tools_between_turns
++    import model_tools
++
++    def tool_defs(*, enabled_toolsets, **_kwargs):
++        assert enabled_toolsets == ["grant-canary"]
++        return [{"type": "function", "function": {
++            "name": "mcp__grant-canary__identity",
++            "description": "new grant",
++            "parameters": {"type": "object", "properties": {}},
++        }}]
++
++    agent = SimpleNamespace(
++        tools=[{"type": "function", "function": {"name": "old_tool"}}],
++        valid_tool_names={"old_tool"}, enabled_toolsets=["old_tool"],
++        disabled_toolsets=None, _tool_snapshot_generation=0,
++        _mcp_refresh_pending=True, _mcp_refresh_enabled_toolsets=["grant-canary"],
++        _skip_mcp_refresh=False)
++    monkeypatch.setattr("tools.mcp_tool_discovery.discover_mcp_tools",
++                        lambda: ["mcp__grant-canary__identity"])
++    monkeypatch.setattr(model_tools, "get_tool_definitions", tool_defs)
++    monkeypatch.setattr("tools.mcp_tool_agent._reinject_post_build_tools",
++                        lambda *_args: set())
++    monkeypatch.setattr("tools.mcp_tool_agent._reinject_authorized_dynamic_tools",
++                        lambda *_args: None)
++
++    mcp_module = sys.modules.pop("tools.mcp_tool", None)
++    try:
++        _refresh_mcp_tools_between_turns(agent)
++    finally:
++        if mcp_module is not None:
++            sys.modules["tools.mcp_tool"] = mcp_module
++
++    assert agent.enabled_toolsets == ["grant-canary"]
++    assert {entry["function"]["name"] for entry in agent.tools} == {
++        "mcp__grant-canary__identity"}
++    assert agent._mcp_refresh_pending is False
+@@ -252,9 +499,50 @@
+-def test_retained_handle_without_route_identity_is_denied(monkeypatch):
+-    from tools import mcp_tool_discovery as discovery
+-
+-    configured = {"url": "http://current.example.test/mcp"}
+-    monkeypatch.setattr(discovery._config, "_load_mcp_config", lambda: {"safe": configured})
+-    for retained in (SimpleNamespace(), SimpleNamespace(_config=None),
+-                     SimpleNamespace(_config={}), SimpleNamespace(_config="invalid")):
+-        assert discovery._server_matches_current_profile("safe", retained) is False
+-    assert discovery._server_matches_current_profile("safe", SimpleNamespace(_config=configured)) is True
++def test_profile_mcp_refresh_keeps_idle_and_running_pending_until_all_servers_ready(tmp_path, monkeypatch):
++    from tui_gateway import server
++    import hermes_cli.config as config
++    import hermes_cli.tools_config as tools_config
++    from agent.turn_context import _refresh_mcp_tools_between_turns
++
++    idle_agent = SimpleNamespace(tools=[], _mcp_refresh_pending=False)
++    running_agent = SimpleNamespace(tools=[], _mcp_refresh_pending=False)
++    sessions = {
++        "idle": {"profile_home": str(tmp_path), "agent": idle_agent, "running": False,
++                 "history_lock": threading.Lock()},
++        "running": {"profile_home": str(tmp_path), "agent": running_agent, "running": True,
++                    "history_lock": threading.Lock()},
++    }
++    cfg = {"mcp_servers": {
++        "server_a": {"enabled": True, "command": "a"},
++        "server_b": {"enabled": True, "command": "b"},
++    }}
++    monkeypatch.setattr(server, "_sessions", sessions)
++    monkeypatch.setattr(server, "_hermes_home", tmp_path)
++    monkeypatch.setattr(server, "_bind_build_profile_scopes", lambda _home: object())
++    monkeypatch.setattr(server, "_release_build_profile_scopes", lambda _scopes: None)
++    monkeypatch.setattr(server, "_load_enabled_toolsets", lambda: ["server_a", "server_b"])
++    monkeypatch.setattr(config, "load_config", lambda: cfg)
++    monkeypatch.setattr(tools_config, "enabled_mcp_server_names", lambda _cfg: {"server_a", "server_b"})
++    monkeypatch.setattr("tools.mcp_tool_agent.reprobe_tool_availability", lambda: None)
++    monkeypatch.setattr("tools.mcp_tool_discovery.discover_mcp_tools", lambda: ["mcp__server_a__identity"])
++    monkeypatch.setattr("tools.mcp_tool_discovery.get_mcp_status", lambda *_args, **_kwargs: [
++        {"name": "server_a", "connected": True}, {"name": "server_b", "connected": False},
++    ])
++    monkeypatch.setattr("tools.mcp_tool_agent.refresh_agent_mcp_tools", lambda agent, **_kwargs: None)
++
++    server._refresh_profile_mcp_grant(tmp_path)
++
++    assert idle_agent._mcp_refresh_pending is True
++    assert running_agent._mcp_refresh_pending is True
++    assert idle_agent._mcp_refresh_required_servers == {"server_a", "server_b"}
++    assert running_agent._mcp_refresh_required_servers == {"server_a", "server_b"}
++
++    boundary_agent = SimpleNamespace(
++        tools=[], enabled_toolsets=["server_a", "server_b"], disabled_toolsets=None,
++        valid_tool_names=set(), _tool_snapshot_generation=0, _skip_mcp_refresh=False,
++        _mcp_refresh_pending=True, _mcp_refresh_generation=1,
++        _mcp_refresh_enabled_toolsets=["server_a", "server_b"],
++        _mcp_refresh_required_servers={"server_a", "server_b"},
++    )
++    monkeypatch.setattr("tools.mcp_tool_agent.refresh_agent_mcp_tools", lambda *_args, **_kwargs: None)
++    _refresh_mcp_tools_between_turns(boundary_agent)
++    assert boundary_agent._mcp_refresh_pending is True
++    assert boundary_agent._mcp_refresh_required_servers == {"server_a", "server_b"}
+@@ -296,0 +585,11 @@
++
++
++def test_retained_handle_without_route_identity_is_denied(monkeypatch):
++    from tools import mcp_tool_discovery as discovery
++
++    configured = {"url": "http://current.example.test/mcp"}
++    monkeypatch.setattr(discovery._config, "_load_mcp_config", lambda: {"safe": configured})
++    for retained in (SimpleNamespace(), SimpleNamespace(_config=None),
++                     SimpleNamespace(_config={}), SimpleNamespace(_config="invalid")):
++        assert discovery._server_matches_current_profile("safe", retained) is False
++    assert discovery._server_matches_current_profile("safe", SimpleNamespace(_config=configured)) is True

@@ -1,0 +1,152 @@
+--- a/hermes_state_messages.py
++++ b/hermes_state_messages.py
+@@ -26,3 +26,3 @@
+-                   codex_message_items, platform_message_id, observed, _compressed_summary, active, api_content, display_kind,
+-                   display_metadata, display_identity)
+-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
++                   codex_message_items, platform_message_id, observed, _compressed_summary, active, compacted,
++                   api_content, display_kind, display_metadata, display_identity)
++                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+@@ -239 +239 @@
+-        message_timestamp: float, *, keep_reasoning: bool) -> tuple:
++        message_timestamp: float, *, keep_reasoning: bool, display_only: bool = False) -> tuple:
+@@ -262 +262,2 @@
+-            1 if msg.get("observed") else 0, 1 if msg.get("_compressed_summary") else 0, 1,
++            1 if msg.get("observed") else 0, 1 if msg.get("_compressed_summary") else 0,
++            0 if display_only else 1, 1 if display_only else 0,
+@@ -343 +344 @@
+-        turn_lease_ttl_seconds: float = 300.0) -> int:
++        turn_lease_ttl_seconds: float = 300.0, display_only: bool = False) -> int:
+@@ -351 +352 @@
+-                    turn_lease_ttl_seconds=turn_lease_ttl_seconds)
++                    turn_lease_ttl_seconds=turn_lease_ttl_seconds, display_only=display_only)
+@@ -359,2 +360,4 @@
+-            inserted, tool_calls_total = self._insert_message_rows(conn, session_id, inserted_rows)
+-            self._bump_session_counters(conn, session_id, inserted, tool_calls_total, unit=False)
++            inserted, tool_calls_total = self._insert_message_rows(
++                conn, session_id, inserted_rows, display_only=display_only)
++            if not display_only:
++                self._bump_session_counters(conn, session_id, inserted, tool_calls_total, unit=False)
+@@ -477,3 +480,3 @@
+-    def _insert_message_rows(self, conn, session_id: str, messages: List[Dict[str, Any]]) -> tuple[int, int]:
+-        """Insert *messages* as fresh active rows in the caller's txn -> ``(inserted, tool_call_count)``.
+-        Never touches sessions.* counters (callers reconcile differently); reasoning kept for assistant rows."""
++    def _insert_message_rows(self, conn, session_id: str, messages: List[Dict[str, Any]],
++                             *, display_only: bool = False) -> tuple[int, int]:
++        """Insert messages in the caller transaction. Display-only rows are archived and do not contribute to active session counters."""
+@@ -487 +490,2 @@
+-                session_id, role, msg, tool_calls, message_timestamp, keep_reasoning=role == "assistant"))
++                session_id, role, msg, tool_calls, message_timestamp, keep_reasoning=role == "assistant",
++                display_only=display_only))
+--- a/tui_gateway/methods_session.py
++++ b/tui_gateway/methods_session.py
+@@ -231 +231 @@
+-                    copy_fields=(), compensate: bool = False) -> None:
++                    copy_fields=(), compensate: bool = False, display_only: bool = False) -> None:
+@@ -249 +249,2 @@
+-                       **{field: msg.get(field) for field in copy_fields}} for msg in history], chunk_rows=500)
++                       **{field: msg.get(field) for field in copy_fields}} for msg in history],
++            chunk_rows=500, display_only=display_only)
+@@ -271 +272,2 @@
+-                            profile_name=profile_name_for_home(profile_home) or _current_profile_name(), compensate=True)
++                            profile_name=profile_name_for_home(profile_home) or _current_profile_name(),
++                            compensate=True, display_only=bool(record.get("display_only_seed")))
+@@ -328,0 +331,4 @@
++    seed_mode = params.get("seed_mode")
++    if seed_mode not in (None, "display_only"):
++        return _err(rid, 4002, "unsupported seed_mode")
++    display_only_seed = seed_mode == "display_only"
+@@ -348,2 +354,5 @@
+-            "history": history, "history_lock": threading.Lock(), "history_version": 0, "image_counter": 0,
+-            "seeded": bool(history),  # gates _persist_branch_seed: only create-time history is unpersisted
++            "history": [] if display_only_seed else history,
++            "display_history_prefix": history if display_only_seed else [],
++            "history_lock": threading.Lock(), "history_version": 0, "image_counter": 0,
++            "seeded": bool(history), "display_only_seed": display_only_seed,
++            # gates _persist_branch_seed: only create-time history is unpersisted
+--- a/tui_gateway/session_workdir.py
++++ b/tui_gateway/session_workdir.py
+@@ -317 +317,2 @@
+-        seed = [dict(msg) for msg in (session.get("history") or [])]
++        seed_key = "display_history_prefix" if session.get("display_only_seed") else "history"
++        seed = [dict(msg) for msg in (session.get(seed_key) or [])]
+@@ -330 +331 @@
+-                chunk_rows=500)
++                chunk_rows=500, display_only=bool(session.get("display_only_seed")))
+--- a/tests/tui_gateway/test_seeded_session_create.py
++++ b/tests/tui_gateway/test_seeded_session_create.py
+@@ -109,0 +110,2 @@
++        # A normal branch copies its active seed, not an archived display prefix.
++        server._sessions[sid]["display_history_prefix"] = [{"role": "user", "content": "archived parent turn"}]
+@@ -117,0 +120,71 @@
++
++
++def test_display_only_seed_stays_visible_but_is_excluded_from_model_resume(monkeypatch, tmp_path):
++    """Migration/import seeds remain in the GUI display projection without becoming model context."""
++    db = SessionDB(db_path=tmp_path / "state.db")
++    _quiet_create(monkeypatch, db)
++    sid = None
++    try:
++        result = _create({
++            "cols": 96, "source": "desktop", "title": "Imported Bot Chat", "seed_mode": "display_only",
++            "messages": [
++                {"role": "user", "content": "Historical task — do not resume"},
++                {"role": "assistant", "content": "Historical result"},
++            ],
++        })
++        sid, key = result["session_id"], result["stored_session_id"]
++        assert [message["text"] for message in result["messages"]] == [
++            "Historical task — do not resume", "Historical result"
++        ]
++        assert server._sessions[sid]["history"] == []
++        assert server._sessions[sid]["display_history_prefix"] == [
++            {"role": "user", "content": "Historical task — do not resume"},
++            {"role": "assistant", "content": "Historical result"},
++        ]
++
++        rows = db.get_messages(key, include_compacted=True)
++        assert [row["content"] for row in rows] == [
++            "Historical task — do not resume", "Historical result"
++        ]
++        assert all(row["active"] == 0 and row["compacted"] == 1 for row in rows)
++        assert db.get_session(key)["message_count"] == 0
++        model_history, display_history = db.get_resume_conversations(key)
++        assert model_history == []
++        assert [row["content"] for row in display_history] == [
++            "Historical task — do not resume", "Historical result"
++        ]
++
++        live = server.handle_request({
++            "id": "live", "method": "session.resume", "params": {"session_id": key, "cols": 96}
++        })["result"]
++        assert [message["text"] for message in live["messages"]] == [
++            "Historical task — do not resume", "Historical result"
++        ]
++        server._sessions.pop(sid)
++        resumed = server.handle_request({
++            "id": "cold", "method": "session.resume", "params": {"session_id": key, "cols": 96}
++        })["result"]
++        assert [message["text"] for message in resumed["messages"]] == [
++            "Historical task — do not resume", "Historical result"
++        ]
++        server._sessions.pop(resumed["session_id"], None)
++    finally:
++        if sid:
++            server._sessions.pop(sid, None)
++        db.close()
++
++
++def test_unknown_seed_mode_is_rejected(monkeypatch, tmp_path):
++    db = SessionDB(db_path=tmp_path / "state.db")
++    _quiet_create(monkeypatch, db)
++    try:
++        response = server.handle_request({
++            "id": "create", "method": "session.create",
++            "params": {"source": "desktop", "seed_mode": "model_only", "messages": [
++                {"role": "user", "content": "hello"},
++            ]},
++        })
++        assert response["error"]["code"] == 4002
++        assert "unsupported seed_mode" in response["error"]["message"]
++    finally:
++        db.close()

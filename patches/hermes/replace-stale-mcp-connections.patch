@@ -1,0 +1,595 @@
+--- a/tools/mcp_tool.py
++++ b/tools/mcp_tool.py
+@@ -627,9 +627,10 @@
+ 
+ 
+ def _mcp_registry_scope() -> Optional[str]:
+-    """Registry scope for MCP registrations: a profile overlay under a multiplexer, else None."""
++    """Scope explicit profile routes, including TUI/serve without a gateway multiplexer."""
+     from agent.secret_scope import is_multiplex_active
+-    if not is_multiplex_active():
++    from hermes_constants import get_hermes_home_override
++    if not is_multiplex_active() and get_hermes_home_override() is None:
+         return None
+     from tools.registry import registry
+     return registry.current_scope_key()
+--- a/tui_gateway/methods_tools.py
++++ b/tui_gateway/methods_tools.py
+@@ -1176,15 +1176,19 @@
+ @_mcp_rpc("status", required=())
+ def _(rid, params: dict) -> dict:
+     """``{servers: [{name, transport, tools, connected, disabled, status}], checked_at}`` from cached
+-    runtime state; never connects, probes, or starts auth. Under a multiplexer the runtime view is the
+-    scoped profile's; otherwise it is shown only when ``profile`` is the launch profile."""
++    runtime state; never connects, probes, or starts auth. The runtime view belongs to the
++    explicitly routed profile in both gateway and serve modes."""
+     import time
+     hc = _tools_mod("hermes_constants")
+     configured = _tools_mod("hermes_cli.mcp_config")._get_mcp_servers()
+-    include_runtime = (_tools_mod("agent.secret_scope").is_multiplex_active()
+-                       or hc.hermes_home_key() == hc.hermes_home_key(hc.get_process_hermes_home()))
+     safe = ("name", "transport", "tools", "connected", "disabled", "status")
+-    servers = _tools_mod("tools.mcp_tool_discovery").get_mcp_status(configured, include_runtime=include_runtime)
++    scopes = _bind_build_profile_scopes(str(hc.get_hermes_home()))
++    try:
++        if scopes.secret is None:
++            raise RuntimeError("Profile credentials could not be resolved")
++        servers = _tools_mod("tools.mcp_tool_discovery").get_mcp_status(configured)
++    finally:
++        _release_build_profile_scopes(scopes)
+     return _ok(rid, {"servers": [{k: e[k] for k in safe if k in e} for e in servers],
+                      "checked_at": int(time.time() * 1000)})
+ 
+--- a/tools/mcp_tool_discovery.py
++++ b/tools/mcp_tool_discovery.py
+@@ -6,6 +6,7 @@
+ from __future__ import annotations
+ 
+ import asyncio
++from contextlib import nullcontext
+ import logging
+ import time
+ from typing import Dict, List, Optional, Tuple
+@@ -392,8 +393,14 @@
+         logger.debug("MCP SDK not available -- skipping explicit MCP registration")
+         return []
+     servers = _config._filter_suspicious_mcp_servers(servers)
+-    try:
+-        return _register_mcp_servers(servers)
++    scope = _core._mcp_registry_scope()
++    lock = (_registration._SCOPE_REFRESH_LOCKS[hash(scope) % len(_registration._SCOPE_REFRESH_LOCKS)]
++            if scope is not None else nullcontext())
++    try:
++        # Reuse the overlay lock through teardown and discovery, so another refresh
++        # cannot publish a same-profile replacement before old deregistration finishes.
++        with lock:
++            return _register_mcp_servers(servers)
+     finally:
+         # An owner's scoped reload orphaned adopters of its shared connections: now that this
+         # pass (its rediscovery) is done, give them their tools back under their own scope.
+@@ -548,7 +555,10 @@
+     """Per-server status dicts for banner/TUI: name, transport, tools, connected, disabled,
+     status (connected / disabled / connecting / failed / configured) and error for failed.
+     Reads cached runtime state only; never connects."""
+-    configured = _config._load_mcp_config() if configured is None else dict(configured)
++    # Explicit callers supply YAML; the canonical loader already expands its result.
++    # Never expand that result again: a credential can itself contain literal ${...}.
++    configured = (_config._load_mcp_config() if configured is None else
++                  {name: _config._interpolate_env_vars(cfg) for name, cfg in configured.items()})
+     if not configured:
+         return []
+     current_scope = _core._mcp_registry_scope()
+@@ -559,7 +569,16 @@
+             # servers from a status read scoped to a different profile.
+             return include_runtime and _core._server_visible_in_scope(key, current_scope)
+ 
+-        active_servers = {_key_name(k): s for k, s in _core._servers.items() if visible(k)}
++        from tools.mcp_tool_registration import _oauth_connection_scope_matches, _same_server_route
++        active_servers = {}
++        for name, expected in configured.items():
++            key = _resolve_server_key(name)
++            server = _core._servers.get(key)
++            if (visible(key) and getattr(server, "session", None) is not None
++                    and isinstance(expected, dict)
++                    and _same_server_route(server, expected)
++                    and _oauth_connection_scope_matches(server, current_scope, _lock_held=True)):
++                active_servers[name] = server
+         connecting = {_key_name(k) for k in _core._server_connecting if visible(k)}
+         connect_errors = {_key_name(k): e for k, e in _core._server_connect_errors.items() if visible(k)}
+ 
+@@ -568,11 +587,11 @@
+         enabled = _enabled(cfg)  # evaluated unconditionally: malformed values warn even when connected
+         server = active_servers.get(name)
+         live = server is not None and server.session is not None
+-        status = ("connected" if live else "disabled" if not enabled else "connecting" if name in connecting
++        status = ("disabled" if not enabled else "connected" if live else "connecting" if name in connecting
+                   else "failed" if name in connect_errors else "configured")
+         entry = {"name": name, "transport": cfg.get("transport", "http") if "url" in cfg else "stdio",
+                  "tools": 0, "connected": False, "disabled": status == "disabled", "status": status}
+-        if live:
++        if live and status == "connected":
+             entry["connected"] = True
+             entry["tools"] = (len(server._registered_tool_names) if hasattr(server, "_registered_tool_names")
+                               else len(server._tools))
+--- a/tools/mcp_tool_registration.py
++++ b/tools/mcp_tool_registration.py
+@@ -459,28 +459,68 @@
+         return 0
+ 
+     with _core._lock:
+-        stale = []
++        stale = set()
++        stale_own = set()
+         for key, scopes in _core._server_tool_scopes.items():
+             if scope not in scopes:
+                 continue
+             server = _core._servers.get(key)
+             config = servers.get(_key_name(key))
+-            if (config is None or not _server_enabled(config) or server is None
+-                    or getattr(server, "session", None) is None
+-                    or not _same_server_route(server, config)
+-                    or not _oauth_connection_scope_matches(server, scope, _lock_held=True)):
+-                stale.append(key)
++            live = server is not None and getattr(server, "session", None) is not None
++            matches = (isinstance(config, dict) and _server_enabled(config) and live
++                       and _same_server_route(server, config)
++                       and _oauth_connection_scope_matches(server, scope, _lock_held=True))
++            if not matches:
++                stale.add(key)
++        # An own connection may have lost this scope's overlay while its task stayed live (for
++        # example, a disable followed by a route change). It is not represented in
++        # _server_tool_scopes anymore, so inspect the owning key explicitly before selection.
++        for name, config in servers.items():
++            if not _server_enabled(config):
++                continue
++            key = _server_key(name, scope, current=False)
++            server = _core._servers.get(key)
++            if (server is not None
++                    and (not _same_server_route(server, config)
++                         or not _oauth_connection_scope_matches(server, scope, _lock_held=True))):
++                stale.add(key)
++                stale_own.add(key)
+     for key in stale:
+         _remove_server_scope(key, scope)
++        with _core._lock:
++            server = _core._servers.get(key)
++            owns_key = _core._server_scope_keys.get(key) == scope
++        if key in stale_own and server is not None and owns_key:
++            from tools import mcp_tool_lifecycle as _lifecycle
++            _lifecycle._retire_mcp_server(key, server, scope=scope)
++
++    # A cached schema is also an owned route. Discard a replaced lazy route so it
++    # cannot keep discovery blocked on credentials which call-time checks reject.
++    with _core._lock:
++        stale_lazy = [key for key, cached in _core._lazy_server_configs.items()
++                      if key == _server_key(_key_name(key), scope, current=False)
++                      and key not in _core._server_connecting and key not in _core._servers
++                      and (not isinstance(servers.get(_key_name(key)), dict)
++                           or not _server_enabled(servers[_key_name(key)])
++                           or _connection_identity(cached) != _connection_identity(servers[_key_name(key)]))]
++    for key in stale_lazy:
++        _remove_server_scope(key, scope)
++        with _core._lock:
++            _core._lazy_server_configs.pop(key, None)
++            _core._lazy_server_fingerprints.pop(key, None)
++            _core._lazy_server_tool_names.pop(key, None)
++            _core._server_connect_retry_after.pop(key, None)
++            _core._server_connect_failures.pop(key, None)
++            _core._server_connect_errors.pop(key, None)
+ 
+     registered_servers = 0
+     for name, config in servers.items():
+         if not _server_enabled(config):
+             continue
+         with _core._lock:
+-            if _server_key(name, scope, current=False) in _core._servers:
+-                continue  # this profile has its own connection for the name
+-            # Any other profile's live connection with the same route AND credentials is shareable.
++            # This includes a same-route own connection whose overlay was removed by a prior
++            # disable. Any other profile's live connection with the same route AND credentials is
++            # also shareable.
+             shared = [(key, live) for key, live in _core._servers.items()
+                       if _key_name(key) == name and getattr(live, "session", None) is not None
+                       and _same_server_route(live, config)
+--- a/tools/mcp_tool_lifecycle.py
++++ b/tools/mcp_tool_lifecycle.py
+@@ -8,6 +8,7 @@
+ from typing import Dict, Optional
+ from tools.mcp_tool_common import _core
+ from tools import mcp_tool_loop as _loop
++from tools.mcp_tool_scope import _key_name
+ 
+ logger = logging.getLogger("tools.mcp_tool")
+ 
+@@ -125,6 +126,44 @@
+         finally:
+             reset_secret_scope(secret_token)
+             reset_hermes_home_override(home_token)
++
++
++def _retire_mcp_server(key, server, *, scope: Optional[str]) -> bool:
++    """Retire one owned connection after its profile's route changed.
++
++    This is the single-server counterpart to :func:`shutdown_mcp_servers`: it keeps other
++    connections owned by the profile alive and records adopters for the normal post-discovery
++    re-registration pass.
++    """
++    with _core._lock:
++        if (_core._servers.get(key) is not server
++                or _core._server_scope_keys.get(key) != scope):
++            return False
++        adopters = set(_core._server_tool_scopes.get(key, ())) - {scope}
++
++    try:
++        # MCPServerTask.shutdown() must run on the loop that owns its async transport context.
++        _loop._ensure_mcp_loop()
++        _loop._run_on_mcp_loop(server.shutdown, timeout=15)
++    except Exception as exc:
++        logger.debug("MCP: retiring stale server '%s' failed: %s", _key_name(key), exc)
++        # Keep the key occupied until teardown is confirmed. A timed-out shutdown may
++        # still deregister tools; admitting a replacement now would let it erase those tools.
++        return False
++    with _core._lock:
++        if _core._servers.get(key) is not server:
++            return False
++        _core._servers.pop(key, None)
++        _core._server_scope_keys.pop(key, None)
++        _core._server_tool_scopes.pop(key, None)
++        _core._server_connecting.discard(key)
++        _core._server_connect_errors.pop(key, None)
++        _core._server_error_counts.pop(key, None)
++        _core._server_breaker_opened_at.pop(key, None)
++        _clear_connect_cooldowns({key})
++        for adopter in adopters:
++            _core._orphaned_adopters.setdefault(adopter, set()).add(_key_name(key))
++    return True
+ 
+ 
+ def shutdown_mcp_servers(*, scope: Optional[str] = None):
+--- a/tests/tools/test_mcp_multiplex_connection_keys.py
++++ b/tests/tools/test_mcp_multiplex_connection_keys.py
+@@ -22,8 +22,8 @@
+                            initialize_result=None, _registered_tool_names=[], _sampling=None)
+ 
+ 
+-@pytest.fixture
+-def two_profiles(tmp_path, monkeypatch):
++@pytest.fixture(params=[True, False], ids=["gateway", "serve"])
++def two_profiles(tmp_path, monkeypatch, request):
+     """Multiplex on, clean MCP ledgers, a scope switcher for homes A and B; restores everything."""
+     import tools.mcp_tool as core
+     from tools import mcp_tool_config as _config
+@@ -32,13 +32,14 @@
+     homes = {k: tmp_path / "profiles" / k for k in ("a", "b")}
+     for home in homes.values():
+         home.mkdir(parents=True)
+-    monkeypatch.setattr("agent.secret_scope.is_multiplex_active", lambda: True)
++    monkeypatch.setattr("agent.secret_scope.is_multiplex_active", lambda: request.param)
+     monkeypatch.setattr(core, "_ensure_mcp_sdk", lambda: True)
+     monkeypatch.setattr(_config, "_filter_suspicious_mcp_servers", lambda servers: servers)
+     ledgers = ("_servers", "_server_scope_keys", "_server_tool_scopes", "_server_connecting",
+                "_server_connect_errors", "_server_connect_retry_after", "_server_connect_failures",
+                "_server_error_counts", "_server_breaker_opened_at", "_lazy_server_configs",
+-               "_mcp_tool_server_names", "_orphaned_adopters")
++               "_mcp_tool_server_names", "_orphaned_adopters",
++               "_lazy_server_fingerprints", "_lazy_server_tool_names")
+     saved = {n: type(getattr(core, n))(getattr(core, n)) for n in ledgers}
+     for n in ledgers:
+         getattr(core, n).clear()
+@@ -163,3 +164,281 @@
+     two_profiles("b")
+     assert registry.get_tool_names_for_toolset("mcp-x") == ["mcp__x__t"]
+     assert disc.get_mcp_status({"x": cfg})[0]["status"] == "connected"
++
++
++def test_changed_own_route_is_retired_before_replacement_and_sibling_survives(two_profiles, monkeypatch):
++    import asyncio
++
++    import tools.mcp_tool as core
++    from tools import mcp_tool_config as config
++    from tools import mcp_tool_discovery as disc, mcp_tool_registration as reg
++    from tools.registry import registry
++
++    old_cfg = {"url": "https://mcp.example/x", "headers": {"Authorization": "Bearer old"}}
++    sibling_cfg = {"url": "https://mcp.example/x", "headers": {"Authorization": "Bearer sibling"}}
++    new_cfg = {"url": "https://mcp.example/x", "headers": {"Authorization": "Bearer new"}}
++    raw_new_cfg = {"url": "https://mcp.example/x", "headers": {"Authorization": "Bearer ${MCP_TOKEN}"}}
++
++    scope_a = two_profiles("a")
++    old = _server("x", old_cfg)
++    shutdowns = []
++
++    async def shutdown_old():
++        shutdowns.append(old)
++        old.session = None
++        for tool_name in list(old._registered_tool_names):
++            reg._deregister_mcp_tool_all_scopes(old, tool_name)
++
++    old.shutdown = shutdown_old
++    disc._adopt_server("x", old)
++    old._registered_tool_names = reg._register_server_tools("x", old, old_cfg)
++    old_handler = registry.snapshot_registration("mcp__x__t", scope=scope_a).handler
++
++    scope_b = two_profiles("b")
++    sibling = _server("x", sibling_cfg)
++    disc._adopt_server("x", sibling)
++    sibling._registered_tool_names = reg._register_server_tools("x", sibling, sibling_cfg)
++
++    two_profiles("a")
++    monkeypatch.setattr(disc, "_server_granted_in_current_profile", lambda _name: True)
++    monkeypatch.setattr(config, "_load_mcp_config", lambda: {"x": new_cfg})
++    monkeypatch.setenv("MCP_TOKEN", "new")
++    retained = old_handler({})
++    assert "connection no longer matches" in retained
++    assert disc.get_mcp_status({"x": raw_new_cfg})[0]["status"] == "configured"
++
++    replacements = []
++
++    def fake_pass(new_servers):
++        replacements.append(dict(new_servers))
++        fresh = _server("x", new_cfg)
++        disc._adopt_server("x", fresh)
++        fresh._registered_tool_names = reg._register_server_tools("x", fresh, new_cfg)
++
++    monkeypatch.setattr(
++        disc._lifecycle._loop,
++        "_run_on_mcp_loop",
++        lambda coro_or_factory, **_kwargs: asyncio.run(
++            coro_or_factory() if callable(coro_or_factory) else coro_or_factory),
++    )
++    monkeypatch.setattr(disc._loop, "_ensure_mcp_loop", lambda: None)
++    monkeypatch.setattr(disc, "_run_discovery_pass", fake_pass)
++    assert disc.register_mcp_servers({"x": new_cfg})
++
++    assert shutdowns == [old]
++    assert replacements == [{"x": new_cfg}]
++    with core._lock:
++        assert core._servers[(scope_a, "x")] is not old
++        assert core._servers[(scope_b, "x")] is sibling
++    assert registry.get_tool_names_for_toolset("mcp-x") == ["mcp__x__t"]
++    assert disc.get_mcp_status({"x": raw_new_cfg})[0]["status"] == "connected"
++
++
++def test_same_own_connection_is_re_registered_after_disable_then_regrant(two_profiles, monkeypatch):
++    import tools.mcp_tool as core
++    from tools import mcp_tool_discovery as disc, mcp_tool_registration as reg
++    from tools.registry import registry
++
++    cfg = {"url": "https://mcp.example/x", "headers": {"Authorization": "Bearer shared"}}
++    scope = two_profiles("a")
++    server = _server("x", cfg)
++    disc._adopt_server("x", server)
++    server._registered_tool_names = reg._register_server_tools("x", server, cfg)
++    assert registry.get_tool_names_for_toolset("mcp-x") == ["mcp__x__t"]
++
++    disc.register_mcp_servers({"x": {**cfg, "enabled": False}})
++    assert registry.get_tool_names_for_toolset("mcp-x") == []
++    assert disc.get_mcp_status({"x": {**cfg, "enabled": False}})[0]["status"] == "disabled"
++    with core._lock:
++        assert core._servers[(scope, "x")] is server
++
++    monkeypatch.setattr(disc._config, "_load_mcp_config", lambda: {"x": cfg})
++    assert disc.register_mcp_servers({"x": cfg}) == ["mcp__x__t"]
++    assert registry.get_tool_names_for_toolset("mcp-x") == ["mcp__x__t"]
++
++
++@pytest.mark.parametrize("connected", [True, False])
++def test_unconfirmed_retirement_keeps_key_and_retries(two_profiles, monkeypatch, connected):
++    import asyncio
++    from tools import mcp_tool as core, mcp_tool_discovery as disc, mcp_tool_registration as reg
++
++    scope = two_profiles("a")
++    old_cfg, new_cfg = {"url": "https://mcp.example/old"}, {"url": "https://mcp.example/new"}
++    old = _server("x", old_cfg)
++    disc._adopt_server("x", old)
++    old._registered_tool_names = reg._register_server_tools("x", old, old_cfg)
++    old.session = object() if connected else None
++    async def shutdown():
++        old.session = None
++        for name in old._registered_tool_names:
++            reg._deregister_mcp_tool_all_scopes(old, name)
++    old.shutdown = shutdown
++    attempts = []
++    def timeout(*args, **kwargs):
++        raise TimeoutError("teardown not confirmed")
++    monkeypatch.setattr(disc._loop, "_run_on_mcp_loop", timeout)
++    monkeypatch.setattr(disc._loop, "_signal_reconnect", lambda _server: False)
++    monkeypatch.setattr(disc._loop, "_ensure_mcp_loop", lambda: None)
++    def discover(configs):
++        attempts.append(configs)
++        fresh = _server("x", new_cfg)
++        disc._adopt_server("x", fresh)
++        fresh._registered_tool_names = reg._register_server_tools("x", fresh, new_cfg)
++    monkeypatch.setattr(disc, "_run_discovery_pass", discover)
++    disc.register_mcp_servers({"x": new_cfg})
++    assert core._servers[(scope, "x")] is old
++    assert attempts == []
++    assert not disc.get_mcp_status({"x": new_cfg})[0]["connected"]
++    monkeypatch.setattr(disc._loop, "_run_on_mcp_loop", lambda fn, **kw: asyncio.run(fn()))
++    disc.register_mcp_servers({"x": new_cfg})
++    assert attempts == [{"x": new_cfg}]
++    assert core._servers[(scope, "x")] is not old
++    assert disc.get_mcp_status({"x": new_cfg})[0]["connected"]
++
++
++def test_replaced_lazy_route_can_discover_again(two_profiles, monkeypatch):
++    from tools import mcp_tool as core, mcp_tool_discovery as disc, mcp_tool_registration as reg
++    from tools.registry import registry
++    scope = two_profiles("a")
++    old, new = {"url": "https://mcp.example/old", "lazy": True}, {"url": "https://mcp.example/new"}
++    reg._register_from_cache_sync("x", old, {"tools": [{"name": "t", "inputSchema": {"type": "object"}}]})
++    assert (scope, "x") in core._lazy_server_configs
++    core._server_connect_retry_after[(scope, "x")] = float("inf")
++    monkeypatch.setattr(disc._loop, "_ensure_mcp_loop", lambda: None)
++    def discover(configs):
++        assert configs == {"x": new}
++        assert (scope, "x") not in core._lazy_server_configs
++        fresh = _server("x", new)
++        disc._adopt_server("x", fresh)
++        fresh._registered_tool_names = reg._register_server_tools("x", fresh, new)
++    monkeypatch.setattr(disc, "_run_discovery_pass", discover)
++    assert disc.register_mcp_servers({"x": new}) == ["mcp__x__t"]
++    assert registry.get_tool_names_for_toolset("mcp-x") == ["mcp__x__t"]
++    assert disc.get_mcp_status({"x": new})[0]["connected"]
++
++
++def test_status_does_not_expand_resolved_credentials_twice(two_profiles, monkeypatch):
++    from tools import mcp_tool_discovery as disc, mcp_tool_registration as reg
++    two_profiles("a")
++    config = {"url": "https://mcp.example/x", "headers": {"Authorization": "Bearer literal-${TOKEN}"}}
++    server = _server("x", config)
++    disc._adopt_server("x", server)
++    server._registered_tool_names = reg._register_server_tools("x", server, config)
++    monkeypatch.setattr(disc._config, "_load_mcp_config", lambda: {"x": config})
++    monkeypatch.setenv("TOKEN", "other")
++    assert disc.get_mcp_status()[0]["connected"]
++
++
++def test_overlapping_same_profile_discovery_keeps_newest_route(two_profiles, monkeypatch):
++    import asyncio
++    import contextvars
++    import threading
++    from tools import mcp_tool as core, mcp_tool_discovery as disc, mcp_tool_registration as reg
++
++    scope = two_profiles("a")
++    old, new = {"url": "https://mcp.example/old"}, {"url": "https://mcp.example/new"}
++    entered, release, newer_entered, newer_done = (threading.Event() for _ in range(4))
++    errors = []
++    def discover(configs):
++        if configs["x"] == old:
++            entered.set()
++            assert release.wait(3)
++        server = _server("x", configs["x"])
++        async def shutdown():
++            for name in server._registered_tool_names:
++                reg._deregister_mcp_tool_all_scopes(server, name)
++            server.session = None
++        server.shutdown = shutdown
++        disc._adopt_server("x", server)
++        server._registered_tool_names = reg._register_server_tools("x", server, configs["x"])
++    monkeypatch.setattr(disc._loop, "_ensure_mcp_loop", lambda: None)
++    monkeypatch.setattr(disc._loop, "_run_on_mcp_loop", lambda fn, **kw: asyncio.run(fn()))
++    monkeypatch.setattr(disc, "_run_discovery_pass", discover)
++    def run(config):
++        try:
++            if config == new:
++                newer_entered.set()
++            disc.register_mcp_servers({"x": config})
++        except BaseException as error:
++            errors.append(error)
++        finally:
++            if config == new:
++                newer_done.set()
++    threads = [threading.Thread(target=contextvars.copy_context().run, args=(run, config))
++               for config in (old, new)]
++    try:
++        threads[0].start()
++        assert entered.wait(3)
++        threads[1].start()
++        assert newer_entered.wait(3)
++        assert not newer_done.wait(0.1)
++    finally:
++        release.set()
++        for thread in threads:
++            if thread.ident is not None:
++                thread.join(3)
++    assert not any(thread.is_alive() for thread in threads)
++    assert errors == []
++    assert core._servers[(scope, "x")]._config == new
++    assert disc.get_mcp_status({"x": new})[0]["connected"]
++
++
++def test_owner_route_replacement_restores_adopter_on_its_original_route(two_profiles, monkeypatch):
++    import asyncio
++    from tools import mcp_tool as core, mcp_tool_discovery as disc, mcp_tool_registration as reg
++    from tools.registry import registry
++
++    old, new = {"url": "https://mcp.example/old"}, {"url": "https://mcp.example/new"}
++    scope_a = two_profiles("a")
++    server = _server("x", old)
++    disc._adopt_server("x", server)
++    server._registered_tool_names = reg._register_server_tools("x", server, old)
++    async def shutdown():
++        for name in server._registered_tool_names:
++            reg._deregister_mcp_tool_all_scopes(server, name)
++        server.session = None
++    server.shutdown = shutdown
++    scope_b = two_profiles("b")
++    assert reg.register_connected_into_current_scope({"x": old}) == 1
++    two_profiles("a")
++    monkeypatch.setattr(disc._loop, "_ensure_mcp_loop", lambda: None)
++    monkeypatch.setattr(disc._loop, "_run_on_mcp_loop", lambda fn, **kw: asyncio.run(fn()))
++    monkeypatch.setattr(disc._config, "_load_mcp_config", lambda: {
++        "x": new if core._mcp_registry_scope() == scope_a else old})
++    def discover(configs):
++        fresh = _server("x", configs["x"])
++        disc._adopt_server("x", fresh)
++        fresh._registered_tool_names = reg._register_server_tools("x", fresh, configs["x"])
++    monkeypatch.setattr(disc, "_run_discovery_pass", discover)
++    disc.register_mcp_servers({"x": new})
++    assert core._servers[(scope_a, "x")]._config == new
++    assert core._servers[(scope_b, "x")]._config == old
++    assert core._orphaned_adopters == {}
++    two_profiles("b")
++    assert registry.get_tool_names_for_toolset("mcp-x") == ["mcp__x__t"]
++    assert disc.get_mcp_status({"x": old})[0]["connected"]
++
++
++def test_disconnected_owner_replacement_starts_missing_loop(two_profiles, monkeypatch):
++    from tools import mcp_tool as core, mcp_tool_discovery as disc, mcp_tool_registration as reg
++    scope = two_profiles("a")
++    old, new = {"url": "https://mcp.example/old"}, {"url": "https://mcp.example/new"}
++    server = core.MCPServerTask("x")
++    server._config = old
++    disc._adopt_server("x", server)
++    monkeypatch.setattr(core, "_mcp_loop", None)
++    monkeypatch.setattr(core, "_mcp_thread", None)
++    monkeypatch.setattr(disc._lifecycle, "_kill_orphaned_mcp_children", lambda **kw: None)
++    def discover(configs):
++        assert configs == {"x": new}
++        fresh = _server("x", new)
++        disc._adopt_server("x", fresh)
++        fresh._registered_tool_names = reg._register_server_tools("x", fresh, new)
++    monkeypatch.setattr(disc, "_run_discovery_pass", discover)
++    try:
++        disc.register_mcp_servers({"x": new})
++        assert core._servers[(scope, "x")] is not server
++        assert core._mcp_loop.is_running()
++        assert disc.get_mcp_status({"x": new})[0]["connected"]
++    finally:
++        disc._loop._stop_mcp_loop()
+--- a/tests/tui_gateway/test_mcp_profile_rpcs.py
++++ b/tests/tui_gateway/test_mcp_profile_rpcs.py
+@@ -175,7 +175,8 @@
+     assert payload["servers"][0]["tools"] == 0
+ 
+ 
+-def test_status_includes_named_profile_runtime_in_multiplex(hermes_root):
++@pytest.mark.parametrize("multiplex", [True, False], ids=["gateway", "serve"])
++def test_status_includes_named_profile_runtime_in_multiplex(hermes_root, multiplex):
+     from agent.secret_scope import is_multiplex_active, set_multiplex_active
+     from hermes_constants import (
+         hermes_home_key,
+@@ -198,6 +199,7 @@
+ 
+     work_server = SimpleNamespace(
+         session=object(),
++        _config={"command": "work-bin"},
+         _registered_tool_names=["work_tool"],
+         _tools=[],
+         _sampling=None,
+@@ -206,10 +208,10 @@
+     with mcp_tool._lock:
+         saved_servers = dict(mcp_tool._servers)
+         saved_scopes = dict(mcp_tool._server_scope_keys)
+-        mcp_tool._servers["shared"] = work_server  # type: ignore[assignment]
+-        mcp_tool._server_scope_keys["shared"] = work_scope
+-
+-    set_multiplex_active(True)
++        mcp_tool._servers[(work_scope, "shared")] = work_server  # type: ignore[assignment]
++        mcp_tool._server_scope_keys[(work_scope, "shared")] = work_scope
++
++    set_multiplex_active(multiplex)
+     try:
+         payload = _result(_call("mcp.servers.status", {"profile": "work"}))
+     finally:
