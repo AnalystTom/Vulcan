@@ -1141,10 +1141,9 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
           managedAgentState: null,
           managedAgentObserved: false,
           runtimeEnv: normalizedRuntimeEnv(input.env),
-          // Restarting a session that does not exist yet has nothing to preserve.
-          // An existing session is not rebuilt here, so its launch — and therefore
-          // its Herdr attachment — survives a restart untouched.
-          launch: { kind: "shell" },
+          // An existing session keeps its launch below; a missing session may
+          // receive an explicit capability for retries after eviction/close.
+          launch: input.launch ?? { kind: "shell" },
           pendingInputBuffer: "",
           modeReplayTracker: null,
           pendingOutputChunks: [],

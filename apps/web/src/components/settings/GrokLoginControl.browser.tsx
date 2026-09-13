@@ -186,4 +186,23 @@ describe("GrokLoginControl lifecycle", () => {
     expect(nativeApi.close).not.toHaveBeenCalled();
     await mounted.unmount();
   });
+
+  it("does not claim cancellation when the close is rejected", async () => {
+    nativeApi.open.mockResolvedValueOnce(snapshot("running"));
+    nativeApi.close.mockRejectedValueOnce(new Error("terminal close unavailable"));
+    const mounted = await render(<GrokLoginControl cwd="/workspace" />);
+
+    await page.getByRole("button", { name: "Start sign-in" }).click();
+    await expect.element(page.getByRole("button", { name: "Cancel" })).toBeVisible();
+    await page.getByRole("button", { name: "Cancel" }).click();
+
+    await expect
+      .element(
+        page.getByText("Grok sign-in could not be stopped. Review the terminal output and retry."),
+      )
+      .toBeVisible();
+    await expect.element(page.getByText("terminal close unavailable")).toBeVisible();
+    expect(document.querySelector('[data-testid="grok-terminal-surface"]')).not.toBeNull();
+    await mounted.unmount();
+  });
 });

@@ -85,6 +85,9 @@ export const TerminalRestartInput = Schema.Struct({
   cols: TerminalColsSchema,
   rows: TerminalRowsSchema,
   env: Schema.optional(TerminalEnvSchema),
+  // A restart normally preserves the existing session launch. This is used
+  // when the session was evicted or closed before an explicit retry arrives.
+  launch: Schema.optional(TerminalLaunch),
 });
 export type TerminalRestartInput = Schema.Codec.Encoded<typeof TerminalRestartInput>;
 

@@ -764,6 +764,22 @@ describe("TerminalManager", () => {
     manager.dispose();
   });
 
+  it("uses the requested Grok capability when restarting an evicted session", async () => {
+    const { manager, ptyAdapter } = makeManager(5, {
+      launchResolver: async (launch) =>
+        launch.kind === "grok-login"
+          ? resolveGrokLoginLaunch("/opt/grok", { PATH: "/usr/bin" })
+          : null,
+    });
+
+    const snapshot = await manager.restart(restartInput({ launch: { kind: "grok-login" } }));
+    expect(snapshot.status).toBe("running");
+    expect(ptyAdapter.spawnInputs).toHaveLength(1);
+    expect(ptyAdapter.spawnInputs[0]?.args).toEqual(["login", "--device-auth"]);
+
+    manager.dispose();
+  });
+
   it("ignores trailing writes after terminal exit", async () => {
     const { manager, ptyAdapter } = makeManager();
     await manager.open(openInput());

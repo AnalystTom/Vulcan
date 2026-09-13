@@ -5,12 +5,20 @@ import { useRefreshProviderStatusesNow } from "~/hooks/useProviderStatusRefresh"
 import { ensureNativeApi } from "~/nativeApi";
 
 import { Button } from "../ui/button";
+import { DisclosureRegion } from "../ui/DisclosureRegion";
 import { WorkspaceTerminalSurface } from "../workspace/WorkspaceTerminalSurface";
 
 const GROK_LOGIN_THREAD_ID = "settings:grok-login";
 const GROK_LOGIN_TERMINAL_ID = "device-auth";
 
-type GrokLoginPhase = "idle" | "starting" | "running" | "completed" | "failed" | "cancelled";
+type GrokLoginPhase =
+  | "idle"
+  | "starting"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "cancel-failed";
 
 export function grokLoginOutcomeMessage(
   phase: GrokLoginPhase,
@@ -18,6 +26,9 @@ export function grokLoginOutcomeMessage(
   refreshFailed: boolean,
 ): string | null {
   if (phase === "cancelled") return "Grok sign-in was cancelled.";
+  if (phase === "cancel-failed") {
+    return "Grok sign-in could not be stopped. Review the terminal output and retry.";
+  }
   if (phase === "failed")
     return "Grok sign-in did not complete. Review the terminal output and retry.";
   if (phase !== "completed") return null;
@@ -175,6 +186,7 @@ export function GrokLoginControl(props: { readonly cwd: string }) {
             cwd: props.cwd,
             cols: 110,
             rows: 24,
+            launch: { kind: "grok-login" },
           })
         : await api.terminal.open({
             threadId: GROK_LOGIN_THREAD_ID,
@@ -186,14 +198,28 @@ export function GrokLoginControl(props: { readonly cwd: string }) {
           });
       existingSessionRef.current = true;
       if (isStale()) {
-        existingSessionRef.current = false;
-        await api.terminal
-          .close({
+        try {
+          await api.terminal.close({
             threadId: GROK_LOGIN_THREAD_ID,
             terminalId: GROK_LOGIN_TERMINAL_ID,
             deleteHistory: true,
-          })
-          .catch(() => undefined);
+          });
+          existingSessionRef.current = false;
+        } catch (error) {
+          if (mountedRef.current && cancelledRef.current) {
+            ownsSessionRef.current = true;
+            startedRef.current = true;
+            existingSessionRef.current = true;
+            cancelledRef.current = false;
+            setTerminalVisible(true);
+            setExitDetail(
+              `Could not confirm Grok sign-in stopped: ${
+                error instanceof Error ? error.message : "the terminal stop request failed."
+              }`,
+            );
+            setPhase("cancel-failed");
+          }
+        }
         return;
       }
       if (terminalResultRef.current !== null) return;
@@ -235,17 +261,31 @@ export function GrokLoginControl(props: { readonly cwd: string }) {
 
   const cancel = useCallback(async () => {
     if (!busyRef.current && !startedRef.current) return;
+    const wasStarted = startedRef.current;
     lifecycleGenerationRef.current += 1;
     cancelledRef.current = true;
     ownsSessionRef.current = false;
     startedRef.current = false;
-    await api.terminal
-      .close({
+    try {
+      await api.terminal.close({
         threadId: GROK_LOGIN_THREAD_ID,
         terminalId: GROK_LOGIN_TERMINAL_ID,
         deleteHistory: false,
-      })
-      .catch(() => undefined);
+      });
+    } catch (error) {
+      if (mountedRef.current) {
+        ownsSessionRef.current = wasStarted;
+        startedRef.current = wasStarted;
+        existingSessionRef.current = wasStarted;
+        setExitDetail(
+          `Could not confirm Grok sign-in stopped: ${
+            error instanceof Error ? error.message : "the terminal stop request failed."
+          }`,
+        );
+        setPhase("cancel-failed");
+      }
+      return;
+    }
     existingSessionRef.current = false;
     if (!mountedRef.current) return;
     setTerminalVisible(false);
@@ -262,8 +302,8 @@ export function GrokLoginControl(props: { readonly cwd: string }) {
         <div>
           <div className="text-xs font-medium text-foreground">Sign in with Grok</div>
           <p className="mt-1 max-w-prose text-xs text-muted-foreground">
-            Runs the configured Grok CLI&apos;s device sign-in on the execution host. The
-            URL, code, output, and completion state stay in the terminal below.
+            Runs the configured Grok CLI&apos;s device sign-in on the execution host. The URL, code,
+            output, and completion state stay in the terminal below.
           </p>
         </div>
         {phase === "starting" || phase === "running" ? (
@@ -292,17 +332,19 @@ export function GrokLoginControl(props: { readonly cwd: string }) {
       ) : null}
       {exitDetail ? <p className="text-xs text-destructive">{exitDetail}</p> : null}
       {outcome ? <p className="text-xs text-muted-foreground">{outcome}</p> : null}
-      {showTerminal ? (
+      <DisclosureRegion open={showTerminal}>
         <div className="h-56 overflow-hidden rounded border border-border/70 bg-black">
-          <WorkspaceTerminalSurface
-            sessionKey={GROK_LOGIN_THREAD_ID}
-            terminalId={GROK_LOGIN_TERMINAL_ID}
-            cwd={props.cwd}
-            launch={{ kind: "grok-login" }}
-            isVisible
-          />
+          {showTerminal ? (
+            <WorkspaceTerminalSurface
+              sessionKey={GROK_LOGIN_THREAD_ID}
+              terminalId={GROK_LOGIN_TERMINAL_ID}
+              cwd={props.cwd}
+              launch={{ kind: "grok-login" }}
+              isVisible
+            />
+          ) : null}
         </div>
-      ) : null}
+      </DisclosureRegion>
     </div>
   );
 }
