@@ -1,0 +1,488 @@
+--- a/tui_gateway/bot_live_delivery_startup.py
++++ b/tui_gateway/bot_live_delivery_startup.py
+@@ -1,14 +1,16 @@
+-"""Boot reconciliation for queued Bot Chat mailbox work.
+-
+-This path only revives an existing canonical Bot Chat when its mailbox contains
+-never-claimed work whose previous owner is dead. It uses session.resume and
+-the normal TUI session poller; it never submits a prompt or creates a session.
++"""Boot reconciliation for queued or interrupted Bot Chat work.
++
++This path revives an existing canonical Bot Chat when its mailbox contains
++never-claimed work whose previous owner is dead, or when an explicitly enabled
++desktop auto-continue marker proves an ordinary turn died with the process. It
++uses the native session.resume path and never invents a prompt or session.
+ """
+ from __future__ import annotations
+ 
+ import contextlib
+ import logging
+ import threading
++import time
+ from pathlib import Path
+ from typing import Any
+ 
+@@ -75,6 +77,93 @@
+         if _lineage_is_canonical(home, owner, canonical):
+             return True
+     return False
++
++
++def _has_live_canonical_owner(home: Path, canonical: str) -> bool:
++    """Return true only when the native lease registry proves a live owner."""
++    from hermes_cli.active_sessions import active_session_registry_snapshot
++
++    try:
++        return canonical in {
++            str(entry.get("session_id") or "")
++            for entry in active_session_registry_snapshot(registry_home=home)
++        }
++    except Exception:
++        # An unreadable registry cannot prove that replay is safe.
++        return True
++
++
++def _explicit_auto_continue_enabled(home: Path) -> bool:
++    """Require a raw profile opt-in; ordinary resume keeps its upstream default."""
++    from hermes_cli.config import read_user_config_raw
++
++    path = home / "config.yaml"
++    if not path.is_file():
++        return False
++    try:
++        config = read_user_config_raw(path)
++        desktop = config.get("desktop") if isinstance(config, dict) else None
++        auto_continue = desktop.get("auto_continue") if isinstance(desktop, dict) else None
++        return isinstance(auto_continue, dict) and auto_continue.get("enabled") is True
++    except Exception:
++        return False
++
++
++def _has_fresh_interrupted_turn(home: Path, canonical: str) -> bool:
++    """Return whether the canonical Bot Chat has an explicit opt-in crash marker.
++
++    The auto-continue helper remains the policy owner; this preflight only
++    decides whether startup should call session.resume without suppressing
++    that helper. Disabled, stale, exhausted, or non-ordinary markers remain
++    durable evidence for an explicit client resume. Startup requires a raw
++    desktop.auto_continue.enabled: true because the ordinary helper's
++    upstream default is enabled when the field is absent.
++    """
++    from tui_gateway import server
++    from tui_gateway.turn_marker import read_turn_marker
++
++    marker = read_turn_marker(home, canonical)
++    if marker is None or not marker.get("auto_continue", True) or not _explicit_auto_continue_enabled(home):
++        return False
++    try:
++        with server._session_profile_runtime_scope({"profile_home": str(home)}):
++            enabled, freshness_secs, max_attempts = server._auto_continue_config()
++        age = time.time() - float(marker.get("started_at") or 0)
++        return bool(enabled) and age <= freshness_secs and int(marker.get("attempts") or 0) < max_attempts
++    except Exception:
++        return False
++
++
++def _has_uncertain_delivery_locked(home: Path, canonical: str) -> bool:
++    """Refuse ordinary-turn replay when a canonical delivery is claimed/ambiguous."""
++    from tools.bot_live_delivery import _read, _root
++
++    root = _root(home)
++    if not root.is_dir():
++        return False
++    for path in root.glob("*.json"):
++        record = _read(path)
++        if not isinstance(record, dict):
++            continue
++        owner = record.get("owner")
++        if not isinstance(owner, dict) or not _lineage_is_canonical(home, owner, canonical):
++            continue
++        if record.get("status") in {"claimed", "ambiguous"}:
++            return True
++    return False
++
++
++def _has_uncertain_delivery(home: Path, canonical: str) -> bool:
++    """Check the native receipt fence immediately before auto-continue dispatch."""
++    from tools.bot_live_delivery import _locked, _root
++
++    # Do not create Bot Chat mailbox state for ordinary non-Bot resumes. A
++    # sender that has already admitted a delivery necessarily created this
++    # directory; absent state is an empty fence.
++    if not _root(home).is_dir():
++        return False
++    with _locked(home):
++        return _has_uncertain_delivery_locked(home, canonical)
+ 
+ 
+ def _profile_targets(initial_profile: str = "") -> list[tuple[str, Path]]:
+@@ -101,29 +190,37 @@
+     return list(profiles_to_serve(multiplex=False))
+ 
+ 
+-def _resume_existing_bot_chat(profile: str, home: Path) -> bool:
++def _resume_existing_bot_chat(profile: str, home: Path, *, recover_interrupted: bool = False) -> bool:
+     from tools.bot_live_delivery import _locked
+ 
+-    # Avoid creating mailbox state for profiles with no native delivery work.
+-    # The startup scan is read-only until a real queued receipt is found.
+-    if not (home / "runtime" / "bot_live_delivery").is_dir():
+-        return False
+-
+     from tui_gateway import server
++    mailbox_exists = (home / "runtime" / "bot_live_delivery").is_dir()
+ 
+     # Candidate discovery must not hold the mailbox lock while native resume
+     # starts a poller. The poller takes the per-session admission lock before
+     # entering the mailbox, so holding mailbox -> admission here would invert
+     # its lock order and deadlock an already-running session.
+-    with _locked(home):
+-        canonical = _canonical_session_id(home)
+-        if not canonical or not _has_dead_queued_work_locked(home, canonical):
++    canonical = _canonical_session_id(home)
++    if not canonical:
++        return False
++    with (_locked(home) if mailbox_exists else contextlib.nullcontext()):
++        queued_work = mailbox_exists and _has_dead_queued_work_locked(home, canonical)
++        uncertain_delivery = mailbox_exists and _has_uncertain_delivery_locked(home, canonical)
++        interrupted_turn = (
++            recover_interrupted
++            and not _has_live_canonical_owner(home, canonical)
++            and not uncertain_delivery and not queued_work
++            and _has_fresh_interrupted_turn(home, canonical))
++        if not queued_work and not interrupted_turn:
+             return False
+ 
+     params: dict[str, Any] = {
+         "session_id": canonical,
+         "eager_build": True,
+-        "skip_auto_continue": True,
++        # Mailbox boot must never turn a marker into a synthetic prompt. An
++        # ordinary marker is admitted only after the preflight above proves
++        # the existing profile's auto-continue policy is enabled.
++        "skip_auto_continue": not interrupted_turn,
+         "internal_boot": True,
+     }
+     if profile != "default":
+@@ -166,19 +263,37 @@
+             if not still_owned or stopped:
+                 refusal = "session stopped during boot resume"
+             else:
+-                with _locked(home):
++                if interrupted_turn:
++                    # The native resume response is the kickoff fence. Its
++                    # auto-continue helper checks the marker and active lease
++                    # immediately before dispatch; after that point a fast
++                    # model turn may clear the marker before this boot thread
++                    # returns, so re-reading freshness would false-refuse a
++                    # successful recovery.
+                     current_canonical = _canonical_session_id(home)
+-                    if (current_canonical != canonical
+-                            or not current_canonical
+-                            or not _has_dead_queued_work_locked(home, current_canonical)):
+-                        refusal = "queued work was adopted during boot resume"
++                    if current_canonical != canonical or not current_canonical:
++                        refusal = "Bot Chat identity changed during boot resume"
++                    elif not (result or {}).get("auto_continue"):
++                        refusal = "auto-continue was not scheduled"
+                     else:
+-                        try:
+-                            with server._session_profile_runtime_scope(session):
+-                                refusal = server._ensure_active_session_slot(runtime_sid, session)
+-                        except Exception:
+-                            logger.warning("Bot Chat boot owner claim failed for profile %s", profile, exc_info=True)
+-                            refusal = "owner claim failed"
++                        session["_bot_live_delivery_boot_resumed"] = True
++                else:
++                    with (_locked(home) if mailbox_exists else contextlib.nullcontext()):
++                        current_canonical = _canonical_session_id(home)
++                        current_queued = bool(
++                            mailbox_exists and current_canonical
++                            and _has_dead_queued_work_locked(home, current_canonical))
++                        if (current_canonical != canonical
++                                or not current_canonical
++                                or (queued_work and not current_queued)):
++                            refusal = "queued work was adopted during boot resume"
++                        else:
++                            try:
++                                with server._session_profile_runtime_scope(session):
++                                    refusal = server._ensure_active_session_slot(runtime_sid, session)
++                            except Exception:
++                                logger.warning("Bot Chat boot owner claim failed for profile %s", profile, exc_info=True)
++                                refusal = "owner claim failed"
+             session.pop("_bot_live_delivery_boot_pending", None)
+         if refusal is not None:
+             logger.warning("Bot Chat boot owner claim refused for profile %s: %s", profile, refusal)
+@@ -197,13 +312,13 @@
+             server._close_session_by_id(cleanup_sid, end_reason="bot_live_boot_owner_refused")
+     return resumed
+ 
+-def reconcile_queued_bot_chats(*, initial_profile: str = "") -> int:
+-    """Resume existing canonical Bot Chats with queued, never-claimed work."""
++def reconcile_queued_bot_chats(*, initial_profile: str = "", recover_interrupted: bool = False) -> int:
++    """Resume queued work; optionally recover one fresh interrupted ordinary turn at boot."""
+     resumed = 0
+     for profile, raw_home in _profile_targets(initial_profile):
+         home = Path(raw_home).resolve()
+         try:
+-            if _resume_existing_bot_chat(profile, home):
++            if _resume_existing_bot_chat(profile, home, recover_interrupted=recover_interrupted):
+                 resumed += 1
+         except Exception:
+             logger.warning("Bot Chat boot reconciliation failed for profile %s", profile, exc_info=True)
+@@ -214,7 +329,7 @@
+     """Start bounded boot reconciliation off the serving event loop."""
+     worker = threading.Thread(
+         target=reconcile_queued_bot_chats,
+-        kwargs={"initial_profile": initial_profile},
++        kwargs={"initial_profile": initial_profile, "recover_interrupted": True},
+         name="bot-live-delivery-boot",
+         daemon=True,
+     )
+--- a/tui_gateway/session_auto_continue.py
++++ b/tui_gateway/session_auto_continue.py
+@@ -67,7 +67,8 @@
+         return None
+     if not marker.get("auto_continue", True):
+         return None  # The mailbox owns recovery and receipt identity for imported turns.
+-    enabled, freshness_secs, max_attempts = _auto_continue_config()
++    with _session_profile_runtime_scope(session):
++        enabled, freshness_secs, max_attempts = _auto_continue_config()
+     age = time.time() - marker["started_at"]
+     if not enabled or age > freshness_secs or marker["attempts"] >= max_attempts:
+         clear_turn_marker(home, session_key)  # stale/disabled/crash-looping: a manual message continues
+@@ -100,6 +101,23 @@
+         # #94778.
+         if _ensure_active_session_slot(sid, session) is not None:
+             logger.info("auto-continue for %s refused: session has another live owner", session_key)
++            with session["history_lock"]:
++                session["running"] = False
++                session["_auto_continue_scheduled"] = False
++            return
++        # A claimed or ambiguous native delivery is an unknown outcome and
++        # must fence ordinary-turn replay. Recheck under the receipt lock at
++        # the dispatch boundary, after owner admission and before message.start.
++        # A post-resume preflight alone is too early for a racing sender.
++        try:
++            from tui_gateway.bot_live_delivery_startup import _has_uncertain_delivery
++            uncertain = _has_uncertain_delivery(home, session_key)
++        except Exception:
++            logger.warning("auto-continue receipt fence could not be read for %s", session_key, exc_info=True)
++            uncertain = True
++        if uncertain:
++            logger.info("auto-continue for %s refused: uncertain native delivery", session_key)
++            _release_active_session_slot(session)
+             with session["history_lock"]:
+                 session["running"] = False
+                 session["_auto_continue_scheduled"] = False
+--- a/tests/tui_gateway/test_auto_continue.py
++++ b/tests/tui_gateway/test_auto_continue.py
+@@ -511,3 +511,90 @@
+ 
+ # ── End to end: continuation runs a real turn and clears the marker ────
+ 
++
++
++def test_session_resume_runs_native_auto_continue_once_through_fast_completion(monkeypatch, tmp_path):
++    """The joined native resume path owns the final kickoff and tolerates a fast marker clear."""
++    from hermes_state import SessionDB
++    from tui_gateway import bot_live_delivery_startup as startup
++    from tui_gateway.turn_marker import clear_turn_marker
++
++    db = SessionDB(db_path=tmp_path / "state.db")
++    db.create_session(session_id="chat", source="cli")
++    db.set_session_title("chat", "Bot Chat")
++    (tmp_path / "config.yaml").write_text(
++        chr(10).join(["desktop:", "  auto_continue:", "    enabled: true", ""]),
++        encoding="utf-8",
++    )
++    record_turn_start(tmp_path, "chat", "finish the interrupted goal", attempts=1)
++    calls = []
++    finished = threading.Event()
++    agent = types.SimpleNamespace(model="test", provider="test", close=lambda: None)
++    previous_sessions = server._sessions
++
++    def fake_run(_rid, _sid, session, text, **kwargs):
++        calls.append((session["session_key"], text, kwargs["display_kind"]))
++        # A successful model turn clears the marker before the resume caller
++        # receives control, reproducing the real fast-completion race.
++        clear_turn_marker(tmp_path, session["session_key"])
++        with session["history_lock"]:
++            session["running"] = False
++        finished.set()
++
++    monkeypatch.setattr(server, "_hermes_home", tmp_path)
++    monkeypatch.setattr(server, "_get_db", lambda: db)
++    monkeypatch.setattr(server, "_enable_gateway_prompts", lambda: None)
++    monkeypatch.setattr(server, "_schedule_session_cap_enforcement", lambda: None)
++    monkeypatch.setattr(server, "_completion_cwd", lambda: str(tmp_path))
++    monkeypatch.setattr(server, "_make_agent_in_context", lambda *a, **k: agent)
++    monkeypatch.setattr(server, "_hydrate_session_cwd", lambda *a, **k: None)
++    monkeypatch.setattr(server, "_register_session_cwd", lambda *a, **k: None)
++    monkeypatch.setattr(server, "_wire_session_agent", lambda *a, **k: None)
++    monkeypatch.setattr(server, "_start_session_services", lambda *a, **k: None)
++    monkeypatch.setattr(server, "_schedule_mcp_late_refresh", lambda *a, **k: None)
++    monkeypatch.setattr(server, "_session_todo_state", lambda *a, **k: None)
++    monkeypatch.setattr(server, "_session_info", lambda *a, **k: {"model": "test"})
++    monkeypatch.setattr(server, "_emit", lambda *a, **k: None)
++    monkeypatch.setattr(server, "_auto_continue_config", lambda: (True, 900.0, 2))
++    monkeypatch.setattr(server, "_start_agent_build", lambda *a, **k: None)
++    monkeypatch.setattr(server, "_run_prompt_submit", fake_run)
++    monkeypatch.setattr(server, "_sessions", {})
++    try:
++        monkeypatch.setattr(startup, "_profile_targets", lambda _initial="": [("default", tmp_path)])
++        assert startup.reconcile_queued_bot_chats(recover_interrupted=True) == 1
++        assert finished.wait(timeout=2.0)
++        assert calls and calls[0][0] == "chat"
++        assert len(calls) == 1
++        assert read_turn_marker(tmp_path, "chat") is None
++
++        # A second startup pass sees the completed marker and cannot schedule
++        # the same ordinary turn again.
++        assert startup.reconcile_queued_bot_chats(recover_interrupted=True) == 0
++        assert len(calls) == 1
++    finally:
++        for session in list(server._sessions.values()):
++            lease = session.get("active_session_lease")
++            if lease is not None:
++                lease.release()
++        server._sessions = previous_sessions
++        db.close()
++
++
++def test_auto_continue_fences_native_racing_owner_before_dispatch(monkeypatch, marker_home, schedule_env):
++    from hermes_cli.active_sessions import try_acquire_active_session
++
++    competing, refusal = try_acquire_active_session(
++        session_id="session-key", surface="cli", config={}, registry_home=marker_home,
++        metadata={"live_session_id": "other-runtime", "bot_live_delivery_consumer": True},
++    )
++    assert refusal is None
++    record_turn_start(marker_home, "session-key", "do not double-write", attempts=1)
++    session = _session(profile_home=str(marker_home))
++    try:
++        result = server._maybe_schedule_auto_continue("sid", session, "session-key")
++        assert result is not None
++        assert not schedule_env
++        assert read_turn_marker(marker_home, "session-key") is not None
++        assert session.get("active_session_lease") is None
++    finally:
++        competing.release()
+--- a/tests/cli/test_bot_live_delivery.py
++++ b/tests/cli/test_bot_live_delivery.py
+@@ -549,7 +549,7 @@
+ 
+     monkeypatch.setattr(server, "_ensure_active_session_slot", ensure)
+     try:
+-        assert startup.reconcile_queued_bot_chats() == 1
++        assert startup.reconcile_queued_bot_chats(recover_interrupted=True) == 1
+         assert calls[0]["method"] == "session.resume"
+         assert calls[0]["params"] == {
+             "session_id": "chat", "eager_build": True,
+@@ -914,3 +914,106 @@
+     finally:
+         lease.release()
+         db.close()
++
++
++def test_boot_reconciliation_resumes_fresh_enabled_interrupted_bot_chat(tmp_path, monkeypatch):
++    from tui_gateway import bot_live_delivery_startup as startup
++    from tui_gateway import server
++    from tui_gateway.turn_marker import read_turn_marker, record_turn_start
++
++    db = _bot_chat_db(tmp_path)
++    (tmp_path / "config.yaml").write_text(
++        chr(10).join(["desktop:", "  auto_continue:", "    enabled: true", ""]),
++        encoding="utf-8",
++    )
++    record_turn_start(tmp_path, "chat", "finish the interrupted goal")
++    record_turn_start(tmp_path, "unrelated", "leave this marker alone")
++    calls = []
++    runtime = "runtime"
++    fake_session = {"agent": object(), "profile_home": None}
++    monkeypatch.setattr(startup, "_profile_targets", lambda _initial="": [("default", tmp_path)])
++    monkeypatch.setattr(server, "_auto_continue_config", lambda: (True, 900.0, 2))
++    monkeypatch.setattr(
++        server,
++        "handle_request",
++        lambda request: calls.append(request) or {
++            "result": {
++                "session_id": runtime,
++                "internal_boot_created": True,
++                "auto_continue": {"attempt": 1},
++            }
++        },
++    )
++    original_sessions = server._sessions
++    server._sessions = {runtime: fake_session}
++    try:
++        assert startup.reconcile_queued_bot_chats(recover_interrupted=True) == 1
++        assert calls[0]["method"] == "session.resume"
++        assert calls[0]["params"] == {
++            "session_id": "chat",
++            "eager_build": True,
++            "skip_auto_continue": False,
++            "internal_boot": True,
++        }
++        assert fake_session["_bot_live_delivery_boot_resumed"] is True
++        assert read_turn_marker(tmp_path, "chat") is not None
++        assert read_turn_marker(tmp_path, "unrelated") is not None
++    finally:
++        server._sessions = original_sessions
++        db.close()
++
++
++def test_boot_reconciliation_default_auto_continue_is_preserved(tmp_path, monkeypatch):
++    from tui_gateway import bot_live_delivery_startup as startup
++    from tui_gateway import server
++    from tui_gateway.turn_marker import read_turn_marker, record_turn_start
++
++    db = _bot_chat_db(tmp_path)
++    # The ordinary helper defaults enabled, but boot recovery requires a
++    # profile-authored opt-in so an absent field cannot trigger replay.
++    record_turn_start(tmp_path, "chat", "do not replay this")
++    calls = []
++    monkeypatch.setattr(startup, "_profile_targets", lambda _initial="": [("default", tmp_path)])
++    monkeypatch.setattr(server, "_auto_continue_config", lambda: (True, 900.0, 2))
++    monkeypatch.setattr(server, "handle_request", lambda request: calls.append(request))
++    try:
++        assert startup.reconcile_queued_bot_chats(recover_interrupted=True) == 0
++        assert not calls
++        assert read_turn_marker(tmp_path, "chat") is not None
++    finally:
++        db.close()
++
++
++@pytest.mark.parametrize("uncertain_status", ["claimed", "ambiguous"])
++def test_boot_reconciliation_fences_interrupted_marker_with_uncertain_delivery(
++    tmp_path, monkeypatch, uncertain_status
++):
++    from tui_gateway import bot_live_delivery_startup as startup
++    from tui_gateway import server
++    from tui_gateway.turn_marker import read_turn_marker, record_turn_start
++    from tools import bot_live_delivery as mailbox
++
++    db = _bot_chat_db(tmp_path)
++    (tmp_path / "config.yaml").write_text(
++        chr(10).join(["desktop:", "  auto_continue:", "    enabled: true", ""]),
++        encoding="utf-8",
++    )
++    lease = _owner(tmp_path, db, live="chat")
++    owner = mailbox.find_canonical_live_owner(tmp_path)
++    queued = mailbox.deliver_to_live_owner(tmp_path, owner, "uncertain return")
++    assert mailbox.claim_pending_delivery(tmp_path, owner)["delivery_id"] == queued["delivery_id"]
++    if uncertain_status == "ambiguous":
++        mailbox.complete_delivery(tmp_path, queued["delivery_id"], status="ambiguous", reason="owner exited")
++    lease.release()
++    record_turn_start(tmp_path, "chat", "do not replay this")
++    calls = []
++    monkeypatch.setattr(startup, "_profile_targets", lambda _initial="": [("default", tmp_path)])
++    monkeypatch.setattr(server, "_auto_continue_config", lambda: (True, 900.0, 2))
++    monkeypatch.setattr(server, "handle_request", lambda request: calls.append(request))
++    try:
++        assert startup.reconcile_queued_bot_chats(recover_interrupted=True) == 0
++        assert not calls
++        assert read_turn_marker(tmp_path, "chat") is not None
++        assert mailbox.read_delivery_result(tmp_path, queued["delivery_id"])["status"] == uncertain_status
++    finally:
++        db.close()

@@ -1,0 +1,1410 @@
+diff --git a/agent/auxiliary_client.py b/agent/auxiliary_client.py
+--- a/agent/auxiliary_client.py
++++ b/agent/auxiliary_client.py
+@@ -4709,9 +4709,11 @@
+         client = _create_openai_client(api_key=custom_key, base_url=_clean_base, **extra)
+         client = _wrap_transport(req, client, final_model, wrap_base or custom_base, custom_key)
+         return _route_client(req, client, final_model)
+-    # Try custom first, then API-key providers (Codex excluded here:
+-    # falling through to Codex with no model is a stale-constant trap).
+-    for try_fn in (_try_custom_endpoint, _resolve_api_key_provider):
++    # Exact model checks may use only the explicitly configured custom endpoint. The
++    # normal auxiliary ladder retains its historical API-key fallback behavior.
++    try_fns = (_try_custom_endpoint,) if req.task == "model_check" else (
++        _try_custom_endpoint, _resolve_api_key_provider)
++    for try_fn in try_fns:
+         client, default = try_fn()
+         if client is not None:
+             final_model = _normalize_resolved_model(model or default, provider)
+diff --git a/agent/model_access_check.py b/agent/model_access_check.py
+--- a/agent/model_access_check.py
++++ b/agent/model_access_check.py
+@@ -4,6 +4,8 @@
+ silently switch to another provider/model or write a session/config row.
+ """
+ 
++import contextlib
++from pathlib import Path
+ from typing import Any, Optional
+ 
+ 
+@@ -50,6 +52,9 @@
+     model: Any,
+     *,
+     timeout: float = 15.0,
++    explicit_base_url: Any = None,
++    explicit_api_key: Any = None,
++    api_mode: Any = None,
+ ) -> dict[str, Any]:
+     """Make one exact, stateless request and report only provider-backed provenance.
+ 
+@@ -62,6 +67,30 @@
+     model = model.strip() if isinstance(model, str) else ""
+     if not provider or not model:
+         return _result(provider=provider, model=model, status="unqualified", reason="invalid_request")
++    if explicit_base_url is not None and not isinstance(explicit_base_url, str):
++        return _result(provider=provider, model=model, status="unqualified", reason="invalid_runtime_override")
++    if explicit_api_key is not None and not isinstance(explicit_api_key, str) and not callable(explicit_api_key):
++        return _result(provider=provider, model=model, status="unqualified", reason="invalid_runtime_override")
++    if api_mode is not None and not isinstance(api_mode, str):
++        return _result(provider=provider, model=model, status="unqualified", reason="invalid_runtime_override")
++    explicit_base_url = explicit_base_url.strip() if isinstance(explicit_base_url, str) else None
++    if callable(explicit_api_key):
++        # Warm switches may hand us a callable token provider. Resolve this exact
++        # runtime credential once; never replace it with the profile's current key.
++        try:
++            explicit_api_key = explicit_api_key()
++        except Exception as error:
++            return _result(
++                provider=provider, model=model, status="unqualified",
++                reason="invalid_runtime_override", error=error,
++            )
++        if not isinstance(explicit_api_key, str) or not explicit_api_key.strip():
++            return _result(
++                provider=provider, model=model, status="unqualified",
++                reason="invalid_runtime_override",
++            )
++    explicit_api_key = explicit_api_key.strip() if isinstance(explicit_api_key, str) else None
++    api_mode = api_mode.strip() if isinstance(api_mode, str) else None
+ 
+     from agent.auxiliary_client import (
+         _MISSING_PROVIDER_MODEL,
+@@ -82,7 +111,11 @@
+ 
+     try:
+         client, resolved_model = resolve_provider_client(
+-            provider, model=model, async_mode=False, task=None,
++            provider, model=model, async_mode=False,
++            explicit_base_url=explicit_base_url or None,
++            explicit_api_key=explicit_api_key or None,
++            api_mode=api_mode or None,
++            task="model_check",
+         )
+     except Exception as error:
+         return _result(
+@@ -196,3 +229,157 @@
+         response_model=response_model,
+     )
+ 
++
++def _profile_is_bot_managed(home: Path) -> bool:
++    """Return the strict Bot roster marker; malformed marked metadata fails closed."""
++    profile = Path(home) / "profile.yaml"
++    if not profile.is_file():
++        return False
++    try:
++        raw = profile.read_text(encoding="utf-8")
++    except Exception as error:
++        raise RuntimeError(f"Bot profile metadata unreadable: {error}") from error
++    if "hermes-bots" not in raw:
++        return False
++    try:
++        import yaml
++        data = yaml.safe_load(raw)
++    except Exception as error:
++        raise RuntimeError("Bot profile metadata is malformed") from error
++    if not isinstance(data, dict):
++        raise RuntimeError("Bot profile metadata is malformed")
++    ui_meta = data.get("ui_meta")
++    bots = ui_meta.get("hermes-bots") if isinstance(ui_meta, dict) else None
++    if not isinstance(bots, dict):
++        raise RuntimeError("Bot profile metadata is malformed")
++    return True
++
++
++def _profile_model_target() -> tuple[str, str]:
++    """Read the profile's explicit model/provider pin under its active home scope."""
++    from hermes_cli.config import load_config_readonly
++
++    config = load_config_readonly() or {}
++    raw = config.get("model") if isinstance(config, dict) else None
++    if isinstance(raw, dict):
++        model = raw.get("default") or raw.get("model")
++        provider = raw.get("provider")
++        return (
++            model.strip() if isinstance(model, str) else "",
++            provider.strip() if isinstance(provider, str) else "",
++        )
++    return (raw.strip() if isinstance(raw, str) else ""), ""
++
++
++@contextlib.contextmanager
++def _profile_check_scope(home: Path):
++    """Install only the profile scopes needed by the exact model check."""
++    from agent.secret_scope import (
++        build_profile_secret_scope,
++        reset_secret_scope,
++        set_secret_scope,
++    )
++    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
++
++    home_token = set_hermes_home_override(home)
++    secret_token = None
++    try:
++        secret_token = set_secret_scope(build_profile_secret_scope(home))
++        yield
++    finally:
++        if secret_token is not None:
++            reset_secret_scope(secret_token)
++        reset_hermes_home_override(home_token)
++
++
++def qualify_profile_model(
++    home: str | Path,
++    *,
++    model: Any = None,
++    provider: Any = None,
++    explicit_base_url: Any = None,
++    explicit_api_key: Any = None,
++    api_mode: Any = None,
++    strict: bool = False,
++) -> dict[str, Any] | None:
++    """Qualify one profile's exact Bot model before any agent/tool work.
++
++    strict is used by explicit Bot execution boundaries (canonical Bot Chat, hosted
++    room members, and Bot handoff). Ordinary profiles retain their existing fallback
++    behavior unless the profile is explicitly Bot Mode managed.
++    """
++    profile_home = Path(home).expanduser()
++    try:
++        profile_is_managed = _profile_is_bot_managed(profile_home)
++    except Exception as error:
++        # Strict Bot execution cannot turn unreadable/malformed managed metadata into
++        # an ordinary profile, where the runtime fallback ladder would be allowed.
++        if strict:
++            return _result(provider="", model="", status="unqualified", reason="bot_metadata_invalid", error=error)
++        raise
++    if not strict and not profile_is_managed:
++        return None
++    for value in (model, provider, explicit_base_url, api_mode):
++        if value is not None and not isinstance(value, str):
++            return _result(provider="", model="", status="unqualified", reason="invalid_request")
++    if explicit_api_key is not None and not isinstance(explicit_api_key, str) and not callable(explicit_api_key):
++        return _result(provider="", model="", status="unqualified", reason="invalid_request")
++    with _profile_check_scope(profile_home):
++        target_model = model.strip() if isinstance(model, str) else ""
++        target_provider = provider.strip() if isinstance(provider, str) else ""
++        if (model is not None and not target_model) or (provider is not None and not target_provider):
++            return _result(
++                provider=target_provider,
++                model=target_model,
++                status="unqualified",
++                reason="profile_model_not_explicit",
++            )
++        profile_model, profile_provider = _profile_model_target()
++        target_model = target_model or profile_model
++        target_provider = target_provider or profile_provider
++        if not target_model or not target_provider:
++            return _result(
++                provider=target_provider,
++                model=target_model,
++                status="unqualified",
++                reason="profile_model_not_explicit",
++            )
++        overrides = {
++            "explicit_base_url": explicit_base_url,
++            "explicit_api_key": explicit_api_key,
++            "api_mode": api_mode,
++        }
++        if any(value is not None for value in overrides.values()):
++            return check_model_access(target_provider, target_model, **overrides)
++        return check_model_access(target_provider, target_model)
++
++
++def require_profile_model(
++    home: str | Path,
++    *,
++    model: Any = None,
++    provider: Any = None,
++    explicit_base_url: Any = None,
++    explicit_api_key: Any = None,
++    api_mode: Any = None,
++    strict: bool = False,
++) -> None:
++    """Raise before execution when the profile's exact model is not provider-verified."""
++    result = qualify_profile_model(
++        home,
++        model=model,
++        provider=provider,
++        explicit_base_url=explicit_base_url,
++        explicit_api_key=explicit_api_key,
++        api_mode=api_mode,
++        strict=strict,
++    )
++    if result is None or result.get("status") == "smoke_verified":
++        return
++    provider_label = str(result.get("provider") or "").strip() or "(unset)"
++    model_label = str(result.get("model") or "").strip() or "(unset)"
++    reason = str(result.get("reason") or "qualification_failed").strip()
++    raise RuntimeError(
++        f"Bot model qualification failed for provider '{provider_label}' and model '{model_label}' "
++        f"({reason}). Verify the profile's explicit provider/model and credentials, then retry."
++    )
+diff --git a/cron/scheduler.py b/cron/scheduler.py
+--- a/cron/scheduler.py
++++ b/cron/scheduler.py
+@@ -1496,6 +1496,8 @@
+     from hermes_cli.auth import AuthError
+ 
+     model = jc.model
++    from agent.model_access_check import _profile_is_bot_managed, require_profile_model
++    strict_bot_profile = _profile_is_bot_managed(_get_hermes_home())
+     requested = job.get("provider") or jc.cron_default_provider or None
+     if not requested:
+         global_provider = (
+@@ -1513,7 +1515,18 @@
+         }
+         if job.get("base_url"):
+             runtime_kwargs["explicit_base_url"] = job.get("base_url")
+-        return resolve_runtime_provider(**runtime_kwargs), model
++        runtime = resolve_runtime_provider(**runtime_kwargs, allow_fallback=not strict_bot_profile)
++        if strict_bot_profile:
++            require_profile_model(
++                _get_hermes_home(),
++                model=model,
++                provider=runtime.get("provider"),
++                explicit_base_url=runtime.get("base_url"),
++                explicit_api_key=runtime.get("api_key"),
++                api_mode=runtime.get("api_mode"),
++                strict=True,
++            )
++        return runtime, model
+     except Exception as resolve_exc:
+         # Walk the fallback chain on AuthError AND transient network/DNS failures (e.g. during
+         # OAuth refresh); anything else re-raises.
+@@ -1522,6 +1535,11 @@
+         if not (is_auth or is_transient_net):
+             raise RuntimeError(format_runtime_provider_error(resolve_exc)) from resolve_exc
+ 
++        if strict_bot_profile:
++            raise RuntimeError(
++                f"Bot profile primary model '{model}' is unavailable; fallback models are disabled. "
++                "Verify the profile's explicit provider/model and credentials, then retry."
++            ) from resolve_exc
+         logger.warning(
+             "Job '%s': primary provider resolve failed (%s: %s), trying fallback",
+             job_id, "auth" if is_auth else "transient network", resolve_exc)
+@@ -2142,7 +2160,9 @@
+     setup.reasoning_config = _resolve_job_reasoning_config(
+         job, _cfg if isinstance(_cfg, dict) else {}, str(setup.model)
+     )
+-    setup.fallback_model = get_fallback_chain(_cfg) or None
++    from agent.model_access_check import _profile_is_bot_managed
++    strict_bot_profile = _profile_is_bot_managed(_get_hermes_home())
++    setup.fallback_model = None if strict_bot_profile else (get_fallback_chain(_cfg) or None)
+     setup.credential_pool = _load_credential_pool(setup.runtime, job_id)
+     # MCP servers must be registered before AIAgent is constructed.
+     _init_cron_mcp_tools(job_id)
+diff --git a/hermes_cli/cli_agent_setup_mixin.py b/hermes_cli/cli_agent_setup_mixin.py
+--- a/hermes_cli/cli_agent_setup_mixin.py
++++ b/hermes_cli/cli_agent_setup_mixin.py
+@@ -4,6 +4,7 @@
+ 
+ from __future__ import annotations
+ 
++import os
+ import sys
+ 
+ from rich.markup import escape as _escape
+@@ -184,7 +185,8 @@
+         try:
+             runtime = resolve_runtime_provider(
+                 requested=self.requested_provider, explicit_api_key=self._explicit_api_key,
+-                explicit_base_url=self._explicit_base_url)
++                explicit_base_url=self._explicit_base_url,
++                allow_fallback=os.environ.get("HERMES_STRICT_BOT_MODEL") != "1")
+         except Exception as exc:
+             _primary_exc = exc
+         if _primary_exc is not None:
+@@ -290,7 +292,7 @@
+         from cli import _cprint, logger
+         from hermes_cli.auth import AuthError
+         from hermes_cli.runtime_provider import resolve_runtime_provider
+-        if not isinstance(primary_exc, AuthError):
++        if os.environ.get("HERMES_STRICT_BOT_MODEL") == "1" or not isinstance(primary_exc, AuthError):
+             return None
+         _fb_chain = self._fallback_model if isinstance(self._fallback_model, list) else []
+         for _fb in _fb_chain:
+@@ -330,7 +332,8 @@
+         try:
+             runtime = resolve_runtime_provider(
+                 requested=self.requested_provider, explicit_api_key=self._explicit_api_key,
+-                explicit_base_url=self._explicit_base_url)
++                explicit_base_url=self._explicit_base_url,
++                allow_fallback=os.environ.get("HERMES_STRICT_BOT_MODEL") != "1")
+         except Exception:
+             return False
+         if not isinstance(runtime, dict):
+@@ -554,7 +557,10 @@
+                 session_id=self.session_id, platform="cli", session_db=self._session_db,
+                 clarify_callback=clarify_callback,
+                 reasoning_callback=self._current_reasoning_callback(),
+-                fallback_model=self._fallback_model, thinking_callback=self._on_thinking,
++                fallback_model=(
++                    None if os.environ.get("HERMES_STRICT_BOT_MODEL") == "1"
++                    else self._fallback_model
++                ), thinking_callback=self._on_thinking,
+                 checkpoints_enabled=self.checkpoints_enabled,
+                 checkpoint_max_snapshots=self.checkpoint_max_snapshots,
+                 checkpoint_max_total_size_mb=self.checkpoint_max_total_size_mb,
+diff --git a/hermes_cli/runtime_provider.py b/hermes_cli/runtime_provider.py
+--- a/hermes_cli/runtime_provider.py
++++ b/hermes_cli/runtime_provider.py
+@@ -833,7 +833,8 @@
+ 
+ 
+ def resolve_runtime_provider(*, requested: Optional[str] = None, explicit_api_key: Optional[str] = None,
+-                             explicit_base_url: Optional[str] = None, target_model: Optional[str] = None) -> Dict[str, Any]:
++                             explicit_base_url: Optional[str] = None, target_model: Optional[str] = None,
++                             allow_fallback: bool = True) -> Dict[str, Any]:
+     """Resolve runtime provider credentials for agent execution. Ladder (order is behavior — each
+     rung returns or raises, else falls to the next):
+       1. disabled-provider guard (``providers.<name>.enabled: false``)
+@@ -844,17 +845,24 @@
+       6. credential pool (OpenRouter pool only without custom endpoint/override)
+       7. OAuth specs (nous/codex/xai/qwen; "auto" swallows AuthError and logs) → minimax-oauth
+          → external-process → anthropic env → bedrock → registry api_key providers
+-      8. OpenRouter / bare-custom fallback
++      8. OpenRouter / bare-custom fallback (when ``allow_fallback`` is true)
+     target_model overrides model_cfg["default"] when computing provider-specific api_mode (e.g.
+     OpenCode Zen/Go where different models route through different API surfaces)."""
+     requested_provider = resolve_requested_provider(requested)
+     _raise_if_provider_disabled(requested_provider)
+-    return next(r for r in _ladder_rungs(requested_provider, explicit_api_key, explicit_base_url, target_model) if r)
+-
+-
+-def _ladder_rungs(requested_provider, explicit_api_key, explicit_base_url, target_model):
+-    """Ladder rungs 2-8, yielded lazily so each is evaluated only when the previous one returned
+-    nothing; the last rung (OpenRouter / bare-custom fallback) always yields a runtime."""
++    runtime = next((r for r in _ladder_rungs(
++        requested_provider, explicit_api_key, explicit_base_url, target_model,
++        allow_fallback=allow_fallback) if r), None)
++    if runtime is None:
++        raise AuthError(
++            f"No usable runtime found for provider '{requested_provider}'"
++            + (" (fallback disabled)" if not allow_fallback else ""),
++            provider=requested_provider, code="missing_provider_runtime")
++    return runtime
++
++
++def _ladder_rungs(requested_provider, explicit_api_key, explicit_base_url, target_model, *, allow_fallback=True):
++    """Yield provider resolution rungs lazily; the final fallback is optional for strict Bot runs."""
+     yield _resolve_requested_shortcuts(requested_provider, explicit_api_key, explicit_base_url, target_model)
+     yield _tag(_resolve_named_custom_runtime(requested_provider=requested_provider, explicit_api_key=explicit_api_key,
+                                              explicit_base_url=explicit_base_url, target_model=target_model), requested_provider)
+@@ -884,7 +892,8 @@
+     pconfig = PROVIDER_REGISTRY.get(provider)
+     if pconfig and pconfig.auth_type == "api_key":
+         yield _api_key_provider_runtime(provider, pconfig, requested_provider, model_cfg, target_model)
+-    yield _openrouter_fallback(requested_provider, explicit_api_key, explicit_base_url)
++    if allow_fallback:
++        yield _openrouter_fallback(requested_provider, explicit_api_key, explicit_base_url)
+ 
+ 
+ def format_runtime_provider_error(error: Exception) -> str:
+diff --git a/tests/agent/test_model_access_check.py b/tests/agent/test_model_access_check.py
+--- a/tests/agent/test_model_access_check.py
++++ b/tests/agent/test_model_access_check.py
+@@ -74,7 +74,7 @@
+     }
+     assert calls[0][0] == ("example",)
+     assert calls[0][1]["model"] == "candidate"
+-    assert calls[0][1]["task"] is None
++    assert calls[0][1]["task"] == "model_check"
+ 
+ 
+ def test_missing_credentials_never_invokes_a_fallback_or_request(monkeypatch):
+@@ -352,3 +352,252 @@
+     assert response.model == "candidate"
+     assert response._hermes_provider_model == "candidate"
+     assert response._hermes_provider_status == terminal_status
++
++
++def test_profile_qualification_reads_exact_target_under_profile_scope(monkeypatch, tmp_path):
++    from agent.model_access_check import qualify_profile_model
++
++    home = tmp_path / "profiles" / "worker"
++    home.mkdir(parents=True)
++    (home / "profile.yaml").write_text("ui_meta:\n  hermes-bots:\n    title: Worker\n")
++    (home / "config.yaml").write_text(
++        "model:\n  default: candidate\n  provider: example\n"
++    )
++    seen = []
++
++    def fake_check(provider, model):
++        seen.append((provider, model))
++        return {"ok": True, "status": "smoke_verified", "provider": provider, "model": model}
++
++    monkeypatch.setattr("agent.model_access_check.check_model_access", fake_check)
++
++    result = qualify_profile_model(home, strict=True)
++
++    assert result["status"] == "smoke_verified"
++    assert seen == [("example", "candidate")]
++
++
++def test_profile_qualification_refuses_missing_explicit_provider(monkeypatch, tmp_path):
++    from agent.model_access_check import qualify_profile_model, require_profile_model
++
++    home = tmp_path / "worker"
++    home.mkdir()
++    monkeypatch.setattr("agent.model_access_check.check_model_access", lambda *_args: pytest.fail("no request"))
++    result = qualify_profile_model(home, model="candidate", provider="", strict=True)
++
++    assert result["reason"] == "profile_model_not_explicit"
++    with pytest.raises(RuntimeError, match="qualification failed"):
++        require_profile_model(home, model="candidate", provider="", strict=True)
++
++
++def test_bot_handoff_does_not_spawn_when_model_is_unqualified(monkeypatch, tmp_path):
++    import tools.bot_mode_dm as dm
++
++    monkeypatch.setattr(
++        "agent.model_access_check.require_profile_model",
++        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("qualification failed")),
++    )
++    monkeypatch.setattr(dm, "_spawn_delivery", lambda *_args, **_kwargs: pytest.fail("spawned"))
++    result = dm._start_delivery(
++        ["hermes", "-p", "worker"], "hello", "@worker", stdin_file=False,
++        task_id=None, agent=None, profile_home=tmp_path,
++    )
++
++    payload = __import__("json").loads(result)
++    assert payload["status"] == "unqualified"
++    assert payload["reason"] == "model_unqualified"
++
++
++def test_strict_managed_bot_cron_does_not_walk_fallback(monkeypatch, tmp_path):
++    import cron.scheduler as scheduler
++
++    from hermes_cli.auth import AuthError
++
++    monkeypatch.setattr(scheduler, "_get_hermes_home", lambda: tmp_path)
++    monkeypatch.setattr("agent.model_access_check._profile_is_bot_managed", lambda _home: True)
++
++    def resolve(**_kwargs):
++        raise AuthError("primary credentials unavailable")
++
++    monkeypatch.setattr("hermes_cli.runtime_provider.resolve_runtime_provider", resolve)
++    monkeypatch.setattr(
++        scheduler,
++        "get_fallback_chain",
++        lambda _cfg: pytest.fail("strict Bot cron must not inspect fallback models"),
++    )
++
++    with pytest.raises(RuntimeError, match="fallback models are disabled"):
++        scheduler._resolve_job_runtime(
++            {"id": "job-1", "provider": "example"},
++            "job-1",
++            SimpleNamespace(model="candidate", cron_default_provider="", model_cfg={}, cfg={}),
++        )
++
++
++def test_warm_qualification_checks_the_resolved_route_without_exposing_key(monkeypatch, tmp_path):
++    from agent.model_access_check import qualify_profile_model
++
++    home = tmp_path / "worker"
++    home.mkdir()
++    seen = []
++
++    def fake_check(provider, model, **kwargs):
++        seen.append((provider, model, kwargs))
++        return {"ok": True, "status": "smoke_verified", "provider": provider, "model": model}
++
++    monkeypatch.setattr("agent.model_access_check.check_model_access", fake_check)
++    result = qualify_profile_model(
++        home, model="candidate", provider="example", explicit_base_url="https://acct.example/v1",
++        explicit_api_key="secret-must-not-escape", api_mode="chat_completions", strict=True,
++    )
++
++    assert result["status"] == "smoke_verified"
++    assert seen == [("example", "candidate", {
++        "explicit_base_url": "https://acct.example/v1",
++        "explicit_api_key": "secret-must-not-escape",
++        "api_mode": "chat_completions",
++    })]
++    assert "api_key" not in result
++
++
++def test_custom_model_check_never_falls_through_to_api_key_provider(monkeypatch):
++    import agent.auxiliary_client as auxiliary
++
++    request = auxiliary._ResolveRequest(
++        "custom", "custom", "candidate", False, False, None, None, None, None, False, "model_check",
++    )
++    called = []
++    monkeypatch.setattr(auxiliary, "_try_custom_endpoint", lambda: (None, None))
++    monkeypatch.setattr(auxiliary, "_resolve_api_key_provider", lambda: called.append(True) or (None, None))
++
++    assert auxiliary._resolve_custom_branch(request) == (None, None)
++    assert called == []
++
++
++def test_non_string_explicit_runtime_override_is_rejected_before_resolution(monkeypatch):
++    import agent.auxiliary_client as auxiliary
++
++    called = []
++    monkeypatch.setattr(auxiliary, "resolve_provider_client", lambda *args, **kwargs: called.append(True))
++    result = check_model_access("example", "candidate", explicit_base_url={})
++
++    assert result["reason"] == "invalid_runtime_override"
++    assert called == []
++
++
++def test_exact_check_forwards_warm_runtime_route_to_native_resolver(monkeypatch):
++    client = SimpleNamespace(base_url="https://acct.example/v1")
++    calls = _patch_resolution(monkeypatch, client, response=_response("candidate"))
++
++    result = check_model_access(
++        "example", "candidate", explicit_base_url="https://acct.example/v1",
++        explicit_api_key="profile-key", api_mode="chat_completions",
++    )
++
++    assert result["ok"] is True
++    assert calls[0][1]["explicit_base_url"] == "https://acct.example/v1"
++    assert calls[0][1]["explicit_api_key"] == "profile-key"
++    assert calls[0][1]["api_mode"] == "chat_completions"
++    assert calls[0][1]["task"] == "model_check"
++
++
++def test_callable_profile_key_is_re_resolved_in_profile_scope(monkeypatch):
++    client = SimpleNamespace(base_url="https://acct.example/v1")
++    calls = _patch_resolution(monkeypatch, client, response=_response("candidate"))
++    token_provider = lambda: "ephemeral-token"
++
++    assert check_model_access(
++        "example", "candidate", explicit_base_url="https://acct.example/v1",
++        explicit_api_key=token_provider,
++    )["ok"] is True
++    assert calls[0][1]["explicit_api_key"] == "ephemeral-token"
++
++
++def test_callable_runtime_key_failure_is_unqualified_without_profile_fallback(monkeypatch):
++    client = SimpleNamespace(base_url="https://acct.example/v1")
++    calls = _patch_resolution(monkeypatch, client, response=_response("candidate"))
++    profile_fallback_used = []
++
++    def token_provider():
++        profile_fallback_used.append(True)
++        raise RuntimeError("token unavailable")
++
++    result = check_model_access(
++        "example", "candidate", explicit_api_key=token_provider,
++    )
++
++    assert result["status"] == "unqualified"
++    assert result["reason"] == "invalid_runtime_override"
++    assert profile_fallback_used == [True]
++    assert calls == []
++
++
++def test_malformed_profile_target_is_unqualified_without_string_coercion(monkeypatch, tmp_path):
++    from agent.model_access_check import qualify_profile_model
++
++    home = tmp_path / "worker"
++    home.mkdir()
++    (home / "config.yaml").write_text(
++        "model:\n  default:\n    bad: true\n  provider: [example]\n"
++    )
++    monkeypatch.setattr("agent.model_access_check.check_model_access", lambda *_args, **_kwargs: pytest.fail("no request"))
++
++    result = qualify_profile_model(home, strict=True)
++
++    assert result["reason"] == "profile_model_not_explicit"
++
++
++def test_empty_explicit_provider_does_not_reset_to_profile_provider(monkeypatch, tmp_path):
++    from agent.model_access_check import qualify_profile_model
++
++    home = tmp_path / "worker"
++    home.mkdir()
++    (home / "config.yaml").write_text(
++        "model:\n  default: configured\n  provider: configured-provider\n"
++    )
++    monkeypatch.setattr("agent.model_access_check.check_model_access", lambda *_args, **_kwargs: pytest.fail("no request"))
++
++    result = qualify_profile_model(home, model="candidate", provider="", strict=True)
++
++    assert result["reason"] == "profile_model_not_explicit"
++
++def test_malformed_bot_metadata_fails_closed(tmp_path):
++    from agent.model_access_check import _profile_is_bot_managed
++
++    home = tmp_path / "worker"
++    home.mkdir()
++    (home / "profile.yaml").write_text("ui_meta:\n  hermes-bots: [\n")
++
++    with pytest.raises(RuntimeError, match="malformed"):
++        _profile_is_bot_managed(home)
++
++def test_profile_check_scope_cleans_home_when_secret_setup_fails(monkeypatch, tmp_path):
++    import agent.model_access_check as checks
++    import hermes_constants
++
++    reset = []
++    monkeypatch.setattr(hermes_constants, "set_hermes_home_override", lambda _home: "home-token")
++    monkeypatch.setattr(hermes_constants, "reset_hermes_home_override", reset.append)
++    monkeypatch.setattr(
++        "agent.secret_scope.build_profile_secret_scope",
++        lambda _home: (_ for _ in ()).throw(RuntimeError("secret setup failed")),
++    )
++
++    with pytest.raises(RuntimeError, match="secret setup failed"):
++        with checks._profile_check_scope(tmp_path):
++            pass
++
++    assert reset == ["home-token"]
++def test_strict_qualification_rejects_malformed_bot_metadata(monkeypatch, tmp_path):
++    """Strict execution must fail before runtime resolution on invalid Bot metadata."""
++    from agent.model_access_check import qualify_profile_model
++
++    (tmp_path / "profile.yaml").write_text("ui_meta:\n  hermes-bots: [\n")
++    monkeypatch.setattr(
++        "agent.model_access_check.check_model_access",
++        lambda *_args, **_kwargs: pytest.fail("no model request after metadata failure"),
++    )
++
++    result = qualify_profile_model(tmp_path, model="candidate", provider="example", strict=True)
++
++    assert result["reason"] == "bot_metadata_invalid"
+diff --git a/tests/hermes_cli/test_runtime_provider_resolution.py b/tests/hermes_cli/test_runtime_provider_resolution.py
+--- a/tests/hermes_cli/test_runtime_provider_resolution.py
++++ b/tests/hermes_cli/test_runtime_provider_resolution.py
+@@ -1783,3 +1783,37 @@
+ 
+     assert resolved is not None
+     assert resolved["model"] == "myproxy/gemini-flash"
++
++
++def test_runtime_provider_can_disable_final_openrouter_fallback(monkeypatch):
++    """Strict Bot execution must stop after the requested provider ladder."""
++    monkeypatch.setattr(rp, "_raise_if_provider_disabled", lambda _provider: None)
++    monkeypatch.setattr(rp, "_ladder_rungs", lambda *args, **kwargs: iter(()))
++
++    with pytest.raises(rp.AuthError, match="fallback disabled"):
++        rp.resolve_runtime_provider(requested="example", allow_fallback=False)
++
++def test_strict_cli_primary_resolution_disables_provider_fallback(monkeypatch):
++    from hermes_cli.cli_agent_setup_mixin import CLIAgentSetupMixin
++
++    class Setup:
++        requested_provider = "missing-provider"
++        _explicit_api_key = None
++        _explicit_base_url = None
++
++    seen = []
++
++    def unavailable(**kwargs):
++        seen.append(kwargs)
++        raise rp.AuthError("primary unavailable", provider="missing-provider")
++
++    monkeypatch.setenv("HERMES_STRICT_BOT_MODEL", "1")
++    monkeypatch.setattr(rp, "resolve_runtime_provider", unavailable)
++
++    assert CLIAgentSetupMixin._runtime_credentials_ready(Setup()) is False
++    assert seen == [{
++        "requested": "missing-provider",
++        "explicit_api_key": None,
++        "explicit_base_url": None,
++        "allow_fallback": False,
++    }]
+diff --git a/tests/tools/test_bot_mode_dm.py b/tests/tools/test_bot_mode_dm.py
+--- a/tests/tools/test_bot_mode_dm.py
++++ b/tests/tools/test_bot_mode_dm.py
+@@ -20,7 +20,9 @@
+ 
+ 
+ @pytest.fixture(autouse=True)
+-def _fresh_probe_cache():
++def _fresh_probe_cache(monkeypatch):
++    # Isolate message transport from the separately tested account preflight.
++    monkeypatch.setattr("agent.model_access_check.require_profile_model", lambda *a, **k: None)
+     bot_mode_probe._reset_cache_for_tests()
+     yield
+     bot_mode_probe._reset_cache_for_tests()
+@@ -884,3 +886,17 @@
+ 
+     with pytest.raises(PermissionError, match="not a directory"):
+         bot_mode_dm._dm_dir()
++
++
++def test_unqualified_recipient_never_spawns_or_admits_message(tmp_path, monkeypatch):
++    from tools import bot_live_delivery as live
++    home = _managed_home(tmp_path)
++    calls = _capture_spawn(monkeypatch)
++    def reject(*args, **kwargs):
++        raise RuntimeError("Bot model qualification failed")
++    monkeypatch.setattr("agent.model_access_check.require_profile_model", reject)
++    monkeypatch.setattr(live, "deliver_to_live_owner", lambda *a, **k: pytest.fail("must not admit unqualified work"))
++    result = json.loads(bot_mode_dm.message_agent_tool("researcher", "hello", agent=_FakeAgent(home)))
++    assert result["status"] == "unqualified"
++    assert "qualification failed" in result["error"]
++    assert not calls
+diff --git a/tests/tui_gateway/test_bot_relay_methods.py b/tests/tui_gateway/test_bot_relay_methods.py
+--- a/tests/tui_gateway/test_bot_relay_methods.py
++++ b/tests/tui_gateway/test_bot_relay_methods.py
+@@ -25,6 +25,8 @@
+     h = tmp_path / ".hermes"
+     (h / "profiles" / "ops").mkdir(parents=True)
+     monkeypatch.setenv("HERMES_HOME", str(h))
++    # These tests isolate transport; exact account qualification has its own suite.
++    monkeypatch.setattr("agent.model_access_check.require_profile_model", lambda *a, **k: None)
+     return h
+ 
+ 
+@@ -280,18 +282,34 @@
+     assert [json.loads(c["env"][TURN_AUTHOR_ENV]) for c in calls] == [SENDER_AUTHOR]
+ 
+ 
+-def test_deliver_refuses_a_sender_from_a_logged_in_client(home, fake_runs, bound_client):
++def test_deliver_refuses_a_sender_from_a_logged_in_client(home, fake_runs, bound_client, monkeypatch):
+     """A browser login never relays for another connection, so its from_* fields are refused before any turn runs.
+     Without sender fields the same client still delivers, unattributed."""
+     from agent.turn_author import TURN_AUTHOR_ENV
+ 
+     calls, _outcomes = fake_runs
++    checks = []
++    monkeypatch.setattr("agent.model_access_check.require_profile_model", lambda *a, **k: checks.append(True))
+     bound_client.auth_identity = {"user_id": "alice", "provider": "google"}
+ 
+     for sender in ({"from_profile": "scout"}, {"from_connection": "cloud-1"}, SENDER):
+         err = srv._methods["bot_relay.deliver"](1, {"profile": "ops", "message": "ping", **sender})
+         assert err["error"]["code"] == 4095
+     assert not calls
++    assert not checks
+ 
+     _result(srv._methods["bot_relay.deliver"](2, {"profile": "ops", "message": "ping"}))
+     assert len(calls) == 1 and TURN_AUTHOR_ENV not in calls[0]["env"]
++
++
++def test_deliver_rejects_unqualified_model_before_transport(home, fake_runs, monkeypatch):
++    calls, _outcomes = fake_runs
++    submitted = []
++    def reject(*args, **kwargs):
++        raise RuntimeError("Bot model qualification failed")
++    monkeypatch.setattr("agent.model_access_check.require_profile_model", reject)
++    monkeypatch.setitem(srv._methods, "prompt.submit", lambda *a, **k: submitted.append(True))
++    err = srv._methods["bot_relay.deliver"](1, {"profile": "ops", "message": "ping"})
++    assert "qualification failed" in err["error"]["message"]
++    assert calls == []
++    assert submitted == []
+diff --git a/tests/tui_gateway/test_make_agent_provider.py b/tests/tui_gateway/test_make_agent_provider.py
+--- a/tests/tui_gateway/test_make_agent_provider.py
++++ b/tests/tui_gateway/test_make_agent_provider.py
+@@ -140,3 +140,213 @@
+     # Sibling session is completely untouched.
+     assert sess_a["model_override"] is None
+     assert sess_a["agent"].model == "minimax/m3"
++
++
++
++def test_make_agent_fails_closed_for_resumed_bot_title_after_pending_marker_consumed(monkeypatch, tmp_path):
++    """Persisted Bot Chat identity still gates a delayed deferred build."""
++    import tui_gateway.server as server
++
++    session = {"pending_title": None, "profile_home": str(tmp_path), "room_plumbing": False,
++               "follow_profile_config": False}
++    monkeypatch.setattr(server, "_sessions", {"sid": session})
++    monkeypatch.setattr(server, "_session_live_title", lambda *_args: "Bot Chat")
++    monkeypatch.setattr(server, "_load_cfg", lambda: {})
++    seen = []
++
++    def resolve(*_args, **kwargs):
++        seen.append(kwargs.get("strict_bot"))
++        return "candidate", {"provider": "example", "base_url": "https://example.test/v1", "api_key": "key"}
++
++    monkeypatch.setattr(server, "_resolve_agent_model_runtime", resolve)
++    monkeypatch.setattr(
++        "agent.model_access_check.require_profile_model",
++        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("qualification failed")),
++    )
++    monkeypatch.setattr("tui_gateway.synthetic_turn.maybe_build_synthetic_agent", lambda *_args: None)
++    agent = __import__("unittest").mock.MagicMock()
++    monkeypatch.setattr("run_agent.AIAgent", agent)
++
++    import pytest
++    with pytest.raises(RuntimeError, match="qualification failed"):
++        server._make_agent("sid", "key")
++
++    assert seen == [True]
++    agent.assert_not_called()
++
++def test_deferred_bot_resume_qualification_blocks_configured_fallback(monkeypatch, tmp_path):
++    """A cold deferred Bot Chat must fail before fallback or agent/tool setup."""
++    import tui_gateway.server as server
++
++    record = server._deferred_session_record(
++        "stored-id", cols=80, cwd=str(tmp_path), history=[], lease=None,
++        source="desktop", profile_home=str(tmp_path), pending_title="Bot Chat",
++    )
++    # The pending marker was consumed while the persisted row still identifies Bot Chat.
++    record["pending_title"] = None
++    monkeypatch.setattr(server, "_sessions", {"sid": record})
++    monkeypatch.setattr(server, "_session_live_title", lambda *_args: "Bot Chat")
++    monkeypatch.setattr(server, "_load_cfg", lambda: {})
++    monkeypatch.setattr(server, "_resolve_startup_runtime", lambda: ("primary-model", "primary"))
++
++    fallback_reads = []
++    monkeypatch.setattr(
++        server, "_load_fallback_model",
++        lambda: fallback_reads.append(True) or [{"provider": "fallback", "model": "fallback-model"}],
++    )
++    runtime_calls = []
++
++    def resolve_runtime(**kwargs):
++        runtime_calls.append(kwargs)
++        return {
++            "provider": "primary", "base_url": "https://primary.example/v1",
++            "api_key": "profile-primary-key", "api_mode": "chat_completions",
++        }
++
++    monkeypatch.setattr("hermes_cli.runtime_provider.resolve_runtime_provider", resolve_runtime)
++    check_calls = []
++
++    def reject_primary(provider, model, **kwargs):
++        check_calls.append((provider, model, kwargs))
++        return {
++            "ok": False, "status": "unqualified", "reason": "request_rejected",
++            "provider": provider, "model": model,
++        }
++
++    monkeypatch.setattr("agent.model_access_check.check_model_access", reject_primary)
++    monkeypatch.setattr("tui_gateway.synthetic_turn.maybe_build_synthetic_agent", lambda *_args: None)
++    agent = MagicMock()
++    monkeypatch.setattr("run_agent.AIAgent", agent)
++    monkeypatch.setattr(
++        "agent.shell_hooks.register_from_config",
++        lambda *_args, **_kwargs: pytest.fail("hooks must not run after failed qualification"),
++    )
++
++    import pytest
++    with pytest.raises(RuntimeError, match="request_rejected"):
++        server._make_agent("sid", "stored-id", session_id="stored-id")
++
++    assert runtime_calls == [{"requested": "primary", "target_model": "primary-model", "allow_fallback": False}]
++    assert check_calls == [(
++        "primary", "primary-model", {
++            "explicit_base_url": "https://primary.example/v1",
++            "explicit_api_key": "profile-primary-key",
++            "api_mode": "chat_completions",
++        },
++    )]
++    assert fallback_reads == []
++    agent.assert_not_called()
++
++def test_persisted_bot_title_marks_model_switch_strict(monkeypatch):
++    """Model switches use the same persisted Bot Chat identity after deferred hydration."""
++    import tui_gateway.server as server
++
++    session = {
++        "pending_title": None, "room_plumbing": False,
++        "follow_profile_config": False, "session_key": "stored-id",
++    }
++    monkeypatch.setattr(server, "_session_live_title", lambda *_args: "Bot Chat")
++
++    assert server._is_bot_execution_session(session, "stored-id") is True
++
++def test_strict_config_switch_failure_is_retried_each_turn(monkeypatch):
++    """A failed Bot model adoption must not mark the unqualified target as seen."""
++    import pytest
++    import tui_gateway.server as server
++
++    class Agent:
++        model = "old-model"
++        provider = "primary"
++
++    session = {
++        "agent": Agent(), "session_key": "stored-id", "pending_title": None,
++        "room_plumbing": False, "follow_profile_config": False,
++    }
++    monkeypatch.setattr(server, "_session_live_title", lambda *_args: "Bot Chat")
++    monkeypatch.setattr(server, "_config_model_target", lambda: ("new-model", "primary"))
++    calls = []
++    monkeypatch.setattr(
++        server, "_apply_model_switch",
++        lambda *_args, **_kwargs: calls.append(True) or (_ for _ in ()).throw(RuntimeError("unqualified")),
++    )
++    monkeypatch.setattr(server, "_emit", lambda *_args, **_kwargs: None)
++
++    with pytest.raises(RuntimeError, match="unqualified"):
++        server._sync_agent_model_with_config("sid", session)
++    with pytest.raises(RuntimeError, match="unqualified"):
++        server._sync_agent_model_with_config("sid", session)
++
++    assert len(calls) == 2
++    assert session.get("config_model_seen") != ("new-model", "primary")
++
++
++def test_strict_warm_model_switch_clears_existing_fallback_chain(monkeypatch, tmp_path):
++    """A validated Bot switch cannot leave an old fallback on the live agent."""
++    import tui_gateway.server as server
++
++    class Agent:
++        model = "old-model"
++        provider = "primary"
++        base_url = ""
++        api_key = ""
++        _fallback_chain = [{"provider": "fallback", "model": "fallback-model"}]
++        _fallback_model = _fallback_chain[0]
++
++    class Result:
++        success = True
++        error_message = ""
++        new_model = "new-model"
++        target_provider = "primary"
++        base_url = "https://primary.example/v1"
++        api_key = "profile-key"
++        api_mode = "chat_completions"
++        warning_message = ""
++
++    session = {
++        "agent": Agent(), "session_key": "stored-id", "profile_home": str(tmp_path),
++        "pending_title": None, "room_plumbing": False, "follow_profile_config": False,
++    }
++    monkeypatch.setattr(server, "_session_live_title", lambda *_args: "Bot Chat")
++    monkeypatch.setattr(server, "_switch_request", lambda *_args, **_kwargs: ("new-model", None, False, False))
++    monkeypatch.setattr(server, "_current_model_runtime", lambda *_args: ("primary", "old-model", "", ""))
++    monkeypatch.setattr("hermes_cli.model_switch.switch_model", lambda **_kwargs: Result())
++    monkeypatch.setattr("agent.model_access_check.require_profile_model", lambda *_args, **_kwargs: None)
++    monkeypatch.setattr(server, "_commit_agent_switch", lambda *_args, **_kwargs: None)
++
++    server._apply_model_switch("sid", session, "new-model")
++
++    assert session["agent"]._fallback_chain == []
++    assert session["agent"]._fallback_model is None
++
++def test_strict_pending_model_switch_failure_aborts_before_old_model_dispatch(monkeypatch):
++    """A deferred Bot switch failure must stop this turn and retain the request."""
++    import pytest
++    from tui_gateway import server
++
++    run_calls = []
++    session = {
++        "agent": type("Agent", (), {"run_conversation": lambda *_args, **_kwargs: run_calls.append(True)})(),
++        "pending_title": "Bot Chat", "room_plumbing": False, "follow_profile_config": False,
++        "pending_model_switch": {"raw": "unavailable-model", "confirm_expensive_model": True},
++    }
++    monkeypatch.setattr("tui_gateway.server._apply_model_switch",
++                        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("unqualified")))
++    errors = []
++    monkeypatch.setattr(server, "_emit", lambda *args, **_kwargs: errors.append(args[2] if len(args) > 2 else None))
++
++    with pytest.raises(RuntimeError, match="unqualified"):
++        server._apply_pending_model_switch("sid", session)
++    assert session["pending_model_switch"]["raw"] == "unavailable-model"
++    assert run_calls == []
++    assert errors and errors[-1] and "unqualified" in errors[-1]["message"]
++def test_malformed_managed_profile_remains_strict(monkeypatch, tmp_path):
++    """Metadata errors cannot demote a managed Bot session to fallback behavior."""
++    from tui_gateway import server
++
++    (tmp_path / "profile.yaml").write_text("ui_meta:\n  hermes-bots: [\n")
++    session = {
++        "profile_home": str(tmp_path), "pending_title": None,
++        "room_plumbing": False, "follow_profile_config": False,
++    }
++
++    assert server._is_bot_execution_session(session) is True
+diff --git a/tests/tui_gateway/test_prompt_accept_logging.py b/tests/tui_gateway/test_prompt_accept_logging.py
+--- a/tests/tui_gateway/test_prompt_accept_logging.py
++++ b/tests/tui_gateway/test_prompt_accept_logging.py
+@@ -26,6 +26,8 @@
+ import pytest
+ 
+ from tui_gateway import server
++
++_real_sync_model = server._sync_agent_model_with_config
+ 
+ 
+ class _InlineThread:
+@@ -181,3 +183,42 @@
+     finished = _records(caplog, "tui turn finished")
+     assert len(finished) == 1
+     assert "status=error" in finished[0].getMessage()
++
++
++@pytest.mark.parametrize("switch_kind", ["config", "pending"])
++@pytest.mark.parametrize("strict_bot", [True, False])
++def test_model_switch_failure_at_actual_turn_boundary(turn_env, monkeypatch, caplog, switch_kind, strict_bot):
++    """A failed strict switch retains the failure and never runs the old model."""
++    calls = []
++    switches = []
++    agent = types.SimpleNamespace(
++        session_id="agent-sid-1", model="old-model", provider="primary",
++        run_conversation=lambda *a, **k: calls.append(True) or {"final_response": "done"},
++        clear_interrupt=lambda: None,
++    )
++    session = _session(agent=agent, running=True, pending_title="Bot Chat" if strict_bot else None)
++    monkeypatch.setattr(server, "_session_live_title", lambda *args: None)
++    monkeypatch.setattr(server, "_config_model_target", lambda: ("new-model", "primary"))
++    def reject_switch(*args, **kwargs):
++        switches.append(True)
++        raise RuntimeError("model qualification refused")
++    monkeypatch.setattr(server, "_apply_model_switch", reject_switch)
++    if switch_kind == "config":
++        monkeypatch.setattr(server, "_sync_agent_model_with_config", _real_sync_model)
++    else:
++        session["pending_model_switch"] = {"raw": "new-model --provider primary", "confirm_expensive_model": True}
++    with caplog.at_level(logging.INFO, logger="tui_gateway.server"):
++        server._run_prompt_submit("rid", "ui-sid", session, "complete the goal")
++    assert switches == [True]
++    finished = _records(caplog, "tui turn finished")
++    assert len(finished) == 1
++    if strict_bot:
++        assert calls == []
++        assert "status=error" in finished[0].getMessage()
++        assert "error_retained=True" in finished[0].getMessage()
++        assert session.get("config_model_seen") != ("new-model", "primary")
++        if switch_kind == "pending":
++            assert session["pending_model_switch"]["raw"] == "new-model --provider primary"
++    else:
++        assert calls == [True]
++        assert "status=complete" in finished[0].getMessage()
+diff --git a/tests/tui_gateway/test_protocol.py b/tests/tui_gateway/test_protocol.py
+--- a/tests/tui_gateway/test_protocol.py
++++ b/tests/tui_gateway/test_protocol.py
+@@ -1504,3 +1504,32 @@
+     assert a.frames == []
+     # No live transports left → fell back to stdio.
+     assert json.loads(buf.getvalue())["params"]["type"] == "skin.changed"
++
++
++
++def test_deferred_resume_record_preserves_trusted_bot_chat_title(server, monkeypatch):
++    """A cold Bot Chat resume must retain its stored identity through deferred build."""
++    import tui_gateway.methods_session as methods_session
++    monkeypatch.setattr(methods_session, "_profile_home", lambda _profile: None, raising=False)
++    monkeypatch.setattr(methods_session, "is_truthy_value", lambda value: bool(value), raising=False)
++    monkeypatch.setattr(methods_session, "_deferred_session_record", server._deferred_session_record, raising=False)
++
++    ctx = methods_session._Resume("rid", {"session_id": "Bot Chat"}, "stored-id")
++    ctx.found = {"title": "Bot Chat"}
++    ctx.profile_home = None
++    record = ctx.record("tui", "/tmp", [])
++
++    assert record["pending_title"] == "Bot Chat"
++
++
++def test_deferred_resume_record_drops_untrusted_title(server, monkeypatch):
++    import tui_gateway.methods_session as methods_session
++    monkeypatch.setattr(methods_session, "_profile_home", lambda _profile: None, raising=False)
++    monkeypatch.setattr(methods_session, "is_truthy_value", lambda value: bool(value), raising=False)
++    monkeypatch.setattr(methods_session, "_deferred_session_record", server._deferred_session_record, raising=False)
++
++    ctx = methods_session._Resume("rid", {"session_id": "other"}, "stored-id")
++    ctx.found = {"title": "user supplied title"}
++    record = ctx.record("tui", "/tmp", [])
++
++    assert record["pending_title"] is None
+diff --git a/tools/bot_mode_dm.py b/tools/bot_mode_dm.py
+--- a/tools/bot_mode_dm.py
++++ b/tools/bot_mode_dm.py
+@@ -497,9 +497,9 @@
+     ever minted. Auth/quota/config failures never retry. Peer transports (stdin mode) retry on their own
+     gateway's deliver path, not here.
+     """
++    home = profile_home or _local_delivery_home(argv) if not stdin_file else None
+     # The live consumer owns turn admission; never compete for its CLI lease.
+     if not stdin_file:
+-        home = profile_home or _local_delivery_home(argv)
+         if home is not None or Path(dm_file + ".live.json").exists():
+             try:
+                 record = _admit_live_dm(home, dm_file, author)
+@@ -515,6 +515,8 @@
+         from tools.bot_relay import delivery_env
+ 
+         env = delivery_env(author)
++        if home is not None and not stdin_file:
++            env["HERMES_STRICT_BOT_MODEL"] = "1"
+         with _delivery_lock(argv, stdin_file=stdin_file):
+             if not stdin_file:
+                 return _run_local_turn(argv, dm_file, env=env)
+@@ -549,6 +551,17 @@
+                     task_id: Optional[str], agent: Any, profile_home: Path | None = None,
+                     author: Optional[dict] = None) -> str:
+     """Create a DM file and transfer its cleanup ownership to the runner."""
++    if profile_home is not None:
++        try:
++            from agent.model_access_check import require_profile_model
++            require_profile_model(profile_home, strict=True)
++        except Exception as exc:
++            return json.dumps({
++                "status": "unqualified",
++                "reason": "model_unqualified",
++                "error": str(exc),
++                "to": label,
++            })
+     dm_file = _write_dm_file(content)
+     if profile_home is not None:
+         try:
+diff --git a/tui_gateway/methods_bot_relay.py b/tui_gateway/methods_bot_relay.py
+--- a/tui_gateway/methods_bot_relay.py
++++ b/tui_gateway/methods_bot_relay.py
+@@ -84,6 +84,7 @@
+         # (Nested per method_ctx rebinding.) See #100523.
+         from tools.bot_mode_probe import BOT_CHAT_TITLE
+         live_home = _profile_home(resolved)
++        from agent.model_access_check import require_profile_model
+         want_home = str(live_home) if live_home is not None else None
+         live_sid = next((
+             live_sid for live_sid, record in list(_sessions.items())
+@@ -98,6 +99,7 @@
+         if (any(params.get(k) for k in sender_fields)
+                 and _is_authenticated_identity(getattr(current_transport(), "auth_identity", None))):
+             return _err(rid, 4095, "a logged-in client cannot name the sender of a relayed dm")
++        require_profile_model(live_home or _hermes_home, strict=True)
+         author = delivery_turn_author(*(params.get(k) for k in sender_fields))
+         if live_sid:
+             # queued=True: a teammate's DM runs as the NEXT turn and never interrupts or steers a
+diff --git a/tui_gateway/methods_session.py b/tui_gateway/methods_session.py
+--- a/tui_gateway/methods_session.py
++++ b/tui_gateway/methods_session.py
+@@ -510,10 +510,15 @@
+         ``overrides`` restores the stored model/provider/reasoning/tier so the deferred build matches eager."""
+         if overrides is not None:
+             extra.update(model_override=overrides.get("model_override"), resume_runtime_overrides=overrides or None)
++        from tools.bot_mode_probe import BOT_CHAT_TITLE
++        stored_title = (self.found or {}).get("title") if isinstance(self.found, dict) else None
++        if stored_title != BOT_CHAT_TITLE:
++            stored_title = None
+         return _deferred_session_record(
+             self.target, cols=self.cols, cwd=cwd, history=history, lease=None, source=source,
+             close_on_disconnect=_flag(self.params, "close_on_disconnect"),
+-            profile_home=self.profile_home, explicit_cwd=bool(self.profile_resume_cwd),
++            profile_home=self.profile_home, pending_title=stored_title,
++            explicit_cwd=bool(self.profile_resume_cwd),
+             skip_auto_continue=self.skip_auto_continue, **extra)
+ 
+     def claim(self, sid: str, record: dict) -> dict | None:
+diff --git a/tui_gateway/model_switch.py b/tui_gateway/model_switch.py
+--- a/tui_gateway/model_switch.py
++++ b/tui_gateway/model_switch.py
+@@ -5,10 +5,33 @@
+ from __future__ import annotations
+ 
+ import contextlib
++from pathlib import Path
+ 
+ from .method_ctx import HandlerRegistry, bind_module
+ 
+ _registry = HandlerRegistry()
++
++
++def _is_bot_execution_session(session: dict, key: str = "") -> bool:
++    if (str(session.get("pending_title") or "").strip() == "Bot Chat"
++            or session.get("room_plumbing") or session.get("follow_profile_config")):
++        return True
++    # A deferred/resumed canonical chat may have consumed pending_title after its DB row
++    # was written; use the same trusted persisted title for all strict execution paths.
++    profile_home = session.get("profile_home")
++    if profile_home:
++        # A managed profile is a durable Bot identity. Metadata errors must remain strict
++        # so a read failure cannot silently enable provider fallback.
++        from agent.model_access_check import _profile_is_bot_managed
++        try:
++            if _profile_is_bot_managed(Path(profile_home)):
++                return True
++        except Exception:
++            return True
++    if key:
++        with contextlib.suppress(Exception):
++            return _session_live_title(session, key) == "Bot Chat"
++    return False
+ 
+ 
+ def _persist_model_switch(result) -> None:
+@@ -223,6 +246,18 @@
+         custom_providers=custom_provs)
+     if not result.success:
+         raise ValueError(result.error_message or "model switch failed")
++    strict_bot = _is_bot_execution_session(session, _session_lookup_key(session, fallback=sid))
++    if strict_bot:
++        from agent.model_access_check import require_profile_model
++        require_profile_model(
++            session.get("profile_home") or _hermes_home,
++            model=result.new_model,
++            provider=result.target_provider,
++            explicit_base_url=result.base_url,
++            explicit_api_key=result.api_key,
++            api_mode=result.api_mode,
++            strict=True,
++        )
+     restore_snapshot = _snapshot_agent_model_runtime(agent) if (one_turn and agent) else None
+     if agent:
+         _merge_preflight_warning(result, agent, session, cfg, custom_provs)
+@@ -232,6 +267,11 @@
+             return confirm
+     if agent:
+         _commit_agent_switch(sid, session, agent, result, current_model, restore_snapshot)
++        if strict_bot:
++            # A warm Bot agent may carry a fallback chain from before strict mode was enabled.
++            # Clear it only after the validated switch commits.
++            agent._fallback_chain = []
++            agent._fallback_model = None
+     # PER-SESSION override so a rebuild of THIS session (/new, resume) re-derives the model.
+     # Deliberately NOT written to process-global env (HERMES_MODEL & co.): the desktop hosts
+     # every same-profile session in one process, so os.environ would leak the switch to all.
+@@ -295,23 +335,31 @@
+     if not target[0]:
+         return
+     seen = session.get("config_model_seen")
+-    # Record first so a broken config gets one attempt per edit, not per turn.
+-    session["config_model_seen"] = target
++    strict_bot = _is_bot_execution_session(session, _session_lookup_key(session, fallback=sid))
+     model, provider = target
+     # Already on the configured model (resumed before first sync, or a config revert after
+-    # a failed switch): adopt without switching.
+-    if target == seen or (
++    # a failed switch): adopt without switching. A strict Bot keeps retrying an unqualified
++    # target so the next turn cannot silently continue on the old model.
++    if (not strict_bot and target == seen) or (
+             model == getattr(agent, "model", "") and (not provider or provider == getattr(agent, "provider", ""))):
+-        return
++        session["config_model_seen"] = target
++        return
++    # Record first for ordinary sessions so a broken config gets one attempt per edit, not per turn.
++    if not strict_bot:
++        session["config_model_seen"] = target
+     raw = f"{model} --provider {provider}" if provider else model
+     try:
+-        # This sync ADOPTS a config.yaml change; it must never write config back (that is
+-        # how `hermes --tui -m` once leaked into config.yaml).
++        # This sync adopts a config.yaml change; it must never write config back.
+         _apply_model_switch(
+             sid, session, raw, confirm_expensive_model=True, pin_session_override=False,
+             persist_override=False)
+     except Exception as e:
+-        _emit("error", sid, {"message": f"Could not switch to configured model {model}: {e}"})
++        message = f"Could not switch to configured model {model}: {e}"
++        _emit("error", sid, {"message": message})
++        if strict_bot:
++            raise RuntimeError(message) from e
++        return
++    session["config_model_seen"] = target
+ 
+ 
+ def _pending_switch_selection_warning(model: str, provider: str) -> str | None:
+diff --git a/tui_gateway/server.py b/tui_gateway/server.py
+--- a/tui_gateway/server.py
++++ b/tui_gateway/server.py
+@@ -2217,7 +2217,9 @@
+         raise
+ 
+ 
+-def _resolve_agent_model_runtime(model_override, provider_override) -> tuple[str, dict]:
++def _resolve_agent_model_runtime(
++    model_override, provider_override, *, strict_bot: bool = False
++) -> tuple[str, dict]:
+     """(model, runtime) for a new agent; a per-session override (/model switch or a resumed row's persisted
+     runtime) wins over global config/env. Older rows stored the resolved provider "custom" (no named entry
+     matches) — recover the identity from the persisted base_url or the rebuild fails "No LLM provider
+@@ -2244,6 +2246,11 @@
+             requested_provider = provider_override
+         resolve_kwargs = {"requested": requested_provider, "target_model": model or None}
+         overrides = {}
++    if strict_bot:
++        from hermes_cli.runtime_provider import resolve_runtime_provider
++        runtime = resolve_runtime_provider(**resolve_kwargs, allow_fallback=False)
++        runtime.update({k: v for k, v in overrides.items() if v})
++        return model, runtime
+     resolution = _resolve_runtime_with_fallback(resolve_kwargs)
+     if resolution.used_fallback:
+         if not resolution.selected_model:
+@@ -2285,17 +2292,32 @@
+     if synthetic is not None:
+         return synthetic
+     from run_agent import AIAgent
+-    # MCP discovery runs in a daemon thread (a dead server can't freeze the shell); the agent snapshots its tool
+-    # list once, so briefly wait for in-flight discovery. Dashboard /api/ws uses mcp_startup; TUI stdio uses entry.
++    cfg = _load_cfg()
++    current = _sessions.get(sid)
++    strict_bot = bool(current and _is_bot_execution_session(current, session_id or key))
++    # Qualify the exact Bot runtime before MCP/hooks/system-prompt setup can do backend work.
++    model, runtime = _resolve_agent_model_runtime(
++        model_override, provider_override, strict_bot=strict_bot
++    )
++    if strict_bot:
++        from agent.model_access_check import require_profile_model
++        require_profile_model(
++            current.get("profile_home") or _hermes_home,
++            model=model,
++            provider=runtime.get("provider"),
++            explicit_base_url=runtime.get("base_url"),
++            explicit_api_key=runtime.get("api_key"),
++            api_mode=runtime.get("api_mode"),
++            strict=True,
++        )
++    # Load hooks alongside the same profile config used to construct this agent.
++    from agent.shell_hooks import register_from_config
++    register_from_config(cfg)
++    # MCP discovery runs in a daemon thread; the agent snapshots its tool list once.
+     for _mod in ("hermes_cli.mcp_startup", "tui_gateway.entry"):
+         with contextlib.suppress(Exception):
+             importlib.import_module(_mod).wait_for_mcp_discovery()
+-    cfg = _load_cfg()
+-    # Load hooks alongside the same profile config used to construct this agent.
+-    from agent.shell_hooks import register_from_config
+-    register_from_config(cfg)
+     system_prompt = _startup_system_prompt(cfg, session_id or key)
+-    model, runtime = _resolve_agent_model_runtime(model_override, provider_override)
+     _pr = _load_provider_routing()
+     platform = _resolve_agent_platform(platform_override)
+     ignore_rules = is_truthy_value(os.environ.get("HERMES_IGNORE_RULES"))
+@@ -2316,7 +2338,8 @@
+         session_db=session_db if session_db is not None else _get_db(), ephemeral_system_prompt=system_prompt or None,
+         checkpoints_enabled=is_truthy_value(os.environ.get("HERMES_TUI_CHECKPOINTS")),
+         pass_session_id=is_truthy_value(os.environ.get("HERMES_TUI_PASS_SESSION_ID")),
+-        skip_context_files=ignore_rules, skip_memory=ignore_rules, fallback_model=_load_fallback_model(),
++        skip_context_files=ignore_rules, skip_memory=ignore_rules,
++        fallback_model=None if strict_bot else _load_fallback_model(),
+         **_agent_cbs(sid))
+     if context_cwd_is_launch_artifact is None:
+         with _sessions_lock:
+@@ -2424,7 +2447,8 @@
+     close_on_disconnect: bool = False, display_history_prefix: list | None = None,
+     profile_home: Path | None = None, lazy: bool = False, model_override=None,
+     resume_runtime_overrides: dict | None = None, todo_state: dict | None = None,
+-    explicit_cwd: bool = False, skip_auto_continue: bool = False, internal_boot: bool = False) -> dict:
++    pending_title: str | None = None, explicit_cwd: bool = False,
++    skip_auto_continue: bool = False, internal_boot: bool = False) -> dict:
+     """A live-session record whose AIAgent is built later (lazy watch / cold resume) — _init_session's shape minus the agent."""
+     now = time.time()
+     return {
+@@ -2434,7 +2458,7 @@
+         "edit_snapshots": {}, "explicit_cwd": bool(explicit_cwd), "history": history,
+         "history_lock": threading.Lock(), "history_version": 0, "image_counter": 0,
+         "inflight_turn": None, "last_active": now, "lazy": lazy, "model_override": model_override,
+-        "pending_title": None,
++        "pending_title": pending_title,
+         "profile_home": str(profile_home) if profile_home is not None else None,
+         "resume_runtime_overrides": resume_runtime_overrides, "resume_session_id": session_key,
+         "running": False, "session_key": session_key, "show_reasoning": _load_show_reasoning(),
+diff --git a/tui_gateway/session_compression.py b/tui_gateway/session_compression.py
+--- a/tui_gateway/session_compression.py
++++ b/tui_gateway/session_compression.py
+@@ -175,7 +175,7 @@
+ def _apply_pending_model_switch(sid: str, session: dict) -> None:
+     """Apply a model switch queued (``session["pending_model_switch"]``) while a turn was running. Runs on
+     the TURN thread at turn start — nothing in flight — so the in-place swap (client rebuild) is safe. A
+-    failed switch keeps the current model and never blocks the turn."""
++    failed switches keep the current model for ordinary TUI sessions; strict Bot Chat aborts the turn."""
+     pending = session.pop("pending_model_switch", None)
+     if not pending or session.get("agent") is None:
+         return
+@@ -186,7 +186,15 @@
+         if result.get("confirm_required"):
+             _emit("error", sid, {"message": result.get("confirm_message") or result.get("warning") or ""})
+     except Exception as e:
+-        _emit("error", sid, {"message": f"Could not switch model: {e}"})
++        message = f"Could not switch model: {e}"
++        _emit("error", sid, {"message": message})
++        # A strict Bot Chat must never continue the turn on the old model after a
++        # required deferred switch failed. Keep the request for a later explicit
++        # retry; ordinary TUI sessions retain their historical best-effort behavior.
++        strict_bot = _is_bot_execution_session(session, _session_lookup_key(session, fallback=sid))
++        if strict_bot:
++            session["pending_model_switch"] = pending
++            raise RuntimeError(message) from e
+ 
+ 
+ class CompressionLockHeld(Exception):
