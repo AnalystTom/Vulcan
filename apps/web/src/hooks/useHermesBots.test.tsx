@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider, QueryObserver } from "@tanstack/react-query";
 import { WsRpcError } from "@vulcan/contracts";
+import type { HermesBotEvent } from "@vulcan/contracts";
 import type { ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -12,6 +13,7 @@ import {
   parseRoutineList,
   parseRoomList,
   readHermesRoomLog,
+  reduceHermesCompactionSession,
   routeEventInvalidation,
   resolveCanonicalChat,
   shouldRetryHermesRegistryRead,
@@ -39,6 +41,79 @@ vi.mock("../nativeApi", () => ({
 vi.mock("../components/ui/toast", () => ({
   toastManager: { add: mocks.toast },
 }));
+
+describe("Hermes compaction marker", () => {
+  const runtimeSessionId = "runtime-alpha";
+  const compacting: HermesBotEvent = {
+    type: "status.update",
+    payload: { session_id: runtimeSessionId, kind: "compacting", text: "Compacting" },
+  };
+
+  it("records a matching compacting event", () => {
+    expect(reduceHermesCompactionSession(null, runtimeSessionId, compacting)).toBe(
+      runtimeSessionId,
+    );
+  });
+
+  it("ignores compacting events for another session or without a session id", () => {
+    expect(
+      reduceHermesCompactionSession(null, runtimeSessionId, {
+        type: "status.update",
+        payload: { session_id: "runtime-beta", kind: "compacting", text: "Compacting" },
+      }),
+    ).toBeNull();
+    expect(
+      reduceHermesCompactionSession(null, runtimeSessionId, {
+        type: "status.update",
+        payload: { kind: "compacting", text: "Compacting" },
+      }),
+    ).toBeNull();
+  });
+
+  it("clears on matching message and session events", () => {
+    const active = reduceHermesCompactionSession(null, runtimeSessionId, compacting);
+    expect(
+      reduceHermesCompactionSession(active, runtimeSessionId, {
+        type: "message.complete",
+        payload: { session_id: runtimeSessionId },
+      }),
+    ).toBeNull();
+    expect(
+      reduceHermesCompactionSession(active, runtimeSessionId, {
+        type: "session.info",
+        payload: { session_id: runtimeSessionId },
+      }),
+    ).toBeNull();
+    expect(
+      reduceHermesCompactionSession(active, runtimeSessionId, {
+        type: "status.update",
+        payload: { session_id: runtimeSessionId, kind: "compacted", text: "Ready" },
+      }),
+    ).toBeNull();
+    expect(
+      reduceHermesCompactionSession(active, runtimeSessionId, {
+        type: "status.update",
+        payload: { kind: "ready", text: "Ready" },
+      }),
+    ).toBe(active);
+  });
+
+  it("clears on connection and bridge lifecycle events", () => {
+    const active = reduceHermesCompactionSession(null, runtimeSessionId, compacting);
+    expect(
+      reduceHermesCompactionSession(active, runtimeSessionId, {
+        type: "connection.changed",
+        payload: { connected: false },
+      }),
+    ).toBeNull();
+    expect(
+      reduceHermesCompactionSession(active, runtimeSessionId, {
+        type: "disconnect",
+        payload: {},
+      }),
+    ).toBeNull();
+  });
+});
 
 function renderMutations() {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });

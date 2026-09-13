@@ -3208,6 +3208,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
       useStore.getState().syncServerReadModel(currentSnapshot);
     };
 
+    let restoreScrollTopSpy = () => {};
     try {
       const scrollContainer = await waitForElement(
         () => document.querySelector<HTMLElement>("[data-chat-scroll-container='true']"),
@@ -3218,10 +3219,35 @@ describe("ChatView timeline estimator parity (full app)", () => {
       await waitForLayout();
 
       const prompt = "measure the anchor motion for this send";
+      const startedAt = performance.now();
+      let readAnchorOffset = () => null as number | null;
+      const scrollTopWrites: Array<{ t: number; value: number; offset: number | null }> = [];
+      const scrollTopDescriptor = Object.getOwnPropertyDescriptor(Element.prototype, "scrollTop");
+      expect(scrollTopDescriptor?.get).toBeDefined();
+      expect(scrollTopDescriptor?.set).toBeDefined();
+      const previousScrollTop = Object.getOwnPropertyDescriptor(scrollContainer, "scrollTop");
+      Object.defineProperty(scrollContainer, "scrollTop", {
+        configurable: true,
+        enumerable: previousScrollTop?.enumerable ?? false,
+        get: () => scrollTopDescriptor!.get!.call(scrollContainer),
+        set: (value: number) => {
+          scrollTopDescriptor!.set!.call(scrollContainer, value);
+          scrollTopWrites.push({
+            t: performance.now() - startedAt,
+            value,
+            offset: readAnchorOffset(),
+          });
+        },
+      });
+      restoreScrollTopSpy = () => {
+        if (previousScrollTop) {
+          Object.defineProperty(scrollContainer, "scrollTop", previousScrollTop);
+        } else {
+          Reflect.deleteProperty(scrollContainer, "scrollTop");
+        }
+      };
       useComposerDraftStore.getState().setPrompt(THREAD_ID, prompt);
       const sendButton = await waitForSendButton();
-      sendButton.click();
-
       const findSentRow = () => {
         const rows = document.querySelectorAll<HTMLElement>(
           "[data-message-id][data-message-role='user']",
@@ -3231,12 +3257,18 @@ describe("ChatView timeline estimator parity (full app)", () => {
         }
         return null;
       };
+      readAnchorOffset = () => {
+        const row = findSentRow();
+        return row
+          ? row.getBoundingClientRect().top - scrollContainer.getBoundingClientRect().top
+          : null;
+      };
+      sendButton.click();
       const topGapPx = Number.parseFloat(getComputedStyle(scrollContainer).paddingTop) || 0;
 
       // Sampled every frame: the regression is a single-frame hop, so polling for
       // the settled state would not see it.
       const samples: Array<{ t: number; offset: number | null }> = [];
-      const startedAt = performance.now();
       let sampling = true;
       const sample = () => {
         if (!sampling) return;
@@ -3397,12 +3429,28 @@ describe("ChatView timeline estimator parity (full app)", () => {
       // ...and it has to be a glide, not a teleport. A loaded browser runner
       // can deliver animation frames far apart, so fixed frame counts and
       // per-sample distance caps turn scheduler starvation into false failures.
-      // Requiring multiple observable positions between the endpoints still
-      // rejects a teleport while remaining independent of frame cadence.
       const approachStartOffsetPx = approach[0]?.offset ?? topGapPx;
       const intermediateApproachSamples = approach.filter(
         (entry) => entry.offset < approachStartOffsetPx - 2 && entry.offset > topGapPx + 2,
       );
+      const arrivalTimeMs = visible[firstArrivalIndex]?.t ?? Number.POSITIVE_INFINITY;
+      const intermediateAnchorOffsets = scrollTopWrites
+        .filter(
+          (entry) =>
+            entry.t <= arrivalTimeMs &&
+            entry.offset !== null &&
+            entry.offset < approachStartOffsetPx - 2 &&
+            entry.offset > topGapPx + 2,
+        )
+        .map((entry) => entry.offset!);
+      const distinctIntermediateAnchorOffsets = intermediateAnchorOffsets.filter(
+        (offset, index, offsets) =>
+          offsets.findIndex((candidate) => Math.abs(candidate - offset) <= 2) === index,
+      );
+      // The visual samples above can be sparse when the browser runner is loaded,
+      // but each hook interpolation writes and synchronously exposes the anchor's
+      // geometry. Two distinct intermediate positions prove multi-step motion;
+      // repeated writes or a one-frame hop do not.
 
       const trace = () =>
         visible.map((entry) => `${Math.round(entry.t)}:${Math.round(entry.offset)}`).join(" ");
@@ -3417,6 +3465,10 @@ describe("ChatView timeline estimator parity (full app)", () => {
       expect(approachReversals, `anchor bounced on its way up: ${trace()}`).toBeLessThanOrEqual(1);
       expect(
         intermediateApproachSamples.length,
+        `anchor had no observable progress before landing: ${trace()}`,
+      ).toBeGreaterThanOrEqual(1);
+      expect(
+        distinctIntermediateAnchorOffsets.length,
         `anchor jumped instead of gliding: ${trace()}`,
       ).toBeGreaterThanOrEqual(2);
       expect(reversals, `anchor moved back and forth after landing: ${trace()}`).toBe(0);
@@ -3426,6 +3478,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
         4,
       );
     } finally {
+      restoreScrollTopSpy();
       await mounted.cleanup();
       restoreNativeApi();
     }

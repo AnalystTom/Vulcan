@@ -1,0 +1,659 @@
+--- a/hermes_cli/mcp_config.py
++++ b/hermes_cli/mcp_config.py
+@@ -553,0 +554,2 @@
++    from hermes_cli.tools_config import _parse_enabled_flag
++
+@@ -575,3 +577 @@
+-        enabled = cfg.get("enabled", True)
+-        if isinstance(enabled, str):
+-            enabled = enabled.lower() in {"true", "1", "yes"}
++        enabled = _parse_enabled_flag(cfg.get("enabled", True), default=True)
+--- a/hermes_cli/tools_config.py
++++ b/hermes_cli/tools_config.py
+@@ -673 +673,7 @@
+-    result = explicit_passthrough - enabled_mcp_servers
++    configured_mcp_servers = {
++        str(name) for name, server_cfg in ((config or {}).get("mcp_servers") or {}).items()
++        if isinstance(server_cfg, dict)
++    }
++    # Keep unknown custom toolset names passthrough, but never retain a configured
++    # MCP name after its canonical enabled flag was revoked.
++    result = explicit_passthrough - configured_mcp_servers
+--- a/hermes_cli/tools_config_mcp.py
++++ b/hermes_cli/tools_config_mcp.py
+@@ -79 +79 @@
+-    from hermes_cli.tools_config import save_config
++    from hermes_cli.tools_config import _parse_enabled_flag, save_config
+@@ -86 +86,4 @@
+-    enabled_names = [k for k, v in mcp_servers.items() if v.get("enabled", True) not in {False, "false", "0", "no", "off"}]
++    enabled_names = [
++        k for k, v in mcp_servers.items()
++        if isinstance(v, dict) and _parse_enabled_flag(v.get("enabled", True), default=True)
++    ]
+--- a/tests/tools/test_mcp_circuit_breaker.py
++++ b/tests/tools/test_mcp_circuit_breaker.py
+@@ -17,0 +18,8 @@
++
++
++@pytest.fixture(autouse=True)
++def _allow_in_memory_mcp_handles(monkeypatch):
++    """These handler tests use in-memory servers without profile config."""
++    from tools import mcp_tool_discovery
++    monkeypatch.setattr(mcp_tool_discovery, "_server_granted_in_current_profile", lambda _name: True)
++    monkeypatch.setattr(mcp_tool_discovery, "_server_matches_current_profile", lambda _name, _server: True)
+--- a/tests/tools/test_mcp_initial_connect_shutdown.py
++++ b/tests/tools/test_mcp_initial_connect_shutdown.py
+@@ -8,0 +9,8 @@
++
++
++@pytest.fixture(autouse=True)
++def _allow_in_memory_mcp_handles(monkeypatch):
++    """These handler tests use in-memory servers without profile config."""
++    from tools import mcp_tool_discovery
++    monkeypatch.setattr(mcp_tool_discovery, "_server_granted_in_current_profile", lambda _name: True)
++    monkeypatch.setattr(mcp_tool_discovery, "_server_matches_current_profile", lambda _name, _server: True)
+--- a/tests/tools/test_mcp_lazy_start.py
++++ b/tests/tools/test_mcp_lazy_start.py
+@@ -13,0 +14,8 @@
++
++
++@pytest.fixture(autouse=True)
++def _allow_in_memory_mcp_handles(monkeypatch):
++    """These handler tests use in-memory servers without profile config."""
++    from tools import mcp_tool_discovery
++    monkeypatch.setattr(mcp_tool_discovery, "_server_granted_in_current_profile", lambda _name: True)
++    monkeypatch.setattr(mcp_tool_discovery, "_server_matches_current_profile", lambda _name, _server: True)
+--- a/tests/tools/test_mcp_multiplex_connection_keys.py
++++ b/tests/tools/test_mcp_multiplex_connection_keys.py
+@@ -91,0 +92,31 @@
++def test_oauth_connection_is_never_adopted_across_profile_scopes(two_profiles):
++    import tools.mcp_tool as core
++    from tools import mcp_tool_discovery as disc, mcp_tool_registration as reg
++
++    cfg = {"url": "https://mcp.example/oauth", "auth": "oauth",
++           "oauth": {"client_id": "client-a", "scopes": ["read"]}}
++    scope_a = two_profiles("a")
++    srv = _server("x", cfg)
++    disc._adopt_server("x", srv)
++
++    two_profiles("b")
++    with core._lock:
++        key = next(key for key, live in core._servers.items() if live is srv)
++        assert core._server_registry_scope(key) == scope_a
++    assert not reg._oauth_connection_scope_matches(srv, core._mcp_registry_scope())
++    assert reg.register_connected_into_current_scope({"x": cfg}) == 0
++
++
++def test_oauth_client_metadata_change_breaks_same_profile_route(two_profiles):
++    from tools import mcp_tool_discovery as disc, mcp_tool_registration as reg
++
++    cfg_a = {"url": "https://mcp.example/oauth", "auth": "oauth",
++             "oauth": {"client_id": "client-a", "scopes": ["read"]}}
++    cfg_b = {"url": "https://mcp.example/oauth", "auth": "oauth",
++             "oauth": {"client_id": "client-b", "scopes": ["read"]}}
++    two_profiles("a")
++    srv = _server("x", cfg_a)
++    disc._adopt_server("x", srv)
++    assert not reg._same_server_route(srv, cfg_b)
++
++
+--- a/tests/tools/test_mcp_resource_content.py
++++ b/tests/tools/test_mcp_resource_content.py
+@@ -12,0 +13,8 @@
++
++
++@pytest.fixture(autouse=True)
++def _allow_in_memory_mcp_handles(monkeypatch):
++    """These handler tests use in-memory servers without profile config."""
++    from tools import mcp_tool_discovery
++    monkeypatch.setattr(mcp_tool_discovery, "_server_granted_in_current_profile", lambda _name: True)
++    monkeypatch.setattr(mcp_tool_discovery, "_server_matches_current_profile", lambda _name, _server: True)
+--- a/tests/tools/test_mcp_stdio_fastfail_reconnect.py
++++ b/tests/tools/test_mcp_stdio_fastfail_reconnect.py
+@@ -30,0 +31,8 @@
++
++
++@pytest.fixture(autouse=True)
++def _allow_in_memory_mcp_handles(monkeypatch):
++    """These handler tests use in-memory servers without profile config."""
++    from tools import mcp_tool_discovery
++    monkeypatch.setattr(mcp_tool_discovery, "_server_granted_in_current_profile", lambda _name: True)
++    monkeypatch.setattr(mcp_tool_discovery, "_server_matches_current_profile", lambda _name, _server: True)
+--- a/tests/tools/test_mcp_structured_content.py
++++ b/tests/tools/test_mcp_structured_content.py
+@@ -8,0 +9,8 @@
++
++
++@pytest.fixture(autouse=True)
++def _allow_in_memory_mcp_handles(monkeypatch):
++    """These handler tests use in-memory servers without profile config."""
++    from tools import mcp_tool_discovery
++    monkeypatch.setattr(mcp_tool_discovery, "_server_granted_in_current_profile", lambda _name: True)
++    monkeypatch.setattr(mcp_tool_discovery, "_server_matches_current_profile", lambda _name, _server: True)
+--- a/tests/tools/test_mcp_tool.py
++++ b/tests/tools/test_mcp_tool.py
+@@ -16,0 +17,8 @@
++
++
++@pytest.fixture(autouse=True)
++def _allow_in_memory_mcp_handles(monkeypatch):
++    """Handler transport tests use in-memory servers without profile config."""
++    from tools import mcp_tool_discovery
++    monkeypatch.setattr(mcp_tool_discovery, "_server_granted_in_current_profile", lambda _name: True)
++    monkeypatch.setattr(mcp_tool_discovery, "_server_matches_current_profile", lambda _name, _server: True)
+--- a/tests/tools/test_mcp_tool_401_handling.py
++++ b/tests/tools/test_mcp_tool_401_handling.py
+@@ -13,0 +14,8 @@
++
++
++@pytest.fixture(autouse=True)
++def _allow_in_memory_mcp_handles(monkeypatch):
++    """Handler transport tests use in-memory servers without profile config."""
++    from tools import mcp_tool_discovery
++    monkeypatch.setattr(mcp_tool_discovery, "_server_granted_in_current_profile", lambda _name: True)
++    monkeypatch.setattr(mcp_tool_discovery, "_server_matches_current_profile", lambda _name, _server: True)
+--- a/tests/tools/test_mcp_tool_session_expired.py
++++ b/tests/tools/test_mcp_tool_session_expired.py
+@@ -19,0 +20,8 @@
++
++
++@pytest.fixture(autouse=True)
++def _allow_in_memory_mcp_handles(monkeypatch):
++    """Handler transport tests use in-memory servers without profile config."""
++    from tools import mcp_tool_discovery
++    monkeypatch.setattr(mcp_tool_discovery, "_server_granted_in_current_profile", lambda _name: True)
++    monkeypatch.setattr(mcp_tool_discovery, "_server_matches_current_profile", lambda _name, _server: True)
+--- a/tests/tools/test_mcp_trust_gating.py
++++ b/tests/tools/test_mcp_trust_gating.py
+@@ -25,0 +26,8 @@
++
++
++@pytest.fixture(autouse=True)
++def _allow_in_memory_mcp_handles(monkeypatch):
++    """These handler tests use in-memory servers without profile config."""
++    from tools import mcp_tool_discovery
++    monkeypatch.setattr(mcp_tool_discovery, "_server_granted_in_current_profile", lambda _name: True)
++    monkeypatch.setattr(mcp_tool_discovery, "_server_matches_current_profile", lambda _name, _server: True)
+--- /dev/null
++++ b/tests/tui_gateway/test_profiles_mcp_grants.py
+@@ -0,0 +1,296 @@
++"""Focused contract tests for profile MCP grants and raw toolset pins."""
++from __future__ import annotations
++
++import asyncio
++import copy
++import json
++from types import SimpleNamespace
++from unittest.mock import AsyncMock
++
++
++def test_profile_mcp_grant_uses_enabled_and_matches_runtime_resolver():
++    from hermes_cli.tools_config import _get_platform_tools, enabled_mcp_server_names
++    from tui_gateway.methods_profiles import _save_mcp_toggles
++    from tui_gateway.mcp_rpc_helpers import summarize_server
++
++    cfg = {
++        "mcp_servers": {
++            "safe": {"command": "python", "args": ["-c", "pass"], "disabled": False},
++            "old": {"command": "python", "args": ["-c", "pass"], "disabled": False},
++        }
++    }
++    saved = []
++    _save_mcp_toggles(cfg, ["safe"], {}, lambda value: saved.append(copy.deepcopy(value)))
++
++    persisted = saved[0]
++    assert persisted["mcp_servers"]["safe"]["enabled"] is True
++    assert persisted["mcp_servers"]["old"]["enabled"] is False
++    assert all("disabled" not in entry for entry in persisted["mcp_servers"].values())
++    assert enabled_mcp_server_names(persisted) == {"safe"}
++    assert summarize_server("safe", persisted["mcp_servers"]["safe"])["enabled"] is True
++    assert summarize_server("old", persisted["mcp_servers"]["old"])["enabled"] is False
++    assert summarize_server("legacy-string-off", {"enabled": "false"})["enabled"] is False
++    resolved = _get_platform_tools(
++        {"tools": {"enabled_toolsets": ["safe"]}, "mcp_servers": persisted["mcp_servers"]},
++        "cli",
++        include_default_mcp_servers=False,
++    )
++    assert "safe" in resolved
++    assert "old" not in resolved
++
++
++def test_profile_mcp_revoke_removes_server_from_runtime_selection():
++    from hermes_cli.tools_config import _get_platform_tools, enabled_mcp_server_names
++    from tui_gateway.methods_profiles import _save_mcp_toggles
++
++    cfg = {"mcp_servers": {"safe": {"command": "python", "enabled": True}}}
++    saved = []
++    _save_mcp_toggles(cfg, [], {}, lambda value: saved.append(copy.deepcopy(value)))
++
++    persisted = saved[0]
++    assert persisted["mcp_servers"]["safe"]["enabled"] is False
++    assert enabled_mcp_server_names(persisted) == set()
++    assert "safe" not in _get_platform_tools(
++        {"tools": {"enabled_toolsets": ["safe"]}, "mcp_servers": persisted["mcp_servers"]},
++        "cli",
++        include_default_mcp_servers=False,
++    )
++
++
++def test_profiles_describe_exposes_exact_raw_toolset_pin_and_canonical_mcp_state(
++    tmp_path, monkeypatch
++):
++    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
++    (tmp_path / "config.yaml").write_text(
++        "tools:\n"
++        "  enabled_toolsets:\n"
++        "    - custom_mcp_bundle\n"
++        "    - safe\n"
++        "mcp_servers:\n"
++        "  safe:\n"
++        "    command: python\n"
++        "    enabled: false\n",
++        encoding="utf-8",
++    )
++    from tui_gateway import server
++
++    result = server._methods["profiles.describe"]("describe", {"name": "default"})
++    payload = result["result"]
++    assert payload["enabled_toolsets"] == ["custom_mcp_bundle", "safe"]
++    assert payload["toolsets_pinned"] is True
++    assert payload["mcp_servers"] == [
++        {"name": "safe", "enabled": False, "transport": "stdio"}
++    ]
++
++    (tmp_path / "config.yaml").write_text(
++        "mcp_servers:\n"
++        "  safe:\n"
++        "    command: python\n"
++        "    enabled: false\n",
++        encoding="utf-8",
++    )
++    unpinned = server._methods["profiles.describe"]("describe", {"name": "default"})["result"]
++    assert unpinned["enabled_toolsets"] is None
++    assert unpinned["toolsets_pinned"] is False
++
++
++def test_profiles_configure_persists_canonical_mcp_grant(tmp_path, monkeypatch):
++    import yaml
++
++    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
++    (tmp_path / "config.yaml").write_text(
++        "mcp_servers:\n"
++        "  safe:\n"
++        "    command: python\n"
++        "    disabled: false\n"
++        "  old:\n"
++        "    command: python\n"
++        "    enabled: true\n",
++        encoding="utf-8",
++    )
++    from tui_gateway import server
++
++    result = server._methods["profiles.configure"](
++        "configure", {"name": "default", "enabled_mcp_servers": ["safe"]}
++    )
++    assert result["result"]["applied"]["mcp_servers"] is True
++    persisted = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
++    assert persisted["mcp_servers"]["safe"]["enabled"] is True
++    assert persisted["mcp_servers"]["old"]["enabled"] is False
++    assert all("disabled" not in entry for entry in persisted["mcp_servers"].values())
++
++
++def test_mcp_probe_management_can_test_disabled_entry_without_runtime_grant(monkeypatch):
++    from hermes_cli import mcp_config
++
++    cfg = {"command": "python", "enabled": False}
++    assert mcp_config._get_mcp_servers({"mcp_servers": {"disabled_probe": cfg}}) == {
++        "disabled_probe": cfg
++    }
++    monkeypatch.setattr(mcp_config, "_probe_single_server", lambda name, config, details=None: [("ping", "safe")])
++    assert mcp_config._probe_single_server("disabled_probe", cfg) == [("ping", "safe")]
++
++    from tui_gateway import server
++    monkeypatch.setattr(
++        mcp_config,
++        "_get_mcp_servers",
++        lambda: {"disabled_probe": cfg},
++    )
++    result = server._methods["mcp.servers.test"](
++        "test", {"name": "disabled_probe"}
++    )["result"]
++    assert result["ok"] is True
++    assert result["tools"] == [{"name": "ping", "description": "safe"}]
++
++
++def test_retained_connected_mcp_handle_is_denied_after_grant_or_pin_revocation(monkeypatch):
++    """The handler must re-read the scoped grant before dispatch, even with a live handle."""
++    from tools import mcp_tool_discovery as discovery
++    from tools.mcp_tool_handlers import _make_tool_handler
++
++    calls = []
++    connected = type("Connected", (), {"session": object()})()
++    monkeypatch.setattr(discovery, "_server_granted_in_current_profile", lambda _name: False)
++    monkeypatch.setattr(
++        discovery, "_get_connected_server_for_call",
++        lambda name: calls.append(name) or connected,
++    )
++
++    result = _make_tool_handler("grant-canary", "diagnostic_identity", 5.0)({})
++
++    assert "not enabled in the current profile" in result
++    assert calls == []
++
++
++def test_current_profile_pin_and_no_mcp_revoke_are_fail_closed(tmp_path, monkeypatch):
++    from tools.mcp_tool_discovery import _server_granted_in_current_profile
++
++    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
++    cfg = "mcp_servers:\n  grant-canary:\n    enabled: true\n    command: canary\n"
++    (tmp_path / "config.yaml").write_text(cfg + "tools:\n  enabled_toolsets:\n    - other\n", encoding="utf-8")
++    assert _server_granted_in_current_profile("grant-canary") is False
++
++    (tmp_path / "config.yaml").write_text(cfg + "tools:\n  enabled_toolsets:\n    - grant-canary\n", encoding="utf-8")
++    assert _server_granted_in_current_profile("grant-canary") is True
++
++    (tmp_path / "config.yaml").write_text(cfg + "platform_toolsets:\n  cli:\n    - no_mcp\n", encoding="utf-8")
++    assert _server_granted_in_current_profile("grant-canary") is False
++
++    # A removed server must stay denied even when a stale raw profile pin retains its name.
++    (tmp_path / "config.yaml").write_text(
++        "tools:\n  enabled_toolsets:\n    - grant-canary\n"
++        "mcp_servers: {}\n",
++        encoding="utf-8",
++    )
++    assert _server_granted_in_current_profile("grant-canary") is False
++
++
++def test_same_name_route_replacement_rejects_retained_handle(tmp_path, monkeypatch):
++    from tools.mcp_tool_discovery import _server_matches_current_profile
++
++    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
++    (tmp_path / "config.yaml").write_text(
++        "mcp_servers:\n  grant-canary:\n    url: http://new.example.test/mcp\n    enabled: true\n",
++        encoding="utf-8",
++    )
++    retained = SimpleNamespace(_config={"url": "http://old.example.test/mcp"})
++
++    assert _server_matches_current_profile("grant-canary", retained) is False
++
++
++def test_retained_connected_mcp_utility_handle_is_denied_after_revoke(monkeypatch):
++    from tools import mcp_tool_discovery as discovery
++    from tools.mcp_tool_handlers import _make_list_resources_handler
++
++    calls = []
++    connected = type("Connected", (), {"session": object()})()
++    monkeypatch.setattr(discovery, "_server_granted_in_current_profile", lambda _name: False)
++    monkeypatch.setattr(
++        discovery, "_get_connected_server_for_call",
++        lambda name: calls.append(name) or connected,
++    )
++
++    result = _make_list_resources_handler("grant-canary", 5.0)({})
++
++    assert "not enabled in the current profile" in result
++    assert calls == []
++
++
++
++def test_revoke_while_waiting_for_rpc_lock_blocks_backend_call(monkeypatch):
++    """The post-lock check prevents a revoke racing with an in-flight handler wait."""
++    from tools import mcp_tool_discovery as discovery
++    import tools.mcp_tool_handlers as handlers
++
++    allowed = True
++    backend = AsyncMock()
++    backend.call_tool = AsyncMock(return_value=SimpleNamespace(content=[], isError=False))
++    connected = SimpleNamespace(session=backend, _config={})
++    monkeypatch.setattr(discovery, "_server_granted_in_current_profile", lambda _name: allowed)
++    monkeypatch.setattr(discovery, "_server_matches_current_profile", lambda _name, _server: True)
++    monkeypatch.setattr(discovery, "_get_connected_server_for_call", lambda _name: connected)
++
++    def dispatch_with_revoke(_server_name, server, _op, call, _timeout, _recoverers, _failure, **_kwargs):
++        async def scenario():
++            nonlocal allowed
++            server._rpc_lock = asyncio.Lock()
++            await server._rpc_lock.acquire()
++            pending = asyncio.create_task(call())
++            await asyncio.sleep(0)
++            allowed = False
++            server._rpc_lock.release()
++            return await pending
++        return asyncio.run(scenario())
++
++    monkeypatch.setattr(handlers, "_dispatch", dispatch_with_revoke)
++    result = handlers._make_tool_handler("grant-canary", "diagnostic_identity", 5.0)({})
++
++    assert json.loads(result)["error"]
++    backend.call_tool.assert_not_awaited()
++
++
++def test_retained_handle_without_route_identity_is_denied(monkeypatch):
++    from tools import mcp_tool_discovery as discovery
++
++    configured = {"url": "http://current.example.test/mcp"}
++    monkeypatch.setattr(discovery._config, "_load_mcp_config", lambda: {"safe": configured})
++    for retained in (SimpleNamespace(), SimpleNamespace(_config=None),
++                     SimpleNamespace(_config={}), SimpleNamespace(_config="invalid")):
++        assert discovery._server_matches_current_profile("safe", retained) is False
++    assert discovery._server_matches_current_profile("safe", SimpleNamespace(_config=configured)) is True
++
++
++def test_lazy_start_rechecks_grant_and_route_on_execution_loop(monkeypatch):
++    from tools import mcp_tool_discovery as discovery
++    import tools.mcp_tool as core
++
++    original = {"command": "diagnostic-command", "lazy": True}
++    for change in ("revoke", "replace", "none"):
++        state = {"granted": True, "config": original}
++        key = discovery._server_key("lazy-grant-canary")
++        monkeypatch.setattr(core, "_servers", {})
++        monkeypatch.setattr(core, "_lazy_server_configs", {key: original})
++        monkeypatch.setattr(core, "_server_connecting", set())
++        monkeypatch.setattr(discovery, "_connect_cooldown_active", lambda _name: False)
++        monkeypatch.setattr(discovery, "_server_granted_in_current_profile", lambda _name: state["granted"])
++        monkeypatch.setattr(discovery._config, "_load_mcp_config", lambda: {"lazy-grant-canary": state["config"]})
++        monkeypatch.setattr(discovery._loop, "_ensure_mcp_loop", lambda: None)
++        calls = []
++
++        async def connect(name, config):
++            calls.append((name, config))
++            core._servers[key] = SimpleNamespace(session=object())
++            return []
++
++        def run(factory, **kwargs):
++            if change == "revoke":
++                state["granted"] = False
++            elif change == "replace":
++                state["config"] = {"command": "replacement-command", "lazy": True}
++            return asyncio.run(factory())
++
++        monkeypatch.setattr(discovery, "_discover_and_register_server", connect)
++        monkeypatch.setattr(discovery._loop, "_run_on_mcp_loop", run)
++        assert discovery._ensure_lazy_server_connected("lazy-grant-canary") is (change == "none")
++        assert len(calls) == (1 if change == "none" else 0)
++        assert key not in core._server_connecting
+--- a/tools/mcp_tool_discovery.py
++++ b/tools/mcp_tool_discovery.py
+@@ -163,3 +163,18 @@
+-    try:
+-        _loop._run_on_mcp_loop(lambda: _discover_and_register_server(server_name, config),
+-                               timeout=float(connect_timeout) + 30.0)
++    async def connect_if_still_granted():
++        # Recheck on the execution loop: a cached start may wait after admission.
++        if not _server_granted_in_current_profile(server_name):
++            return False
++        current = (_config._load_mcp_config() or {}).get(server_name)
++        if (not isinstance(current, dict)
++                or _registration._connection_identity(current) != _registration._connection_identity(config)):
++            return False
++        await _discover_and_register_server(server_name, config)
++        return True
++
++    try:
++        connected = _loop._run_on_mcp_loop(connect_if_still_granted,
++                                           timeout=float(connect_timeout) + 30.0)
++        if connected is False:
++            with _core._lock:
++                _core._server_connecting.discard(key)
++            return False
+@@ -475,0 +491,46 @@
++def _server_granted_in_current_profile(server_name: str) -> bool:
++    """Re-read the current profile's MCP grant before every registered-tool call.
++
++    The connection registry may be shared across profile scopes, so a live connection
++    is not itself authorization for the caller's current profile. Use the same resolver
++    as agent construction so ``enabled`` flags, profile pins, and ``no_mcp`` keep one
++    contract. Any config read/resolve failure fails closed.
++    """
++    try:
++        from hermes_cli.config import load_config
++        from hermes_cli.tools_config import _get_platform_tools, enabled_mcp_server_names
++        config = load_config() or {}
++        # MCP registry dispatch is built by the CLI agent path for TUI, gateway, and one-shot
++        # sessions. The profile-wide tools.enabled_toolsets pin still applies to every path;
++        # when it is absent, resolve the CLI platform list used at agent construction.
++        if str(server_name) not in enabled_mcp_server_names(config):
++            return False
++        enabled = _get_platform_tools(config, "cli", include_default_mcp_servers=True)
++        return str(server_name) in enabled
++    except Exception:  # pragma: no cover - defensive fail-closed boundary
++        logger.warning("MCP grant check failed for '%s'; denying call", server_name)
++        return False
++
++
++
++def _server_matches_current_profile(server_name: str, server) -> bool:
++    """Ensure a retained handle still targets the current profile's configured route.
++
++    A remove-and-add with the same name can leave an old live connection in the shared
++    registry. Reuse the registration layer's route/auth identity comparison rather than
++    inventing a credential check here; an absent or changed config fails closed.
++    """
++    if not isinstance(getattr(server, "_config", None), dict) or not getattr(server, "_config", {}):
++        return False
++    try:
++        expected = (_config._load_mcp_config() or {}).get(str(server_name))
++        if not isinstance(expected, dict):
++            return False
++        from tools.mcp_tool_registration import _oauth_connection_scope_matches, _same_server_route
++        return (_same_server_route(server, expected)
++                and _oauth_connection_scope_matches(server, _core._mcp_registry_scope()))
++    except Exception:
++        logger.warning("MCP route check failed for '%s'; denying call", server_name)
++        return False
++
++
+--- a/tools/mcp_tool_handlers.py
++++ b/tools/mcp_tool_handlers.py
+@@ -82,0 +83,10 @@
++def _current_grant_error(server_name: str) -> Optional[str]:
++    """Fail closed when the current profile no longer grants this MCP server."""
++    from tools import mcp_tool_discovery as _discovery
++    if _discovery._server_granted_in_current_profile(server_name):
++        return None
++    return tool_error(
++        f"MCP server '{server_name}' is not enabled in the current profile; the tool call was NOT run."
++    )
++
++
+@@ -87,0 +98,3 @@
++    grant_error = _current_grant_error(server_name)
++    if grant_error is not None:
++        return None, grant_error
+@@ -91,0 +105,2 @@
++        if not _discovery._server_matches_current_profile(server_name, server):
++            return None, tool_error(f"MCP server '{server_name}' connection no longer matches the current profile; reload it before calling.")
+@@ -481,0 +497,8 @@
++                # The first check protects connection acquisition; this one closes the
++                # revoke-while-waiting race and is repeated by every recovery retry.
++                grant_error = _current_grant_error(server_name)
++                if grant_error is not None:
++                    return grant_error
++                from tools import mcp_tool_discovery as _discovery
++                if not _discovery._server_matches_current_profile(server_name, server):
++                    return tool_error(f"MCP server '{server_name}' connection no longer matches the current profile; reload it before calling.")
+@@ -506,0 +530,3 @@
++            grant_error = _current_grant_error(server_name)
++            if grant_error is not None:
++                return grant_error
+@@ -515,0 +542,8 @@
++                    # Recheck after waiting for the RPC lock so a revoke cannot race into
++                    # a retained connection, including utility calls and recovery retries.
++                    grant_error = _current_grant_error(server_name)
++                    if grant_error is not None:
++                        return grant_error
++                    from tools import mcp_tool_discovery as _discovery
++                    if not _discovery._server_matches_current_profile(server_name, server):
++                        return tool_error(f"MCP server '{server_name}' connection no longer matches the current profile; reload it before calling.")
+--- a/tools/mcp_tool_registration.py
++++ b/tools/mcp_tool_registration.py
+@@ -403,4 +403 @@
+-    """What makes one live connection reusable for another profile: the route fingerprint PLUS
+-    everything that authenticates it (``config_fingerprint`` deliberately excludes credentials so
+-    the schema cache survives a token rotation). Two profiles pointing at the same URL with different
+-    headers/env/auth are two identities; borrowing across them would call tools as the other user."""
++    """Identify a reusable handle by route and authentication configuration."""
+@@ -413 +410,22 @@
+-            (config.get("auth") or "").lower().strip())
++            (config.get("auth") or "").lower().strip(), _frozen(config.get("oauth")))
++
++
++def _oauth_connection_scope_matches(server: Any, current_scope: Optional[str] = None, *, _lock_held: bool = False) -> bool:
++    """OAuth handles are owned by one profile home; never overlay them into another scope."""
++    config = getattr(server, "_config", None)
++    if not isinstance(config, dict) or (config.get("auth") or "").lower().strip() != "oauth":
++        return True
++    if current_scope is None:
++        current_scope = _core._mcp_registry_scope()
++    def owner_scopes():
++        return {
++            _core._server_registry_scope(key)
++            for key, live in _core._servers.items() if live is server
++        }
++    scopes = owner_scopes() if _lock_held else _owner_scopes_locked(owner_scopes)
++    return bool(scopes) and scopes == {current_scope}
++
++
++def _owner_scopes_locked(owner_scopes):
++    with _core._lock:
++        return owner_scopes()
+@@ -451 +469,3 @@
+-                    or getattr(server, "session", None) is None or not _same_server_route(server, config)):
++                    or getattr(server, "session", None) is None
++                    or not _same_server_route(server, config)
++                    or not _oauth_connection_scope_matches(server, scope, _lock_held=True)):
+@@ -466 +486,2 @@
+-                      and _same_server_route(live, config)]
++                      and _same_server_route(live, config)
++                      and _oauth_connection_scope_matches(live, scope, _lock_held=True)]
+--- a/tui_gateway/mcp_rpc_helpers.py
++++ b/tui_gateway/mcp_rpc_helpers.py
+@@ -28,0 +29 @@
++    from hermes_cli.tools_config import _parse_enabled_flag
+@@ -45 +46 @@
+-        "enabled": cfg.get("enabled", True) is not False,
++        "enabled": _parse_enabled_flag(cfg.get("enabled", True), default=True),
+--- a/tui_gateway/methods_profiles.py
++++ b/tui_gateway/methods_profiles.py
+@@ -421,0 +422 @@
++        from hermes_cli.tools_config import _parse_enabled_flag
+@@ -423 +424 @@
+-            {"name": str(srv_name), "enabled": not is_truthy_value(entry.get("disabled", False)),
++            {"name": str(srv_name), "enabled": _parse_enabled_flag(entry.get("enabled", True), default=True),
+@@ -435 +436,3 @@
+-            "toolsets_pinned": pinned_set is not None, "mcp_servers": mcp_out})
++            "toolsets_pinned": pinned_set is not None,
++            "enabled_toolsets": sorted(pinned_set) if pinned_set is not None else None,
++            "mcp_servers": mcp_out})
+@@ -527,2 +529,0 @@
+-        if isinstance(mcp_cfg.get(srv), dict):
+-            mcp_cfg[srv].pop("disabled", None)
+@@ -530,2 +531,5 @@
+-        if srv not in wanted and isinstance(entry, dict):
+-            entry["disabled"] = True
++        if isinstance(entry, dict):
++            # enabled is the native resolver canonical flag. Normalize legacy
++            # disabled state so editor, status, probes, and runtime agree.
++            entry["enabled"] = srv in wanted
++            entry.pop("disabled", None)

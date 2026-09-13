@@ -7,7 +7,7 @@
 // Exports: HermesBotChat, HermesGroupRoom
 
 import type { HermesBotReadFileResult } from "@vulcan/contracts";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import ChatMarkdown from "~/components/ChatMarkdown";
 import { Alert, AlertDescription, AlertTitle } from "~/components/ui/alert";
@@ -27,6 +27,8 @@ import { Textarea } from "~/components/ui/textarea";
 import {
   useHermesChat,
   useHermesChatMutations,
+  reduceHermesCompactionSession,
+  useHermesEvent,
   useHermesRoomLog,
   useHermesRoomMutations,
   useHermesRoomState,
@@ -237,8 +239,26 @@ export function HermesBotChat({ profile }: { profile: HermesProfile }) {
   const actions = useHermesChatMutations(profile.name);
   const [draft, setDraft] = useState("");
   const [deliveryUnconfirmed, setDeliveryUnconfirmed] = useState(false);
+  const [compactionSessionId, setCompactionSessionId] = useState<string | null>(null);
   const label = hermesProfileLabel(profile);
   const snapshot = chat.data;
+  const runtimeSessionId = snapshot?.runtimeSessionId ?? null;
+  const handleHermesEvent = useCallback(
+    (event: Parameters<typeof reduceHermesCompactionSession>[2]) => {
+      if (!snapshot?.running) return;
+      setCompactionSessionId((current) =>
+        reduceHermesCompactionSession(current, runtimeSessionId, event),
+      );
+    },
+    [runtimeSessionId, snapshot?.running],
+  );
+  useHermesEvent(handleHermesEvent);
+  useEffect(() => {
+    setCompactionSessionId(null);
+  }, [runtimeSessionId]);
+  useEffect(() => {
+    if (!snapshot?.running) setCompactionSessionId(null);
+  }, [snapshot?.running]);
   const messageCount =
     snapshot?.messages.filter((message) => message.role === "user" || message.role === "assistant")
       .length ?? 0;
@@ -264,7 +284,11 @@ export function HermesBotChat({ profile }: { profile: HermesProfile }) {
         {snapshot?.failure ? (
           <StatusPill tone="error">Needs attention</StatusPill>
         ) : snapshot?.running ? (
-          <StatusPill tone="info">Running</StatusPill>
+          <StatusPill tone="info">
+            {compactionSessionId !== null && compactionSessionId === snapshot.runtimeSessionId
+              ? "Summarizing history"
+              : "Running"}
+          </StatusPill>
         ) : null}
         {snapshot?.running ? (
           <Button

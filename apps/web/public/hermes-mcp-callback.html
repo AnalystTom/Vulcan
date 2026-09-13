@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"
+    />
+    <title>Return to Vulcan</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: system-ui, sans-serif;
+      }
+      body {
+        max-width: 32rem;
+        margin: 12vh auto;
+        padding: 1.5rem;
+        line-height: 1.5;
+      }
+      h1 {
+        font-size: 1.25rem;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Return to Vulcan</h1>
+    <p id="status" role="status">Returning the sign-in response…</p>
+    <script>
+      const params = new URLSearchParams(location.search);
+      history.replaceState(null, "", location.pathname);
+      const status = document.getElementById("status");
+      const state = params.get("state");
+      const code = params.get("code");
+      const error = params.get("error");
+      if (
+        !state ||
+        state.length > 4096 ||
+        (!code && !error) ||
+        (code && code.length > 8192) ||
+        (error && error.length > 2048) ||
+        typeof BroadcastChannel === "undefined"
+      ) {
+        status.textContent =
+          "This sign-in response cannot be returned. Start sign-in again from Vulcan.";
+      } else {
+        const channel = new BroadcastChannel("vulcan-hermes-mcp-oauth:" + state);
+        const timeout = setTimeout(() => {
+          channel.close();
+          status.textContent =
+            "The Vulcan sign-in tab did not respond. Return to it and check the connection before trying again.";
+        }, 15000);
+        channel.onmessage = ({ data }) => {
+          if (
+            data?.type !== "hermes-mcp-oauth-result" ||
+            data.state !== state ||
+            typeof data.accepted !== "boolean"
+          )
+            return;
+          clearTimeout(timeout);
+          channel.close();
+          status.textContent = data.accepted
+            ? "The response was returned. Go back to Vulcan to check whether the connection succeeded."
+            : "The response was rejected. Return to Vulcan to check the sign-in error.";
+        };
+        channel.postMessage({ type: "hermes-mcp-oauth-callback", state, code, error });
+      }
+    </script>
+  </body>
+</html>

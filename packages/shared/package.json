@@ -4,6 +4,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./hermesSetup": {
+      "types": "./src/hermesSetup.ts",
+      "import": "./src/hermesSetup.ts"
+    },
     "./workflowYaml": {
       "types": "./src/workflowYaml.ts",
       "import": "./src/workflowYaml.ts"

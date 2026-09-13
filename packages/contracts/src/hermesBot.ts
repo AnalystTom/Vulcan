@@ -36,6 +36,15 @@ export const HERMES_BOT_METHODS = [
   "cron.manage",
   "model.options",
   "model.check",
+  "mcp.catalog",
+  "mcp.servers.list",
+  "mcp.servers.add",
+  "mcp.servers.test",
+  "mcp.servers.remove",
+  "mcp.servers.oauth.start",
+  "mcp.servers.oauth.poll",
+  "mcp.servers.oauth.cancel",
+  "mcp.servers.oauth.callback",
 ] as const;
 
 export const HermesBotMethod = Schema.Literals(HERMES_BOT_METHODS);

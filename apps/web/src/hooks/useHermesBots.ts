@@ -10,7 +10,8 @@
 //          useHermesProfileDetail, useHermesModelCatalog, useHermesProfileMutations,
 //          useHermesChat, useHermesChatMutations, useHermesRooms, useHermesRoomState,
 //          useHermesRoomLog, useHermesRoomMutations, useHermesRoutines,
-//          useHermesRoutineMutations, hermesTimeToIso, HERMES_BOT_CHAT_TITLE, HERMES_UI_META_KEY
+//          useHermesRoutineMutations, reduceHermesCompactionSession, hermesTimeToIso,
+//          HERMES_BOT_CHAT_TITLE, HERMES_UI_META_KEY
 
 import type {
   HermesBotCapabilities,
@@ -40,6 +41,41 @@ export type HermesCapabilities = HermesBotCapabilities;
 export type HermesBotsStatus = HermesBotStatus;
 export type HermesBotsEvent = HermesBotEvent;
 export type HermesBotsNativeApi = NonNullable<NativeApi["hermesBots"]>;
+
+export function reduceHermesCompactionSession(
+  currentSessionId: string | null,
+  runtimeSessionId: string | null,
+  event: HermesBotsEvent,
+): string | null {
+  if (event.type === "disconnect" || event.type === "connection.changed") {
+    return null;
+  }
+
+  const sessionId = event.payload.session_id;
+  const eventSessionId = typeof sessionId === "string" && sessionId.length > 0 ? sessionId : null;
+  if (event.type === "status.update" && event.payload.kind === "compacting") {
+    return eventSessionId === runtimeSessionId && eventSessionId !== null
+      ? eventSessionId
+      : currentSessionId;
+  }
+
+  if (
+    eventSessionId !== null &&
+    eventSessionId === runtimeSessionId &&
+    (event.type === "status.update" ||
+      event.type === "message.start" ||
+      event.type === "message.delta" ||
+      event.type === "message.interim" ||
+      event.type === "message.complete" ||
+      event.type === "session.info" ||
+      event.type === "session.resume_progress" ||
+      event.type === "error")
+  ) {
+    return null;
+  }
+
+  return currentSessionId;
+}
 
 /** Null when this server build has no Hermes bridge; the legacy Bots view stays in charge. */
 export function readHermesBotsApi(): HermesBotsNativeApi | null {
@@ -244,6 +280,7 @@ export interface HermesProfileDetail {
     enabled: boolean;
   }[];
   readonly toolsetsPinned: boolean;
+  readonly enabledToolsets: readonly string[] | null;
   readonly mcpServers: readonly { name: string; enabled: boolean; transport: string }[];
 }
 
@@ -279,6 +316,11 @@ export function parseProfileDetail(body: unknown): HermesProfileDetail {
         : [];
     }),
     toolsetsPinned: bool(root.toolsets_pinned) ?? false,
+    enabledToolsets:
+      Array.isArray(root.enabled_toolsets) &&
+      root.enabled_toolsets.every((entry) => typeof entry === "string" && entry.length > 0)
+        ? [...root.enabled_toolsets]
+        : null,
     mcpServers: list(root.mcp_servers).flatMap((entry) => {
       const row = rec(entry);
       const name = row ? str(row.name) : null;

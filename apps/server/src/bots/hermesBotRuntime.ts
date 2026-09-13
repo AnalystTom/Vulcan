@@ -1,12 +1,14 @@
 import type {
   HermesBotConnectInput,
   HermesBotEvent,
+  HermesBotMethod,
   HermesBotReadFileInput,
   HermesBotReadFileResult,
   HermesBotRequest,
   HermesBotStatus,
 } from "@vulcan/contracts";
 import { Data, Effect, Layer, PubSub, Schema, Semaphore, ServiceMap, Stream } from "effect";
+import { hermesSetupUrl as setupHttpUrl } from "@vulcan/shared/hermesSetup";
 
 import { ServerSecretStore } from "../auth/Services/ServerSecretStore";
 import { createHermesGatewayClient, type HermesGatewayClient } from "./hermesGatewayClient";
@@ -63,6 +65,167 @@ export function resolveHermesConnection(
 const HERMES_REPORT_MAX_BYTES = 512 * 1024;
 const HERMES_FILE_RESPONSE_MAX_BYTES = 1_000_000;
 const HERMES_FILE_READ_TIMEOUT_MS = 15_000;
+
+const HERMES_SETUP_METHODS = new Set([
+  "mcp.catalog",
+  "mcp.servers.list",
+  "mcp.servers.add",
+  "mcp.servers.test",
+  "mcp.servers.remove",
+  "mcp.servers.oauth.start",
+  "mcp.servers.oauth.poll",
+  "mcp.servers.oauth.cancel",
+  "mcp.servers.oauth.callback",
+]);
+
+type HermesSetupRecord = Schema.JsonObject;
+
+function setupRecord(value: unknown): HermesSetupRecord | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as HermesSetupRecord)
+    : null;
+}
+
+function setupString(value: unknown, maxLength = 2_048): string | null {
+  return typeof value === "string" && value.length > 0 && value.length <= maxLength ? value : null;
+}
+
+function setupBoolean(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
+}
+
+function setupNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function setupInvalidResponse(): never {
+  throw new Error("Hermes returned an invalid setup response.");
+}
+
+function setupRows(root: HermesSetupRecord, key: string): unknown[] {
+  return Array.isArray(root[key]) ? root[key] : setupInvalidResponse();
+}
+
+function setupToolNames(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    if (typeof entry === "string" && entry.length <= 2_048) return [entry];
+    const name = setupRecord(entry)?.name;
+    return typeof name === "string" && name.length > 0 && name.length <= 2_048 ? [name] : [];
+  });
+}
+
+function setupError(value: unknown): string | null {
+  return setupRecord(value)?.ok === false ? "Hermes setup request failed." : null;
+}
+
+function sanitizeMcpServer(value: unknown): Schema.Json | null {
+  const row = setupRecord(value);
+  const name = setupString(row?.name);
+  if (!row || !name) return null;
+  const auth = row.auth === "oauth" || row.auth === "header" ? row.auth : null;
+  return {
+    name,
+    transport: setupString(row.transport) ?? "unknown",
+    ...(auth ? { auth } : {}),
+    ...(typeof row.oauth_tokens_present === "boolean"
+      ? { oauth_tokens_present: row.oauth_tokens_present }
+      : {}),
+    tools: setupToolNames(row.tools),
+  };
+}
+
+export function sanitizeHermesSetupResponse(
+  method: HermesBotMethod,
+  value: Schema.Json,
+): Schema.Json {
+  if (!HERMES_SETUP_METHODS.has(method)) return value;
+  const root = setupRecord(value);
+  if (!root) setupInvalidResponse();
+
+  if (method === "mcp.catalog") {
+    return {
+      servers: setupRows(root, "servers").flatMap((entry) => {
+        const row = setupRecord(entry);
+        const name = setupString(row?.name);
+        if (!row || !name) setupInvalidResponse();
+        return [
+          {
+            name,
+            description: setupString(row.description) ?? "",
+            installed: setupBoolean(row.installed) ?? false,
+            enabled: setupBoolean(row.enabled) ?? false,
+            requires: Array.isArray(row.requires)
+              ? row.requires.filter((key): key is string => typeof key === "string")
+              : [],
+            transport: setupString(row.transport) ?? "unknown",
+          },
+        ];
+      }),
+    };
+  }
+
+  if (method === "mcp.servers.list" || method === "mcp.servers.add") {
+    const serverRows = method === "mcp.servers.add" ? [root.server] : setupRows(root, "servers");
+    if (method === "mcp.servers.add" && !setupRecord(root.server)) setupInvalidResponse();
+    const servers = serverRows.flatMap((entry) => {
+      const safe = sanitizeMcpServer(entry);
+      if (!safe) setupInvalidResponse();
+      return [safe];
+    });
+    return {
+      ...(typeof root.ok === "boolean" ? { ok: root.ok } : {}),
+      ...(setupString(root.name) ? { name: root.name } : {}),
+      ...(method === "mcp.servers.add" ? { server: servers[0] ?? null } : { servers }),
+      ...(setupError(value) ? { error: setupError(value) } : {}),
+    };
+  }
+
+  if (method === "mcp.servers.test") {
+    if (typeof root.ok !== "boolean" || !Array.isArray(root.tools)) setupInvalidResponse();
+    const ok = setupBoolean(root.ok) ?? false;
+    return {
+      ok,
+      tools: setupToolNames(root.tools),
+      ...(setupNumber(root.prompts) !== null ? { prompts: root.prompts } : {}),
+      ...(setupNumber(root.resources) !== null ? { resources: root.resources } : {}),
+      ...(typeof root.oauth_needed === "boolean" ? { oauth_needed: root.oauth_needed } : {}),
+      ...(typeof root.oauth_tokens_present === "boolean"
+        ? { oauth_tokens_present: root.oauth_tokens_present }
+        : {}),
+      ...(ok ? {} : { error: "MCP server test failed." }),
+    };
+  }
+
+  if (method === "mcp.servers.remove") {
+    return {
+      ...(typeof root.ok === "boolean" ? { ok: root.ok } : {}),
+      ...(typeof root.removed === "boolean" ? { removed: root.removed } : {}),
+      ...(setupError(value) ? { error: setupError(value) } : {}),
+    };
+  }
+
+  if (method.startsWith("mcp.servers.oauth.")) {
+    if (typeof root.ok !== "boolean") setupInvalidResponse();
+    const status =
+      root.status === "pending" || root.status === "approved" || root.status === "error"
+        ? root.status
+        : undefined;
+    if (method === "mcp.servers.oauth.poll" && !status) setupInvalidResponse();
+    return {
+      ...(typeof root.ok === "boolean" ? { ok: root.ok } : {}),
+      ...(setupString(root.session_id) ? { session_id: root.session_id } : {}),
+      ...(status ? { status } : {}),
+      ...(setupHttpUrl(root.auth_url) ? { auth_url: root.auth_url } : {}),
+      ...(setupString(root.flow) ? { flow: root.flow } : {}),
+      ...(status === "error" ? { error_message: "MCP authorization did not complete." } : {}),
+      ...(status === "approved" ? { tools: setupToolNames(root.tools) } : {}),
+      ...(typeof root.cancelled === "boolean" ? { cancelled: root.cancelled } : {}),
+    };
+  }
+
+  setupInvalidResponse();
+}
 
 function hermesHttpFileUrl(connectionUrl: string, path: string): string {
   const url = new URL(connectionUrl);
@@ -415,7 +578,25 @@ const makeHermesBotRuntime = Effect.gen(function* () {
           return yield* attempt(() => attach(connection));
         }),
       );
-      return yield* attempt(() => active.request(input.method, input.params));
+      return yield* attempt(async () => {
+        try {
+          return sanitizeHermesSetupResponse(
+            input.method,
+            await active.request(input.method, input.params),
+          );
+        } catch (cause) {
+          if (HERMES_SETUP_METHODS.has(input.method)) {
+            if (
+              cause instanceof Error &&
+              cause.message === "Hermes returned an invalid setup response."
+            ) {
+              throw cause;
+            }
+            throw new Error("Hermes setup request failed.");
+          }
+          throw cause;
+        }
+      });
     });
 
   const readFile = (input: HermesBotReadFileInput) =>

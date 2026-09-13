@@ -48,6 +48,7 @@ import { BotIcon, PlusIcon, UsersIcon } from "~/lib/icons";
 import { cn } from "~/lib/utils";
 
 import { HermesBotChat, HermesGroupRoom } from "./HermesBotConversation";
+import { HermesConnectionsPanel } from "./HermesConnectionsPanel";
 import {
   ErrorNotice,
   EvidenceDisclosure,
@@ -565,9 +566,11 @@ function ProfileEditorForm({
   const [soul, setSoul] = useState(detail.soul);
   const [soulOpen, setSoulOpen] = useState(false);
   const [model, setModel] = useState({ provider: "", model: "" });
-  const [toolsets, setToolsets] = useState<readonly string[]>(
-    detail.toolsets.filter((entry) => entry.enabled).map((entry) => entry.name),
-  );
+  const savedToolsets =
+    detail.enabledToolsets ??
+    detail.toolsets.filter((entry) => entry.enabled).map((entry) => entry.name);
+  const toolSelectionUnavailable = detail.toolsetsPinned && detail.enabledToolsets === null;
+  const [toolsets, setToolsets] = useState<readonly string[]>(savedToolsets);
   const [skillsEnabled, setSkillsEnabled] = useState<readonly string[]>(
     detail.skills.filter((entry) => entry.enabled).map((entry) => entry.name),
   );
@@ -575,10 +578,7 @@ function ProfileEditorForm({
   const [notApplied, setNotApplied] = useState<readonly string[]>([]);
   const [avatarError, setAvatarError] = useState<string | null>(null);
 
-  const initialToolsets = detail.toolsets
-    .filter((entry) => entry.enabled)
-    .map((entry) => entry.name)
-    .join("|");
+  const initialToolsets = savedToolsets.join("|");
   const initialSkills = detail.skills
     .filter((entry) => entry.enabled)
     .map((entry) => entry.name)
@@ -720,6 +720,7 @@ function ProfileEditorForm({
           </button>
           <DisclosureRegion open={soulOpen}>
             <Textarea
+              aria-label="Personality (SOUL.md)"
               className="mt-2 font-mono"
               value={soul}
               onChange={(event) => setSoul(event.target.value)}
@@ -783,6 +784,7 @@ function ProfileEditorForm({
                 className="mt-1"
                 type="checkbox"
                 checked={toolsets.includes(toolset.name)}
+                disabled={busy || toolSelectionUnavailable}
                 onChange={(event) =>
                   setToolsets((current) =>
                     event.target.checked
@@ -806,6 +808,11 @@ function ProfileEditorForm({
             </p>
           ) : null}
         </div>
+        {toolSelectionUnavailable ? (
+          <p className="text-xs text-muted-foreground">
+            Update Hermes to expose the complete saved tool selection before changing these grants.
+          </p>
+        ) : null}
         {emptyToolsetsEdited ? (
           <p className="text-xs text-destructive">
             Select at least one toolset before saving. An empty selection restores gateway defaults.
@@ -879,11 +886,14 @@ function ProfileEditor({ profile }: { profile: HermesProfile }) {
     );
   }
   return (
-    <ProfileEditorForm
-      key={`${profile.name}:${detail.dataUpdatedAt}`}
-      profile={profile}
-      detail={detail.data}
-    />
+    <div className="space-y-6">
+      <ProfileEditorForm
+        key={`${profile.name}:${detail.dataUpdatedAt}`}
+        profile={profile}
+        detail={detail.data}
+      />
+      <HermesConnectionsPanel key={profile.name} profile={profile.name} />
+    </div>
   );
 }
 
