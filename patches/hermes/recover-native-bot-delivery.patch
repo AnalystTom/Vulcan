@@ -1,0 +1,1922 @@
+diff --git a/cli.py b/cli.py
+index 58702f1967..3e1112df6f 100644
+--- a/cli.py
++++ b/cli.py
+@@ -960,6 +960,11 @@ def _wait_for_oneshot_background_completions(cli) -> None:
+     from tools.process_registry import process_registry
+ 
+     _agent, task_id = _oneshot_agent_and_session(cli)
++    if getattr(cli, "_bot_live_delivery_consumer", False):
++        from hermes_cli.cli_bot_live_delivery import wait_for_background_completions
++
++        wait_for_background_completions(cli)
++        return
+     result = process_registry.wait_for_pending_completions(None)
+     if result.get("waited"):
+         logger.info(
+@@ -988,6 +993,12 @@ def _finalize_single_query(cli) -> None:
+         _notify_single_query_session_finalize(cli)
+         _run_cleanup(notify_session_finalize=False)
+     finally:
++        if getattr(cli, "_bot_live_delivery_consumer", False):
++            try:
++                from hermes_cli.cli_bot_live_delivery import retire_live_owner_for_cli
++                retire_live_owner_for_cli(cli)
++            except Exception:
++                logger.debug("one-shot Bot Chat owner retirement failed", exc_info=True)
+         cli._release_active_session()
+ 
+ 
+@@ -2959,14 +2970,22 @@ class HermesCLI(CLIProcessNotificationsMixin, CLIAgentSetupMixin, CLICommandsMix
+             return True
+         try:
+             from hermes_cli.active_sessions import format_refusal_stderr, try_acquire_active_session
++            from hermes_cli.cli_bot_live_delivery import is_bot_live_delivery_consumer
+ 
++            self._bot_live_delivery_consumer = bool(is_bot_live_delivery_consumer(self))
++            if self._bot_live_delivery_consumer:
++                self._bot_live_delivery_live_session_id = str(self.session_id)
+             lease, message = try_acquire_active_session(
+                 session_id=self.session_id,
+                 surface=surface,
+                 config=self.config,
+                 # Writer identity: a re-claim by this process replaces its own entry.
+                 # See #94595.
+-                metadata={"live_session_id": str(self.session_id)},
++                metadata={
++                    "live_session_id": str(self.session_id),
++                    **({"bot_live_delivery_consumer": True}
++                       if self._bot_live_delivery_consumer else {}),
++                },
+             )
+         except Exception as exc:
+             logger.warning("Failed to claim active session slot: %s", exc)
+@@ -4080,7 +4099,12 @@ def _run_quiet_single_query(cli, effective_query):
+         sys.exit(130)
+     # The exit line below reports session_id to stderr for automation wrappers;
+     # without this sync it would point at the ended parent after compression.
++    _old_session_id = cli.session_id
+     _sync_cli_session_id_from_agent(cli)
++    if cli.session_id != _old_session_id and getattr(cli, "_bot_live_delivery_consumer", False):
++        from hermes_cli.cli_bot_live_delivery import transfer_live_owner_after_compression
++
++        transfer_live_owner_after_compression(cli, cli.session_id)
+     response = result.get("final_response", "") if isinstance(result, dict) else str(result)
+     # Surface backend errors that produced no visible output (e.g. invalid model slug
+     # -> provider 4xx) on stderr so piped stdout stays clean.
+diff --git a/hermes_cli/cli_bot_live_delivery.py b/hermes_cli/cli_bot_live_delivery.py
+new file mode 100644
+index 0000000000..f37ee0b43e
+--- /dev/null
++++ b/hermes_cli/cli_bot_live_delivery.py
+@@ -0,0 +1,300 @@
++"""Native one-shot Bot Chat mailbox consumption.
++
++A Bot Chat launched as a one-shot CLI is both a durable delivery owner and a
++short-lived process. During its exit linger it can consume replies admitted to
++its existing mailbox, without taking the profile turn lock again.
++"""
++from __future__ import annotations
++
++import contextlib
++import logging
++import os
++import time
++from pathlib import Path
++from typing import Any
++
++logger = logging.getLogger(__name__)
++_MISSING = object()
++
++
++def is_bot_live_delivery_consumer(cli: Any) -> bool:
++    """Whether *cli* is the canonical, one-shot Bot Chat mailbox consumer."""
++    if not getattr(cli, "_single_query_mode", False):
++        return False
++    if getattr(cli, "_bot_live_delivery_consumer", False):
++        return True
++    db = getattr(cli, "_session_db", None)
++    session_id = str(getattr(cli, "session_id", "") or "")
++    if db is None or not session_id:
++        return False
++    try:
++        return db.get_session_title(session_id) == "Bot Chat"
++    except Exception:
++        return False
++
++
++def transfer_live_owner_after_compression(cli: Any, new_session_id: str) -> bool:
++    """Move a one-shot Bot Chat's native owner lease to its compression tip."""
++    if not is_bot_live_delivery_consumer(cli):
++        return True
++    lease = getattr(cli, "_active_session_lease", None)
++    if lease is None or getattr(lease, "released", False):
++        return False
++    from hermes_cli.active_sessions import transfer_active_session
++
++    metadata = {
++        # The lease/live identity is stable across compression. Mailbox records
++        # admitted before rotation use this fence while their session id follows
++        # the canonical compression tip.
++        "live_session_id": str(
++            getattr(cli, "_bot_live_delivery_live_session_id", cli.session_id)
++        ),
++        "bot_live_delivery_consumer": True,
++    }
++    transferred = transfer_active_session(lease, session_id=str(new_session_id), metadata=metadata)
++    if not transferred:
++        logger.error(
++            "Could not transfer one-shot Bot Chat mailbox owner lease to compression tip %s",
++            new_session_id,
++        )
++    return transferred
++
++
++def retire_live_owner(profile_home: Path | str, owner: dict[str, Any]) -> dict[str, Any]:
++    """Fence future admissions for an owner before its active lease is released."""
++    from tools.bot_live_delivery import _locked, _owner, _owner_key, _read, _write
++
++    pinned = _owner(profile_home, owner)
++    with _locked(profile_home) as root:
++        path = root / f".retired-{_owner_key(pinned)}.json"
++        existing = _read(path)
++        if existing is not None:
++            if existing.get("owner") != pinned:
++                raise ValueError("retirement marker belongs to a different owner")
++            return existing
++        record = {"owner": pinned, "status": "retired", "retired_at": time.time_ns()}
++        _write(path, record)
++        return record
++
++
++def retire_live_owner_for_session(session: dict[str, Any]) -> bool:
++    """Retire a native Bot Chat owner before its gateway session lease is released."""
++    lease = session.get("active_session_lease")
++    if lease is None or getattr(lease, "released", False):
++        return False
++    from hermes_constants import get_hermes_home
++    from tools.bot_live_delivery import _root, find_canonical_live_owner
++
++    home = Path(session.get("profile_home") or get_hermes_home()).resolve()
++    if not _root(home).is_dir():
++        return False
++    owner = find_canonical_live_owner(home)
++    if owner is None or owner.get("lease_id") != lease.lease_id:
++        return False
++    live_session_id = str(session.get("_sid") or "")
++    if live_session_id and owner.get("live_session_id") != live_session_id:
++        return False
++    retire_live_owner(home, owner)
++    return True
++
++
++def retire_live_owner_for_cli(cli: Any) -> bool:
++    """Retire the current one-shot owner before its active lease is released."""
++    current = _current_owner(cli)
++    if current is None:
++        return False
++    home, owner = current
++    retire_live_owner(home, owner)
++    return True
++
++
++def _same_session_lineage(home: Path, stored: dict[str, Any], current: dict[str, Any]) -> bool:
++    if stored.get("session_id") == current.get("session_id"):
++        return True
++    from hermes_state import SessionDB
++
++    state_db = home / "state.db"
++    if not state_db.is_file():
++        return False
++    db = SessionDB(db_path=state_db, read_only=True)
++    try:
++        return db.get_compression_tip(stored.get("session_id")) == current.get("session_id")
++    finally:
++        db.close()
++
++
++def recover_pending_deliveries(profile_home: Path | str, owner: dict[str, Any]) -> int:
++    """Rebind queued work from a dead owner to the current canonical owner.
++
++    Only queued records are recoverable. A claimed record remains fenced to its
++    original lease and therefore retains its unknown outcome after a crash.
++    """
++    from hermes_cli.active_sessions import active_session_registry_snapshot
++    from tools.bot_live_delivery import _locked, _owner, _read, _write
++
++    home = Path(profile_home).resolve()
++    current = _owner(home, owner)
++    active = active_session_registry_snapshot(registry_home=home)
++    active_leases = {str(entry.get("lease_id") or "") for entry in active}
++    recovered = 0
++    with _locked(home) as root:
++        for path in root.glob("*.json"):
++            record = _read(path)
++            if record is None or record.get("status") != "queued":
++                continue
++            stored = record.get("owner") or {}
++            if stored == current or stored.get("lease_id") in active_leases:
++                continue
++            if not _same_session_lineage(home, stored, current):
++                continue
++            # Keep the first admission owner immutable across repeated restarts.
++            # A present but malformed origin is evidence corruption: leave the
++            # receipt untouched rather than replacing it with an intermediate owner.
++            if "recovered_from" in record:
++                origin = record["recovered_from"]
++                if not isinstance(origin, dict):
++                    continue
++                try:
++                    _owner(home, origin)
++                except (TypeError, ValueError):
++                    continue
++            else:
++                record["recovered_from"] = dict(stored)
++            record["recovered_at"] = time.time_ns()
++            record["owner"] = dict(current)
++            record.update(current)
++            _write(path, record)
++            recovered += 1
++    return recovered
++
++
++def _current_owner(cli: Any) -> tuple[Path, dict[str, Any]] | None:
++    if not is_bot_live_delivery_consumer(cli):
++        return None
++    lease = getattr(cli, "_active_session_lease", None)
++    if lease is None or getattr(lease, "released", False):
++        return None
++    from hermes_constants import get_hermes_home
++    from tools.bot_live_delivery import find_canonical_live_owner
++
++    home = Path(get_hermes_home()).resolve()
++    owner = find_canonical_live_owner(home)
++    if owner is None:
++        return None
++    current_session = str(getattr(cli, "session_id", "") or "")
++    live_session_id = str(
++        getattr(cli, "_bot_live_delivery_live_session_id", current_session) or ""
++    )
++    if (
++        owner.get("profile_home") != str(home)
++        or owner.get("lease_id") != lease.lease_id
++        or owner.get("live_session_id") != live_session_id
++        or owner.get("session_id") != current_session
++    ):
++        return None
++    return home, owner
++
++
++def drain_one(cli: Any) -> bool:
++    """Claim and settle one mailbox envelope for an idle one-shot Bot Chat."""
++    current = _current_owner(cli)
++    if current is None:
++        return False
++    home, owner = current
++    from tools.bot_live_delivery import claim_pending_delivery, complete_delivery
++
++    recover_pending_deliveries(home, owner)
++    claimed = claim_pending_delivery(home, owner)
++    if claimed is None:
++        return False
++    delivery_id = str(claimed["delivery_id"])
++    previous_author = getattr(cli, "_pending_turn_author", _MISSING)
++    cli._pending_turn_author = claimed.get("author") or None
++    # Clear prior-turn state before an early return can be mistaken for this delivery.
++    cli._last_turn_result = None
++    cli._last_turn_interrupted = False
++    try:
++        # The normal CLI turn path owns persistence, model setup and compression.
++        # Silence its terminal rendering: the delivery receipt is the authoritative output.
++        with open(os.devnull, "w", encoding="utf-8") as sink:
++            with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
++                response = cli.chat(claimed["message"])
++        outcome = getattr(cli, "_last_turn_result", None)
++        interrupted = bool(getattr(cli, "_last_turn_interrupted", False)) or (
++            isinstance(outcome, dict) and bool(outcome.get("interrupted"))
++        )
++        if interrupted:
++            error = (
++                str(outcome.get("error") or "mailbox turn interrupted")
++                if isinstance(outcome, dict) else "mailbox turn interrupted"
++            )
++            complete_delivery(home, delivery_id, status="cancelled", error=error, reason="cancelled")
++        elif (
++            response is None
++            or not isinstance(outcome, dict)
++            or outcome.get("completed") is not True
++            or outcome.get("failed")
++            or outcome.get("partial")
++        ):
++            error = (
++                str(outcome.get("error") or "mailbox turn did not complete")
++                if isinstance(outcome, dict) else "mailbox turn did not return a terminal result"
++            )
++            from tools.bot_failure_reasons import classify_agent_error
++            complete_delivery(
++                home, delivery_id, status="failed", error=error,
++                reason=classify_agent_error(error),
++            )
++        else:
++            complete_delivery(home, delivery_id, status="settled", reply=str(response))
++    except Exception as exc:
++        error = str(exc) or type(exc).__name__
++        from tools.bot_failure_reasons import classify_agent_error
++        complete_delivery(
++            home, delivery_id, status="failed", error=error,
++            reason=classify_agent_error(error),
++        )
++    finally:
++        if previous_author is _MISSING:
++            delattr(cli, "_pending_turn_author")
++        else:
++            cli._pending_turn_author = previous_author
++    return True
++
++
++def wait_for_background_completions(cli: Any) -> None:
++    """Linger while tracked children finish, draining native replies between polls."""
++    from tools.process_registry import process_registry
++
++    wait_seconds = max(float(process_registry._oneshot_completion_wait_seconds()), 0.0)
++    if wait_seconds <= 0:
++        return
++    deadline = time.monotonic() + wait_seconds
++    waited: set[str] = set()
++    completed: set[str] = set()
++    timed_out: set[str] = set()
++    drained = 0
++    while time.monotonic() < deadline:
++        progress = drain_one(cli)
++        remaining = deadline - time.monotonic()
++        if remaining <= 0:
++            break
++        result = process_registry.wait_for_pending_completions(
++            None, timeout=min(0.25, remaining), poll_interval=0.05,
++        )
++        waited.update(result.get("waited", ()))
++        completed.update(result.get("completed", ()))
++        timed_out.update(result.get("timed_out", ()))
++        drained += int(progress)
++        progress = drain_one(cli)
++        drained += int(progress)
++        if not result.get("waited") and not progress:
++            break
++    # A final claim closes the small race between a child receipt settlement and its
++    # completion notification. Claimed work is never retried if this process exits.
++    drained += int(drain_one(cli))
++    if waited:
++        logger.info(
++            "One-shot Bot Chat mailbox linger: waited=%s completed=%s timed_out=%s drained=%d",
++            sorted(waited), sorted(completed), sorted(timed_out), drained,
++        )
+diff --git a/hermes_cli/cli_chat_turn_mixin.py b/hermes_cli/cli_chat_turn_mixin.py
+index 08e936f208..ddbe2db05f 100644
+--- a/hermes_cli/cli_chat_turn_mixin.py
++++ b/hermes_cli/cli_chat_turn_mixin.py
+@@ -34,6 +34,7 @@ class CLIChatTurnMixin:
+         objects for attached images voice_input: True when the message came from voice transcription (gates
+         the concise voice-response prefix, #65827)
+         """
++        self._last_turn_result = None
+         from cli import ChatConsole, _ChatTurn, _DIM, _RST, _accent_hex, _cprint, set_secret_capture_callback
+         from tools.process_registry_notifications import SubagentNotification
+         # Single-query and direct chat callers do not go through run().
+@@ -87,6 +88,7 @@ class CLIChatTurnMixin:
+             agent_thread.start()
+             interrupt_msg = self._chat_monitor_agent_thread(turn, agent_thread)
+             self._chat_settle_turn(turn)
++            self._last_turn_result = turn.result
+             return self._chat_render_turn(turn, agent_thread, interrupt_msg)
+         except Exception as e:
+             print(f"Error: {e}")
+@@ -314,12 +316,20 @@ class CLIChatTurnMixin:
+         _one_turn_model_restore = getattr(self, "_pending_one_turn_model_restore", None)
+         self._pending_one_turn_model_restore = None
+         try:
+-            turn.result = self.agent.run_conversation(
+-                user_message=agent_message,
+-                conversation_history=self.conversation_history[:-1],  # exclude the message just staged
+-                stream_callback=turn.stream_callback, task_id=self.session_id,
+-                persist_user_message=_persist_clean_user_message, moa_config=_moa_cfg,
+-            )
++            from agent.interrupt_compat import _accepts_keyword
++            _turn_author = getattr(self, "_pending_turn_author", None)
++            self._pending_turn_author = None
++            _run_kwargs = {
++                "user_message": agent_message,
++                "conversation_history": self.conversation_history[:-1],  # exclude the message just staged
++                "stream_callback": turn.stream_callback,
++                "task_id": self.session_id,
++                "persist_user_message": _persist_clean_user_message,
++                "moa_config": _moa_cfg,
++            }
++            if _turn_author is not None and _accepts_keyword(self.agent.run_conversation, "turn_author"):
++                _run_kwargs["turn_author"] = _turn_author
++            turn.result = self.agent.run_conversation(**_run_kwargs)
+             if getattr(self, "_pending_moa_disable_after_turn", False):
+                 _restore = getattr(self, "_pending_moa_restore_model", None) or {}
+                 for _key, _value in _restore.items():
+@@ -463,6 +473,8 @@ class CLIChatTurnMixin:
+         if (self.agent and getattr(self.agent, "session_id", None)
+                 and self.agent.session_id != self.session_id):
+             self._transfer_session_yolo(self.session_id, self.agent.session_id)
++            from hermes_cli.cli_bot_live_delivery import transfer_live_owner_after_compression
++            transfer_live_owner_after_compression(self, self.agent.session_id)
+             self.session_id = self.agent.session_id
+             self._write_terminal_breadcrumb()
+             self._pending_title = None
+diff --git a/hermes_cli/web_server.py b/hermes_cli/web_server.py
+index d95f8182a6..c633d0c243 100644
+--- a/hermes_cli/web_server.py
++++ b/hermes_cli/web_server.py
+@@ -758,13 +758,21 @@ async def _dashboard_selftest_loop() -> None:
+     """Periodic self-test driver started from the lifespan."""
+     try:
+         import httpx  # noqa: F401
++        selftest_available = True
+     except ImportError:
+-        _log.debug("httpx unavailable — dashboard self-test disabled")
+-        return
++        _log.debug("httpx unavailable - dashboard self-test disabled")
++        selftest_available = False
+     while True:
+         await asyncio.sleep(_DASHBOARD_SELFTEST_INTERVAL_SECONDS)
+-        # OAuth-gated binds don't honour the session token; the probe would false-alarm 401.
+-        if getattr(app.state, "auth_required", False):
++        # Reuse this existing native heartbeat to adopt queued work admitted
++        # just before a one-shot owner retired while the server stayed up.
++        try:
++            from tui_gateway.bot_live_delivery_startup import reconcile_queued_bot_chats
++            await asyncio.to_thread(reconcile_queued_bot_chats)
++        except Exception:
++            _log.debug("Bot Chat mailbox heartbeat reconciliation failed", exc_info=True)
++        # OAuth-gated binds do not honour the session token; the probe would false-alarm 401.
++        if not selftest_available or getattr(app.state, "auth_required", False):
+             continue
+         await _dashboard_selftest_once()
+ 
+@@ -1276,6 +1284,15 @@ def _on_server_started(
+         print(f"  Hermes Web UI → http://{host}:{actual_port}")
+     _maybe_open_browser(host, actual_port, open_browser, initial_profile)
+ 
++    # A serve restart must revive an existing canonical Bot Chat when its
++    # durable mailbox contains never-claimed work. The helper resumes the
++    # stored session and claims the native slot; it never submits a prompt.
++    try:
++        from tui_gateway.bot_live_delivery_startup import start_queued_bot_chat_reconciliation
++        start_queued_bot_chat_reconciliation(initial_profile=initial_profile)
++    except Exception:
++        _log.debug("Bot Chat boot reconciliation arm failed", exc_info=True)
++
+     if start_mcp_discovery_after_bind:
+         # Desktop `serve`: the ~350ms `mcp` SDK import holds the GIL while the
+         # renderer does its WS handshake + first hydration reads, so arm it one
+diff --git a/tests/cli/test_bot_live_delivery.py b/tests/cli/test_bot_live_delivery.py
+new file mode 100644
+index 0000000000..fa5b04ae21
+--- /dev/null
++++ b/tests/cli/test_bot_live_delivery.py
+@@ -0,0 +1,852 @@
++"""Focused native one-shot Bot Chat mailbox-consumer regressions."""
++from types import SimpleNamespace
++from pathlib import Path
++
++import pytest
++
++
++def _bot_chat_db(tmp_path):
++    from hermes_state import SessionDB
++
++    db = SessionDB(db_path=tmp_path / "state.db")
++    db.create_session(session_id="chat", source="cli")
++    db.set_session_title("chat", "Bot Chat")
++    return db
++
++
++def _owner(tmp_path, db, *, live="live"):
++    from hermes_cli.active_sessions import try_acquire_active_session
++
++    lease, refusal = try_acquire_active_session(
++        session_id="chat",
++        surface="cli",
++        config={},
++        registry_home=tmp_path,
++        metadata={"live_session_id": live, "bot_live_delivery_consumer": True},
++    )
++    assert refusal is None
++    return lease
++
++
++def test_one_shot_consumer_drains_fifo_mailbox_between_child_completion_polls(tmp_path, monkeypatch):
++    from hermes_cli import cli_bot_live_delivery
++    from tools import bot_live_delivery as mailbox
++
++    db = _bot_chat_db(tmp_path)
++    lease = _owner(tmp_path, db, live="chat")
++    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: tmp_path)
++    messages = []
++    authors = []
++    cli = SimpleNamespace(
++        _single_query_mode=True,
++        _bot_live_delivery_consumer=True,
++        session_id="chat",
++        _session_db=db,
++        _active_session_lease=lease,
++    )
++    def chat(message):
++        messages.append(message)
++        authors.append(cli._pending_turn_author)
++        cli._last_turn_result = {"completed": True, "final_response": f"reply:{message}"}
++        return f"reply:{message}"
++    cli.chat = chat
++    owner = mailbox.find_canonical_live_owner(tmp_path)
++    first = mailbox.deliver_to_live_owner(
++        tmp_path, owner, "first", author={"id": "bot:one", "name": "One", "is_bot": True})
++    second = mailbox.deliver_to_live_owner(
++        tmp_path, owner, "second", author={"id": "bot:two", "name": "Two", "is_bot": True})
++
++    class Registry:
++        def __init__(self):
++            self.calls = 0
++
++        @staticmethod
++        def _oneshot_completion_wait_seconds():
++            return 1.0
++
++        def wait_for_pending_completions(self, *_args, **_kwargs):
++            self.calls += 1
++            return {"waited": ["child"]} if self.calls == 1 else {"waited": []}
++
++    registry = Registry()
++    monkeypatch.setattr("tools.process_registry.process_registry", registry)
++    try:
++        cli_bot_live_delivery.wait_for_background_completions(cli)
++        assert messages == ["first", "second"]
++        assert authors == [
++            {"id": "bot:one", "name": "One", "is_bot": True},
++            {"id": "bot:two", "name": "Two", "is_bot": True},
++        ]
++        assert mailbox.read_delivery_result(tmp_path, first["delivery_id"])["status"] == "settled"
++        assert mailbox.read_delivery_result(tmp_path, second["delivery_id"])["status"] == "settled"
++        assert registry.calls == 2
++    finally:
++        lease.release()
++        db.close()
++
++
++def test_mailbox_stays_fenced_across_cold_owner_restart(tmp_path):
++    from hermes_cli.active_sessions import try_acquire_active_session
++    from tools import bot_live_delivery as mailbox
++
++    db = _bot_chat_db(tmp_path)
++    first = _owner(tmp_path, db, live="first-live")
++    old_owner = mailbox.find_canonical_live_owner(tmp_path)
++    queued = mailbox.deliver_to_live_owner(tmp_path, old_owner, "return")
++    first.release()
++
++    second, refusal = try_acquire_active_session(
++        session_id="chat",
++        surface="cli",
++        config={},
++        registry_home=tmp_path,
++        metadata={"live_session_id": "second-live", "bot_live_delivery_consumer": True},
++    )
++    assert refusal is None
++    try:
++        current = mailbox.find_canonical_live_owner(tmp_path)
++        assert current["lease_id"] == second.lease_id
++        assert current["live_session_id"] == "second-live"
++        assert mailbox.claim_pending_delivery(tmp_path, current) is None
++        assert mailbox.read_delivery_result(tmp_path, queued["delivery_id"])["status"] == "queued"
++    finally:
++        second.release()
++        db.close()
++
++
++def test_interactive_cli_never_advertises_one_shot_mailbox_consumer():
++    from hermes_cli.cli_bot_live_delivery import is_bot_live_delivery_consumer
++
++    cli = SimpleNamespace(
++        _single_query_mode=False,
++        _bot_live_delivery_consumer=False,
++        session_id="chat",
++        _session_db=SimpleNamespace(get_session_title=lambda _sid: "Bot Chat"),
++    )
++    assert is_bot_live_delivery_consumer(cli) is False
++
++
++def test_one_shot_owner_transfers_across_compression_tip(tmp_path):
++    from hermes_cli.cli_bot_live_delivery import transfer_live_owner_after_compression
++    from tools import bot_live_delivery as mailbox
++
++    db = _bot_chat_db(tmp_path)
++    lease = _owner(tmp_path, db, live="chat")
++    cli = SimpleNamespace(
++        _single_query_mode=True,
++        _bot_live_delivery_consumer=True,
++        session_id="chat",
++        _session_db=db,
++        _active_session_lease=lease,
++    )
++    try:
++        queued = mailbox.deliver_to_live_owner(tmp_path, mailbox.find_canonical_live_owner(tmp_path), "before compression")
++        db.end_session("chat", "compression")
++        db.create_session(session_id="tip", source="cli", parent_session_id="chat")
++        assert transfer_live_owner_after_compression(cli, "tip") is True
++        owner = mailbox.find_canonical_live_owner(tmp_path)
++        assert owner["session_id"] == "tip"
++        assert owner["live_session_id"] == "chat"
++        assert owner["lease_id"] == lease.lease_id
++        claim = mailbox.claim_pending_delivery(tmp_path, owner)
++        assert claim["delivery_id"] == queued["delivery_id"]
++    finally:
++        lease.release()
++        db.close()
++
++
++def test_one_shot_bot_chat_claim_advertises_mailbox_capability(monkeypatch):
++    import cli
++
++    captured = {}
++    lease = SimpleNamespace(released=False)
++
++    def acquire(**kwargs):
++        captured.update(kwargs)
++        return lease, None
++
++    monkeypatch.setattr("hermes_cli.active_sessions.try_acquire_active_session", acquire)
++    fake = SimpleNamespace(
++        _active_session_lease=None,
++        _single_query_mode=True,
++        _session_db=SimpleNamespace(get_session_title=lambda _sid: "Bot Chat"),
++        session_id="chat",
++        config={},
++        _console_print=lambda *_args: None,
++    )
++    assert cli.HermesCLI._claim_active_session(fake) is True
++    assert captured["metadata"] == {
++        "live_session_id": "chat",
++        "bot_live_delivery_consumer": True,
++    }
++
++
++@pytest.mark.parametrize(("outcome", "status"), [
++    (None, "failed"),
++    ({"failed": True, "completed": False, "error": "provider failed"}, "failed"),
++    ({"partial": True, "completed": False, "final_response": "partial answer"}, "failed"),
++    ({"interrupted": True, "completed": False, "final_response": "interrupted answer"}, "cancelled"),
++])
++def test_mailbox_receipt_does_not_settle_nonterminal_chat_result(tmp_path, monkeypatch, outcome, status):
++    from hermes_cli import cli_bot_live_delivery
++    from tools import bot_live_delivery as mailbox
++
++    db = _bot_chat_db(tmp_path)
++    lease = _owner(tmp_path, db, live="chat")
++    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: tmp_path)
++    owner = mailbox.find_canonical_live_owner(tmp_path)
++    queued = mailbox.deliver_to_live_owner(tmp_path, owner, "request")
++    cli = SimpleNamespace(
++        _single_query_mode=True, _bot_live_delivery_consumer=True, session_id="chat",
++        _session_db=db, _active_session_lease=lease,
++        _last_turn_result={"completed": True}, _last_turn_interrupted=True,
++    )
++    def chat(_message):
++        cli._last_turn_result = outcome
++        return (outcome or {}).get("final_response", "Error: provider failed")
++    cli.chat = chat
++    try:
++        assert cli_bot_live_delivery.drain_one(cli) is True
++        receipt = mailbox.read_delivery_result(tmp_path, queued["delivery_id"])
++        assert receipt["status"] == status
++    finally:
++        lease.release()
++        db.close()
++
++
++def test_cli_mailbox_author_reaches_native_run_conversation():
++    from cli import HermesCLI, _ChatTurn
++
++    author = {"id": "bot:sender", "name": "Sender", "is_bot": True}
++    cli = HermesCLI.__new__(HermesCLI)
++    cli.session_id = "chat"
++    cli.conversation_history = []
++    calls = []
++    cli.agent = SimpleNamespace(run_conversation=lambda **kwargs: (calls.append(kwargs) or {}))
++    cli._pending_turn_author = author
++    cli._flush_credit_notices = lambda: None
++    cli._chat_run_agent(_ChatTurn(), "message")
++    # The native turn facade receives the envelope author and the one-shot slot is consumed.
++    assert calls[0]["turn_author"] == author
++    assert cli._pending_turn_author is None
++
++
++def test_two_process_sender_waits_on_durable_receipt_while_profile_lock_is_held(tmp_path):
++    import os
++    import subprocess
++    import sys
++    import time
++
++    from hermes_cli.active_sessions import try_acquire_active_session
++    from tools import bot_live_delivery as mailbox
++    from tools.bot_relay import acquire_turn_lock
++    from hermes_state import SessionDB
++
++    root = tmp_path
++    profile = root / "profiles" / "research"
++    profile.mkdir(parents=True)
++    db = SessionDB(db_path=profile / "state.db")
++    db.create_session(session_id="chat", source="cli")
++    db.set_session_title("chat", "Bot Chat")
++    lease, refusal = try_acquire_active_session(
++        session_id="chat", surface="cli", config={}, registry_home=profile,
++        metadata={"live_session_id": "chat", "bot_live_delivery_consumer": True},
++    )
++    assert refusal is None
++    dm_file = tmp_path / "dm.txt"
++    dm_file.write_text("child return", encoding="utf-8")
++    worktree = str(Path(__file__).resolve().parents[2])
++    script = (
++        "import sys; from pathlib import Path; "
++        "from tools.bot_mode_dm import _run_delivery; "
++        "raise SystemExit(_run_delivery(['hermes','-p','research','chat'], sys.argv[1], "
++        "stdin_file=False, profile_home=Path(sys.argv[2])))"
++    )
++    env = dict(os.environ, HERMES_HOME=str(root), PYTHONPATH=worktree)
++    try:
++        with acquire_turn_lock(root, "research", timeout_seconds=0):
++            child = subprocess.Popen(
++                [sys.executable, "-c", script, str(dm_file), str(profile)],
++                cwd=worktree, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
++                text=True,
++            )
++            owner = None
++            deadline = time.monotonic() + 10
++            delivery_id = None
++            while time.monotonic() < deadline:
++                owner = mailbox.find_canonical_live_owner(profile)
++                if owner:
++                    for path in (profile / "runtime" / mailbox.DELIVERY_DIR_NAME).glob("*.json"):
++                        if path.name != ".lock":
++                            delivery_id = path.stem
++                            break
++                if delivery_id:
++                    record = mailbox.read_delivery_result(profile, delivery_id)
++                    if record and record["status"] == "queued":
++                        break
++                time.sleep(0.05)
++            assert owner is not None and delivery_id is not None
++            claimed = mailbox.claim_pending_delivery(profile, owner)
++            assert claimed and claimed["message"] == "child return"
++            mailbox.complete_delivery(profile, delivery_id, status="settled", reply="owner reply")
++            stdout, stderr = child.communicate(timeout=10)
++            assert child.returncode == 0, stderr
++            assert '"status": "settled"' in stdout
++            assert '"delivery_id": "' + delivery_id + '"' in stdout
++            assert mailbox.read_delivery_result(profile, delivery_id)["reply"] == "owner reply"
++    finally:
++        if 'child' in locals() and child.poll() is None:
++            child.kill()
++            child.wait()
++        lease.release()
++        db.close()
++
++
++def test_queued_delivery_preserves_original_admission_across_multiple_restarts(tmp_path):
++    from hermes_cli.active_sessions import try_acquire_active_session
++    from hermes_cli.cli_bot_live_delivery import recover_pending_deliveries, retire_live_owner
++    from tools import bot_live_delivery as mailbox
++
++    db = _bot_chat_db(tmp_path)
++    first = _owner(tmp_path, db, live="first-live")
++    original = mailbox.find_canonical_live_owner(tmp_path)
++    author = {"id": "bot:author", "name": "Author", "is_bot": True}
++    queued = mailbox.deliver_to_live_owner(
++        tmp_path, original, "persistent return", author=author)
++    first.release()
++    second, refusal = try_acquire_active_session(
++        session_id="chat", surface="cli", config={}, registry_home=tmp_path,
++        metadata={"live_session_id": "second-live", "bot_live_delivery_consumer": True},
++    )
++    assert refusal is None
++    try:
++        owner_b = mailbox.find_canonical_live_owner(tmp_path)
++        assert recover_pending_deliveries(tmp_path, owner_b) == 1
++        second.release()
++        third, refusal = try_acquire_active_session(
++            session_id="chat", surface="cli", config={}, registry_home=tmp_path,
++            metadata={"live_session_id": "third-live", "bot_live_delivery_consumer": True},
++        )
++        assert refusal is None
++        try:
++            owner_c = mailbox.find_canonical_live_owner(tmp_path)
++            assert recover_pending_deliveries(tmp_path, owner_c) == 1
++            recovered = mailbox.read_delivery_result(tmp_path, queued["delivery_id"])
++            assert recovered["recovered_from"] == original
++            assert recovered["owner"] == owner_c
++            assert mailbox.deliver_to_live_owner(
++                tmp_path, original, "persistent return", delivery_id=queued["delivery_id"], author=author
++            ) == recovered
++            assert mailbox.claim_pending_delivery(tmp_path, owner_c)["delivery_id"] == queued["delivery_id"]
++        finally:
++            third.release()
++    finally:
++        if not second.released:
++            second.release()
++        db.close()
++
++
++def test_retirement_tombstone_does_not_break_new_sequence_admission(tmp_path):
++    from hermes_cli.cli_bot_live_delivery import retire_live_owner
++    from tools import bot_live_delivery as mailbox
++
++    db = _bot_chat_db(tmp_path)
++    first = _owner(tmp_path, db, live="first-live")
++    old_owner = mailbox.find_canonical_live_owner(tmp_path)
++    retire_live_owner(tmp_path, old_owner)
++    first.release()
++    second = _owner(tmp_path, db, live="second-live")
++    try:
++        current = mailbox.find_canonical_live_owner(tmp_path)
++        receipt = mailbox.deliver_to_live_owner(tmp_path, current, "after retirement")
++        assert receipt["status"] == "queued"
++        assert receipt["sequence"] == 1
++    finally:
++        second.release()
++        db.close()
++
++
++@pytest.mark.parametrize("bad_origin", ["corrupt-origin", {"session_id": "missing-fields"}])
++def test_malformed_recovered_origin_is_skipped_without_rewriting(tmp_path, bad_origin):
++    from hermes_cli.active_sessions import try_acquire_active_session
++    from hermes_cli.cli_bot_live_delivery import recover_pending_deliveries
++    from tools import bot_live_delivery as mailbox
++
++    db = _bot_chat_db(tmp_path)
++    first = _owner(tmp_path, db, live="first-live")
++    original = mailbox.find_canonical_live_owner(tmp_path)
++    queued = mailbox.deliver_to_live_owner(tmp_path, original, "preserve origin")
++    first.release()
++    second, refusal = try_acquire_active_session(
++        session_id="chat", surface="cli", config={}, registry_home=tmp_path,
++        metadata={"live_session_id": "second-live", "bot_live_delivery_consumer": True},
++    )
++    assert refusal is None
++    try:
++        with mailbox._locked(tmp_path) as root:
++            path = root / f"{queued['delivery_id']}.json"
++            record = mailbox._read(path)
++            record["recovered_from"] = bad_origin
++            mailbox._write(path, record)
++        current = mailbox.find_canonical_live_owner(tmp_path)
++        before = mailbox.read_delivery_result(tmp_path, queued["delivery_id"])
++        assert recover_pending_deliveries(tmp_path, current) == 0
++        assert mailbox.read_delivery_result(tmp_path, queued["delivery_id"]) == before
++    finally:
++        second.release()
++        db.close()
++
++
++def test_queued_delivery_recovers_after_retirement_but_claimed_stays_fenced(tmp_path):
++    from hermes_cli.cli_bot_live_delivery import recover_pending_deliveries, retire_live_owner
++    from hermes_cli.active_sessions import try_acquire_active_session
++    from tools import bot_live_delivery as mailbox
++
++    db = _bot_chat_db(tmp_path)
++    first = _owner(tmp_path, db, live="first-live")
++    old_owner = mailbox.find_canonical_live_owner(tmp_path)
++    claimed = mailbox.deliver_to_live_owner(tmp_path, old_owner, "claimed")
++    queued = mailbox.deliver_to_live_owner(
++        tmp_path, old_owner, "queued", author={"id": "bot:author", "name": "Author", "is_bot": True})
++    mailbox.claim_pending_delivery(tmp_path, old_owner)
++    first.release()
++    second, refusal = try_acquire_active_session(
++        session_id="chat", surface="cli", config={}, registry_home=tmp_path,
++        metadata={"live_session_id": "second-live", "bot_live_delivery_consumer": True},
++    )
++    assert refusal is None
++    try:
++        current = mailbox.find_canonical_live_owner(tmp_path)
++        assert recover_pending_deliveries(tmp_path, current) == 1
++        recovered = mailbox.read_delivery_result(tmp_path, queued["delivery_id"])
++        assert recovered["recovered_from"] == old_owner
++        author = {"id": "bot:author", "name": "Author", "is_bot": True}
++        assert recovered["author"] == author
++        assert mailbox.deliver_to_live_owner(
++            tmp_path, old_owner, "queued", delivery_id=queued["delivery_id"], author=author
++        ) == recovered
++        assert mailbox.claim_pending_delivery(tmp_path, current)["delivery_id"] == queued["delivery_id"]
++        assert recover_pending_deliveries(tmp_path, current) == 0
++        assert mailbox.read_delivery_result(tmp_path, claimed["delivery_id"])["status"] == "claimed"
++        assert mailbox.claim_pending_delivery(tmp_path, current) is None
++    finally:
++        second.release()
++        db.close()
++
++
++def test_close_waits_for_bot_delivery_admission_boundary(monkeypatch):
++    import threading
++    import time
++
++    from tui_gateway import server
++
++    admission = threading.Lock()
++    admission.acquire()
++    session = {"_bot_live_delivery_admission_lock": admission}
++    sid = "closing-runtime"
++    original_sessions = server._sessions
++    server._sessions = {sid: session}
++    popped = []
++    monkeypatch.setattr(server, "_teardown_popped_session", lambda value, **_kwargs: popped.append(value) or True)
++    try:
++        thread = threading.Thread(target=server._close_session_by_id, args=(sid,))
++        thread.start()
++        time.sleep(0.05)
++        assert sid in server._sessions
++        admission.release()
++        thread.join(timeout=2)
++        assert not thread.is_alive()
++        assert popped == [session]
++    finally:
++        if admission.locked():
++            admission.release()
++        server._sessions = original_sessions
++
++
++def test_retired_owner_cannot_claim_after_close_race(tmp_path):
++    from hermes_cli.active_sessions import try_acquire_active_session
++    from hermes_cli.cli_bot_live_delivery import retire_live_owner
++    from tools import bot_live_delivery as mailbox
++
++    db = _bot_chat_db(tmp_path)
++    lease = _owner(tmp_path, db, live="closing-live")
++    owner = mailbox.find_canonical_live_owner(tmp_path)
++    queued = mailbox.deliver_to_live_owner(tmp_path, owner, "must remain queued")
++    try:
++        retire_live_owner(tmp_path, owner)
++        lease.release()
++        assert mailbox.claim_pending_delivery(tmp_path, owner) is None
++        next_lease, refusal = try_acquire_active_session(
++            session_id="chat", surface="cli", config={}, registry_home=tmp_path,
++            metadata={"live_session_id": "next-live", "bot_live_delivery_consumer": True},
++        )
++        assert refusal is None
++        try:
++            current = mailbox.find_canonical_live_owner(tmp_path)
++            from hermes_cli.cli_bot_live_delivery import recover_pending_deliveries
++            assert recover_pending_deliveries(tmp_path, current) == 1
++            assert mailbox.claim_pending_delivery(tmp_path, current)["delivery_id"] == queued["delivery_id"]
++        finally:
++            next_lease.release()
++    finally:
++        if not lease.released:
++            lease.release()
++        db.close()
++
++
++def test_retired_stale_discovery_is_definite_nonadmission(tmp_path):
++    import json
++
++    from tools import bot_live_delivery as mailbox
++    from tools.bot_mode_dm import _admit_live_dm
++
++    db = _bot_chat_db(tmp_path)
++    lease = _owner(tmp_path, db, live="chat")
++    owner = mailbox.find_canonical_live_owner(tmp_path)
++    retire = __import__("hermes_cli.cli_bot_live_delivery", fromlist=["retire_live_owner"]).retire_live_owner
++    dm_file = tmp_path / "stale.txt"
++    dm_file.write_text("stale", encoding="utf-8")
++    (tmp_path / "stale.txt.live.json").write_text(
++        json.dumps({"owner": owner, "message": "stale", "delivery_id": "d" * 32}),
++        encoding="utf-8")
++    try:
++        retire(tmp_path, owner)
++        assert _admit_live_dm(tmp_path, str(dm_file)) is None
++        assert not list((tmp_path / "runtime" / mailbox.DELIVERY_DIR_NAME).glob("d*.json"))
++    finally:
++        lease.release()
++        db.close()
++
++
++def test_boot_reconciliation_resumes_existing_session_without_prompt(tmp_path, monkeypatch):
++    import contextlib
++
++    from tui_gateway import bot_live_delivery_startup as startup
++    from tui_gateway import server
++    from tools import bot_live_delivery as mailbox
++
++    db = _bot_chat_db(tmp_path)
++    lease = _owner(tmp_path, db, live="old-live")
++    old = mailbox.find_canonical_live_owner(tmp_path)
++    mailbox.deliver_to_live_owner(tmp_path, old, "queued boot work")
++    lease.release()
++
++    calls = []
++    runtime = "runtime"
++    fake_session = {"agent": object(), "profile_home": None}
++    monkeypatch.setattr(startup, "_profile_targets", lambda _initial="": [("default", tmp_path)])
++    monkeypatch.setattr(server, "_sessions", {runtime: fake_session})
++    monkeypatch.setattr(server, "handle_request", lambda request: (
++        calls.append(request) or {"result": {"session_id": runtime, "internal_boot_created": True}}
++    ))
++    monkeypatch.setattr(server, "_session_profile_runtime_scope", lambda _session: contextlib.nullcontext())
++    claimed = []
++
++    def ensure(sid, session):
++        claimed.append((sid, session))
++        session["active_session_lease"] = SimpleNamespace(released=False, release=lambda: None)
++        return None
++
++    monkeypatch.setattr(server, "_ensure_active_session_slot", ensure)
++    try:
++        assert startup.reconcile_queued_bot_chats() == 1
++        assert calls[0]["method"] == "session.resume"
++        assert calls[0]["params"] == {
++            "session_id": "chat", "eager_build": True,
++            "skip_auto_continue": True, "internal_boot": True,
++        }
++        assert claimed == [(runtime, fake_session)]
++        assert fake_session["_bot_live_delivery_boot_resumed"] is True
++    finally:
++        db.close()
++
++
++def test_boot_resume_uses_native_resume_and_notification_poller(tmp_path, monkeypatch):
++    import time
++
++    from tui_gateway import bot_live_delivery_startup as startup
++    from tui_gateway import server, session_notifications
++    from tools import bot_live_delivery as mailbox
++
++    db = _bot_chat_db(tmp_path)
++    old_lease = _owner(tmp_path, db, live="old-live")
++    old_owner = mailbox.find_canonical_live_owner(tmp_path)
++    queued = mailbox.deliver_to_live_owner(tmp_path, old_owner, "native poller work")
++    old_lease.release()
++    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: tmp_path)
++    monkeypatch.setattr(server, "_hermes_home", tmp_path)
++    monkeypatch.setattr("hermes_cli.active_sessions.get_hermes_home", lambda: tmp_path)
++    monkeypatch.setattr(startup, "_profile_targets", lambda _initial="": [("default", tmp_path)])
++
++    class FakeAgent:
++        model = "test"
++        provider = "test"
++        reasoning_config = {}
++        service_tier = ""
++        session_id = "chat"
++
++        def close(self):
++            return None
++
++    def fake_submit(_request_id, _sid, session, message, *, image_paths, terminal_callback, turn_author):
++        assert message == "native poller work"
++        assert image_paths == []
++        assert turn_author is None
++        terminal_callback({"status": "settled", "text": "native poller reply"})
++        session["running"] = False
++        return True
++
++    original_sessions = server._sessions
++    server._sessions = {}
++    monkeypatch.setattr(server, "_get_db", lambda: db)
++    monkeypatch.setattr(server, "_make_agent_in_context", lambda *_args, **_kwargs: FakeAgent())
++    monkeypatch.setattr(server, "_run_prompt_submit", fake_submit)
++    monkeypatch.setattr(server, "_wire_session_agent", lambda *_args: False)
++    monkeypatch.setattr(server, "_notify_session_boundary", lambda *_args: None)
++    monkeypatch.setattr(server, "_register_session_cwd", lambda *_args: None)
++    monkeypatch.setattr(server, "_schedule_mcp_late_refresh", lambda *_args: None)
++    monkeypatch.setattr(server, "_session_todo_state", lambda *_args: None)
++    monkeypatch.setattr(server, "_session_info", lambda *_args: {})
++    monkeypatch.setattr(server, "_completion_cwd", lambda *_args: str(tmp_path))
++    try:
++        assert startup.reconcile_queued_bot_chats() == 1
++        deadline = time.monotonic() + 5
++        receipt = None
++        while time.monotonic() < deadline:
++            receipt = mailbox.read_delivery_result(tmp_path, queued["delivery_id"])
++            if receipt and receipt.get("status") == "settled":
++                break
++            time.sleep(0.05)
++        assert receipt["status"] == "settled"
++        assert receipt["reply"] == "native poller reply"
++        assert any(session.get("active_session_lease") for session in server._sessions.values())
++        assert any(session.get("transport") is server._detached_ws_transport for session in server._sessions.values())
++    finally:
++        for session in list(server._sessions.values()):
++            stop = session.get("_notif_stop")
++            if stop is not None:
++                stop.set()
++            lease = session.get("active_session_lease")
++            if lease is not None:
++                lease.release()
++        server._sessions = original_sessions
++        db.close()
++
++
++def test_deferred_boot_runtime_releases_fence_when_agent_hydrates(monkeypatch):
++    from tui_gateway import server, session_notifications
++
++    session = {
++        "_bot_live_delivery_boot_pending": True,
++        "agent": None,
++    }
++    monkeypatch.setattr(server, "_session_todo_state", lambda _session: None)
++    monkeypatch.setattr(server, "_config_model_target", lambda: "test-model")
++    monkeypatch.setattr(session_notifications, "_poll_bot_live_delivery_once_impl", lambda _sid, _session: True)
++
++    assert session_notifications._poll_bot_live_delivery_once("deferred-runtime", session) is False
++    agent = object()
++    server._attach_built_agent(session, agent)
++
++    assert session["agent"] is agent
++    assert "_bot_live_delivery_boot_pending" not in session
++    assert session_notifications._poll_bot_live_delivery_once("deferred-runtime", session) is True
++
++
++def test_boot_resume_lock_order_allows_existing_poller_to_enter_mailbox(tmp_path, monkeypatch):
++    import contextlib
++    import threading
++
++    from tui_gateway import bot_live_delivery_startup as startup
++    from tui_gateway import server, session_notifications
++    from tools import bot_live_delivery as mailbox
++
++    db = _bot_chat_db(tmp_path)
++    old_lease = _owner(tmp_path, db, live="old-live")
++    old_owner = mailbox.find_canonical_live_owner(tmp_path)
++    mailbox.deliver_to_live_owner(tmp_path, old_owner, "lock-order work")
++    old_lease.release()
++
++    admission = threading.Lock()
++    poller_entered = threading.Event()
++    poller_finished = threading.Event()
++    lock_errors = []
++    mailbox_lock = threading.Lock()
++
++    @contextlib.contextmanager
++    def instrumented_locked(home):
++        if not mailbox_lock.acquire(timeout=0.2):
++            raise AssertionError("mailbox lock inversion")
++        try:
++            yield mailbox._root(home)
++        finally:
++            mailbox_lock.release()
++
++    runtime = "existing-runtime"
++    session = {
++        "agent": object(),
++        "_bot_live_delivery_admission_lock": admission,
++        "profile_home": str(tmp_path),
++    }
++    original_sessions = server._sessions
++    server._sessions = {runtime: session}
++    poller_threads = []
++
++    def fake_poll(_sid, _session):
++        poller_entered.set()
++        try:
++            with mailbox._locked(tmp_path):
++                pass
++        except Exception as exc:
++            lock_errors.append(exc)
++        finally:
++            poller_finished.set()
++        return True
++
++    monkeypatch.setattr(session_notifications, "_poll_bot_live_delivery_once_impl", fake_poll)
++
++    def fake_resume(_request):
++        def existing_poller():
++            session_notifications._poll_bot_live_delivery_once(runtime, session)
++
++        poller = threading.Thread(target=existing_poller, daemon=True)
++        poller_threads.append(poller)
++        poller.start()
++        assert poller_entered.wait(timeout=1)
++        return {"result": {"session_id": runtime, "internal_boot_created": False}}
++
++    monkeypatch.setattr(startup, "_profile_targets", lambda _initial="": [("default", tmp_path)])
++    monkeypatch.setattr(mailbox, "_locked", instrumented_locked)
++    monkeypatch.setattr(server, "handle_request", fake_resume)
++    monkeypatch.setattr(server, "bind_transport", lambda transport: transport)
++    monkeypatch.setattr(server, "reset_transport", lambda _token: None)
++    monkeypatch.setattr(server, "_session_profile_runtime_scope", lambda _session: contextlib.nullcontext())
++
++    def ensure(_sid, value):
++        value["active_session_lease"] = SimpleNamespace(released=False, release=lambda: None)
++        return None
++
++    monkeypatch.setattr(server, "_ensure_active_session_slot", ensure)
++    try:
++        assert startup.reconcile_queued_bot_chats() == 1
++        assert poller_finished.wait(timeout=1)
++        assert not lock_errors
++        for poller in poller_threads:
++            poller.join(timeout=1)
++            assert not poller.is_alive()
++    finally:
++        server._sessions = original_sessions
++        db.close()
++
++
++@pytest.mark.parametrize("failure", ["missing-agent", "scope-error", "finalized"])
++def test_boot_resume_cleans_up_new_runtime_on_post_resume_failure(tmp_path, monkeypatch, failure):
++    import contextlib
++
++    from tui_gateway import bot_live_delivery_startup as startup
++    from tui_gateway import server
++    from tools import bot_live_delivery as mailbox
++
++    db = _bot_chat_db(tmp_path)
++    lease = _owner(tmp_path, db, live="old-live")
++    owner = mailbox.find_canonical_live_owner(tmp_path)
++    mailbox.deliver_to_live_owner(tmp_path, owner, "cleanup me")
++    lease.release()
++    runtime = "new-runtime"
++    session = {"agent": None if failure == "missing-agent" else object()}
++    if failure == "finalized":
++        session["_finalized"] = True
++    original_sessions = server._sessions
++    server._sessions = {}
++    closed = []
++    monkeypatch.setattr(startup, "_profile_targets", lambda _initial="": [("default", tmp_path)])
++    def resume(_request):
++        server._sessions[runtime] = session
++        return {"result": {"session_id": runtime, "internal_boot_created": True}}
++    monkeypatch.setattr(server, "handle_request", resume)
++    monkeypatch.setattr(server, "_close_session_by_id", lambda sid, **_kwargs: closed.append(sid))
++    if failure == "scope-error":
++        @contextlib.contextmanager
++        def broken_scope(_session):
++            raise RuntimeError("scope failed")
++            yield
++        monkeypatch.setattr(server, "_session_profile_runtime_scope", broken_scope)
++    try:
++        assert startup.reconcile_queued_bot_chats() == 0
++        assert closed == [runtime]
++    finally:
++        server._sessions = original_sessions
++        db.close()
++
++
++def test_existing_queued_receipt_wins_when_owner_is_gone(tmp_path):
++    import hashlib
++
++    from tools import bot_live_delivery as mailbox
++    from tools.bot_mode_dm import _admit_live_dm
++
++    db = _bot_chat_db(tmp_path)
++    lease = _owner(tmp_path, db, live="live")
++    owner = mailbox.find_canonical_live_owner(tmp_path)
++    dm_file = tmp_path / "same.txt"
++    dm_file.write_text("already admitted", encoding="utf-8")
++    delivery_id = hashlib.sha256(str(dm_file.resolve()).encode()).hexdigest()
++    queued = mailbox.deliver_to_live_owner(tmp_path, owner, dm_file.read_text(), delivery_id=delivery_id)
++    lease.release()
++    try:
++        assert _admit_live_dm(tmp_path, str(dm_file)) == queued
++        assert mailbox.read_delivery_result(tmp_path, delivery_id)["status"] == "queued"
++        dm_file.write_text("changed after admission", encoding="utf-8")
++        with pytest.raises(ValueError, match="different payload"):
++            _admit_live_dm(tmp_path, str(dm_file), author={"id": "changed"})
++    finally:
++        db.close()
++
++
++def test_web_server_heartbeat_reconciles_without_ui_turn(tmp_path, monkeypatch):
++    import asyncio
++    import sys
++    from hermes_cli import web_server
++    from tui_gateway import bot_live_delivery_startup as startup
++
++    calls = []
++    async def stop_after_first_sleep(_seconds):
++        calls.append("sleep")
++        if calls.count("sleep") > 1:
++            raise asyncio.CancelledError
++    async def selftest():
++        calls.append("selftest")
++    monkeypatch.setitem(sys.modules, "httpx", None)
++    monkeypatch.setattr(web_server.asyncio, "sleep", stop_after_first_sleep)
++    monkeypatch.setattr(web_server, "_dashboard_selftest_once", selftest)
++    monkeypatch.setattr(startup, "reconcile_queued_bot_chats", lambda: calls.append("reconcile") or 0)
++    web_server.app.state.auth_required = True
++    with pytest.raises(asyncio.CancelledError):
++        asyncio.run(web_server._dashboard_selftest_loop())
++    assert calls == ["sleep", "reconcile", "sleep"]
++
++
++def test_machine_root_boot_scan_includes_named_profiles_without_multiplex_config(tmp_path, monkeypatch):
++    from tui_gateway import bot_live_delivery_startup as startup
++
++    seen = []
++    monkeypatch.setattr("hermes_constants.get_default_hermes_root", lambda: tmp_path)
++    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: tmp_path)
++    monkeypatch.setattr("hermes_cli.profiles.profiles_to_serve",
++                        lambda multiplex: seen.append(multiplex) or [("default", tmp_path), ("research", tmp_path / "profiles" / "research")])
++    expected = [("default", tmp_path), ("research", tmp_path / "profiles" / "research")]
++    assert startup._profile_targets("research") == expected
++    assert seen == [True]
++
++
++def test_explicit_named_home_does_not_follow_root_active_profile(tmp_path, monkeypatch):
++    from tui_gateway import bot_live_delivery_startup as startup
++
++    root = tmp_path / "root"
++    named = root / "profiles" / "research"
++    named.mkdir(parents=True)
++    monkeypatch.setattr("hermes_constants.get_default_hermes_root", lambda: root)
++    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: named)
++    monkeypatch.setattr("hermes_cli.profiles.profiles_to_serve",
++                        lambda multiplex: [("default", root)])
++    assert startup._profile_targets("stale-active") == [("research", named)]
+diff --git a/tools/bot_live_delivery.py b/tools/bot_live_delivery.py
+index 981346c779..20555bd708 100644
+--- a/tools/bot_live_delivery.py
++++ b/tools/bot_live_delivery.py
+@@ -24,6 +24,20 @@ _OWNER_KEYS = ("profile_home", "session_id", "lease_id", "live_session_id")
+ _TERMINAL = frozenset({"settled", "failed", "cancelled", "ambiguous"})
+ 
+ 
++class LiveOwnerRetiredError(RuntimeError):
++    """The discovered owner retired before this admission could be committed."""
++
++
++def _owner_key(owner: dict[str, Any]) -> str:
++    import hashlib
++    return hashlib.sha256(str(owner["lease_id"]).encode("utf-8")).hexdigest()
++
++
++def _retired(root: Path, owner: dict[str, Any]) -> bool:
++    marker = _read(root / f".retired-{_owner_key(owner)}.json") if root.is_dir() else None
++    return marker is not None and marker.get("owner") == owner
++
++
+ def find_canonical_live_owner(profile_home: Path | str) -> dict[str, Any] | None:
+     """Resolve exact Bot Chat's compression tip without creating/migrating its DB.
+ 
+@@ -136,14 +150,33 @@ def deliver_to_live_owner(
+         path = root / f"{key}.json"
+         existing = _read(path)
+         if existing is not None:
+-            if existing["owner"] != pinned or existing["message"] != message or existing.get("author") != author:
++            same_original_owner = (
++                existing.get("owner") == pinned
++                or existing.get("recovered_from") == pinned
++            )
++            if (not same_original_owner or existing["message"] != message
++                    or existing.get("author") != author):
+                 raise ValueError("delivery id already belongs to a different payload")
+             return existing
++        if _retired(root, pinned):
++            raise LiveOwnerRetiredError(
++                "the Bot Chat owner retired before this delivery was admitted"
++            )
+         # Wall time can roll back. Permanent receipts retain the admission
+         # high-water mark, allocated while holding the cross-process lock.
+-        sequence = max((record.get("sequence", record["created_at"])
+-                        for candidate in root.glob("*.json")
+-                        if (record := _read(candidate)) is not None), default=0) + 1
++        # Retirement tombstones share this directory but have no receipt
++        # created_at; exclude them instead of inventing a sequence value.
++        sequences = []
++        for candidate in root.glob("*.json"):
++            record = _read(candidate)
++            if not isinstance(record, dict) or not record.get("delivery_id"):
++                continue
++            created_at = record.get("created_at")
++            if not isinstance(created_at, (int, float)):
++                continue
++            sequence = record.get("sequence")
++            sequences.append(sequence if isinstance(sequence, (int, float)) else created_at)
++        sequence = max(sequences, default=0) + 1
+         record = dict(delivery_id=key, id=key, owner=pinned, **pinned,
+                       message=message, status="queued", created_at=time.time_ns(),
+                       sequence=sequence, **({"author": dict(author)} if author else {}))
+@@ -179,6 +212,11 @@ def claim_pending_delivery(
+     if not _root(profile_home).is_dir():
+         return None
+     with _locked(profile_home) as root:
++        # Close/finalize retires the owner under this same mailbox lock before
++        # releasing its active lease. A stale claimant that discovered the
++        # owner just before retirement must leave the envelope queued.
++        if _retired(root, current):
++            return None
+         pending = []
+         for path in root.glob("*.json"):
+             record = _read(path)
+diff --git a/tools/bot_mode_dm.py b/tools/bot_mode_dm.py
+index 8366a8a4fa..de25f5c205 100644
+--- a/tools/bot_mode_dm.py
++++ b/tools/bot_mode_dm.py
+@@ -408,7 +408,8 @@ def _run_local_turn(argv: list[str], dm_file: str, *, env: Optional[dict[str, st
+ def _admit_live_dm(profile_home: Path | None, dm_file: str, author: Optional[dict] = None) -> dict | None:
+     """Pin intent before admission; retries may inspect, never change transport."""
+     from tools.bot_live_delivery import (
+-        _fsync_dir, deliver_to_live_owner, find_canonical_live_owner, read_delivery_result,
++        LiveOwnerRetiredError, _fsync_dir, deliver_to_live_owner,
++        find_canonical_live_owner, read_delivery_result,
+     )
+ 
+     intent: dict[str, Any]
+@@ -417,11 +418,19 @@ def _admit_live_dm(profile_home: Path | None, dm_file: str, author: Optional[dic
+         intent = json.loads(intent_path.read_text(encoding="utf-8"))
+     else:
+         assert profile_home is not None
++        message = Path(dm_file).read_text(encoding="utf-8")
++        delivery_id = hashlib.sha256(str(Path(dm_file).resolve()).encode()).hexdigest()
++        # A prior attempt may have admitted this deterministic envelope before
++        # the owner retired. Inspect that receipt before requiring a currently
++        # discoverable owner; replaying the original query would duplicate it.
++        if (record := read_delivery_result(profile_home, delivery_id)) is not None:
++            if record.get("message") != message or record.get("author") != author:
++                raise ValueError("delivery id already belongs to a different payload")
++            return record
+         owner = find_canonical_live_owner(profile_home)
+         if owner is None:
+             return None
+-        intent = dict(owner=owner, message=Path(dm_file).read_text(encoding="utf-8"),
+-                      delivery_id=hashlib.sha256(str(Path(dm_file).resolve()).encode()).hexdigest(),
++        intent = dict(owner=owner, message=message, delivery_id=delivery_id,
+                       **({"author": author} if author else {}))
+         try:
+             fd = os.open(intent_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+@@ -436,8 +445,14 @@ def _admit_live_dm(profile_home: Path | None, dm_file: str, author: Optional[dic
+     home = intent["owner"]["profile_home"]
+     record = read_delivery_result(home, intent["delivery_id"])
+     if record is None:
+-        record = deliver_to_live_owner(home, intent["owner"], intent["message"],
+-                                       delivery_id=intent["delivery_id"], author=intent.get("author"))
++        try:
++            record = deliver_to_live_owner(
++                home, intent["owner"], intent["message"],
++                delivery_id=intent["delivery_id"], author=intent.get("author"))
++        except LiveOwnerRetiredError:
++            # The stale discovery is a definite non-admission. Let the normal CLI
++            # transport decide whether a fresh owner can run the turn.
++            return None
+     return record
+ 
+ 
+diff --git a/tui_gateway/bot_live_delivery_startup.py b/tui_gateway/bot_live_delivery_startup.py
+new file mode 100644
+index 0000000000..c559fb1693
+--- /dev/null
++++ b/tui_gateway/bot_live_delivery_startup.py
+@@ -0,0 +1,222 @@
++"""Boot reconciliation for queued Bot Chat mailbox work.
++
++This path only revives an existing canonical Bot Chat when its mailbox contains
++never-claimed work whose previous owner is dead. It uses session.resume and
++the normal TUI session poller; it never submits a prompt or creates a session.
++"""
++from __future__ import annotations
++
++import contextlib
++import logging
++import threading
++from pathlib import Path
++from typing import Any
++
++logger = logging.getLogger(__name__)
++
++
++def _canonical_session_id(home: Path) -> str | None:
++    from hermes_state import SessionDB
++
++    state_db = home / "state.db"
++    if not state_db.is_file():
++        return None
++    db = SessionDB(db_path=state_db, read_only=True)
++    try:
++        row = db.get_session_by_title("Bot Chat")
++        if not row:
++            return None
++        return str(db.get_compression_tip(row["id"]) or row["id"])
++    finally:
++        db.close()
++
++
++def _lineage_is_canonical(home: Path, owner: dict[str, Any], canonical: str) -> bool:
++    stored_id = str(owner.get("session_id") or "")
++    if not stored_id:
++        return False
++    if stored_id == canonical:
++        return True
++    from hermes_state import SessionDB
++
++    db = SessionDB(db_path=home / "state.db", read_only=True)
++    try:
++        return db.get_compression_tip(stored_id) == canonical
++    finally:
++        db.close()
++
++
++def _has_dead_queued_work_locked(home: Path, canonical: str) -> bool:
++    """Check the mailbox while its lock is held; no receipt is changed."""
++    from hermes_cli.active_sessions import active_session_registry_snapshot
++    from tools.bot_live_delivery import _read, _root
++
++    root = _root(home)
++    if not root.is_dir():
++        return False
++    try:
++        active = active_session_registry_snapshot(registry_home=home)
++    except Exception:
++        logger.warning("Bot Chat boot reconciliation skipped: active-session registry unreadable", exc_info=True)
++        return False
++    active_leases = {str(entry.get("lease_id") or "") for entry in active}
++    active_sessions = {str(entry.get("session_id") or "") for entry in active}
++    if canonical in active_sessions:
++        return False
++    for path in root.glob("*.json"):
++        record = _read(path)
++        if record is None or record.get("status") != "queued":
++            continue
++        owner = record.get("owner")
++        if not isinstance(owner, dict) or not owner.get("lease_id"):
++            continue
++        if str(owner.get("lease_id")) in active_leases:
++            continue
++        if _lineage_is_canonical(home, owner, canonical):
++            return True
++    return False
++
++
++def _profile_targets(initial_profile: str = "") -> list[tuple[str, Path]]:
++    """Return only profiles this serve process owns, using the native chokepoint."""
++    from hermes_cli.profiles import profiles_to_serve
++    from hermes_constants import get_default_hermes_root, get_hermes_home, profile_name_for_home
++
++    # The machine-root dashboard/serve is app-global and exposes every live
++    # profile even when gateway multiplexing is not configured. A profile-home
++    # isolated backend owns only its active profile.
++    try:
++        root = Path(get_default_hermes_root()).resolve()
++        current = Path(get_hermes_home()).resolve()
++    except Exception:
++        root = current = None
++    if root is not None and current == root:
++        return list(profiles_to_serve(multiplex=True))
++    # Explicit --profile launches set HERMES_HOME to that named home even when
++    # the root sticky active_profile names another profile. Keep boot and
++    # heartbeat reconciliation scoped to this process-owned home.
++    if current is not None:
++        name = profile_name_for_home(current) or initial_profile or "default"
++        return [(name, current)]
++    return list(profiles_to_serve(multiplex=False))
++
++
++def _resume_existing_bot_chat(profile: str, home: Path) -> bool:
++    from tools.bot_live_delivery import _locked
++
++    # Avoid creating mailbox state for profiles with no native delivery work.
++    # The startup scan is read-only until a real queued receipt is found.
++    if not (home / "runtime" / "bot_live_delivery").is_dir():
++        return False
++
++    from tui_gateway import server
++
++    # Candidate discovery must not hold the mailbox lock while native resume
++    # starts a poller. The poller takes the per-session admission lock before
++    # entering the mailbox, so holding mailbox -> admission here would invert
++    # its lock order and deadlock an already-running session.
++    with _locked(home):
++        canonical = _canonical_session_id(home)
++        if not canonical or not _has_dead_queued_work_locked(home, canonical):
++            return False
++
++    params: dict[str, Any] = {
++        "session_id": canonical,
++        "eager_build": True,
++        "skip_auto_continue": True,
++        "internal_boot": True,
++    }
++    if profile != "default":
++        params["profile"] = profile
++    transport_token = server.bind_transport(server._detached_ws_transport)
++    try:
++        response = server.handle_request({
++            "jsonrpc": "2.0", "id": f"__bot_live_boot__{canonical}",
++            "method": "session.resume", "params": params,
++        })
++    finally:
++        server.reset_transport(transport_token)
++
++    result = response.get("result") if isinstance(response, dict) else None
++    runtime_sid = str((result or {}).get("session_id") or "")
++    if not runtime_sid:
++        logger.warning("Bot Chat boot resume failed for profile %s: %s", profile, response)
++        return False
++
++    # The native resume response identifies whether this request minted the
++    # runtime; do not infer ownership from a concurrent _sessions snapshot.
++    newly_created = bool((result or {}).get("internal_boot_created"))
++    session = server._sessions.get(runtime_sid)
++    cleanup_sid: str | None = None
++    resumed = False
++    if not isinstance(session, dict) or session.get("agent") is None:
++        logger.warning("Bot Chat boot resume returned no ready session for profile %s", profile)
++        if newly_created:
++            cleanup_sid = runtime_sid
++    else:
++        # Admission is the first lock in the native poller's order. Recheck
++        # the durable candidate only after taking it: an existing poller may
++        # have consumed or recovered the envelope while resume was in flight.
++        delivery_lock = session.setdefault("_bot_live_delivery_admission_lock", threading.Lock())
++        refusal: str | None = None
++        with delivery_lock:
++            with server._sessions_lock:
++                still_owned = server._sessions.get(runtime_sid) is session
++                stopped = bool(session.get("_finalized") or session.get("_closing"))
++            if not still_owned or stopped:
++                refusal = "session stopped during boot resume"
++            else:
++                with _locked(home):
++                    current_canonical = _canonical_session_id(home)
++                    if (current_canonical != canonical
++                            or not current_canonical
++                            or not _has_dead_queued_work_locked(home, current_canonical)):
++                        refusal = "queued work was adopted during boot resume"
++                    else:
++                        try:
++                            with server._session_profile_runtime_scope(session):
++                                refusal = server._ensure_active_session_slot(runtime_sid, session)
++                        except Exception:
++                            logger.warning("Bot Chat boot owner claim failed for profile %s", profile, exc_info=True)
++                            refusal = "owner claim failed"
++            session.pop("_bot_live_delivery_boot_pending", None)
++        if refusal is not None:
++            logger.warning("Bot Chat boot owner claim refused for profile %s: %s", profile, refusal)
++            if newly_created:
++                cleanup_sid = runtime_sid
++        else:
++            session["_bot_live_delivery_boot_resumed"] = True
++            logger.info("Bot Chat boot owner resumed profile=%s session=%s runtime=%s", profile, canonical, runtime_sid)
++            resumed = True
++
++    # Closing a failed, newly-created runtime can take lifecycle locks. Do it
++    # after releasing mailbox/session admission locks; never close a concurrent
++    # winner.
++    if cleanup_sid:
++        with contextlib.suppress(Exception):
++            server._close_session_by_id(cleanup_sid, end_reason="bot_live_boot_owner_refused")
++    return resumed
++
++def reconcile_queued_bot_chats(*, initial_profile: str = "") -> int:
++    """Resume existing canonical Bot Chats with queued, never-claimed work."""
++    resumed = 0
++    for profile, raw_home in _profile_targets(initial_profile):
++        home = Path(raw_home).resolve()
++        try:
++            if _resume_existing_bot_chat(profile, home):
++                resumed += 1
++        except Exception:
++            logger.warning("Bot Chat boot reconciliation failed for profile %s", profile, exc_info=True)
++    return resumed
++
++
++def start_queued_bot_chat_reconciliation(*, initial_profile: str = "") -> threading.Thread:
++    """Start bounded boot reconciliation off the serving event loop."""
++    worker = threading.Thread(
++        target=reconcile_queued_bot_chats,
++        kwargs={"initial_profile": initial_profile},
++        name="bot-live-delivery-boot",
++        daemon=True,
++    )
++    worker.start()
++    return worker
+diff --git a/tui_gateway/methods_session.py b/tui_gateway/methods_session.py
+index a6f38cd4ec..dee77afc5e 100644
+--- a/tui_gateway/methods_session.py
++++ b/tui_gateway/methods_session.py
+@@ -491,6 +491,12 @@ class _Resume:
+         self.lazy, self.defer_history = _flag(params, "lazy"), _flag(params, "defer_history")
+         # Desktop hydrates over REST; suppress the duplicate WS copy only when asked.
+         self.omit_messages, self.eager_build = _flag(params, "omit_messages"), _flag(params, "eager_build")
++        # Internal boot reconciliation resumes the existing Bot Chat only to
++        # start its mailbox poller; it must never turn a crash marker into a
++        # synthetic model turn.
++        self.skip_auto_continue = _flag(params, "skip_auto_continue")
++        self.internal_boot = _flag(params, "internal_boot")
++        self.created_runtime = False
+ 
+     def mint(self, prompts: bool = True) -> tuple:
+         """``(runtime sid, source, cwd)`` for the live record this resume registers (+ gateway prompts on)."""
+@@ -507,7 +513,8 @@ class _Resume:
+         return _deferred_session_record(
+             self.target, cols=self.cols, cwd=cwd, history=history, lease=None, source=source,
+             close_on_disconnect=_flag(self.params, "close_on_disconnect"),
+-            profile_home=self.profile_home, explicit_cwd=bool(self.profile_resume_cwd), **extra)
++            profile_home=self.profile_home, explicit_cwd=bool(self.profile_resume_cwd),
++            skip_auto_continue=self.skip_auto_continue, **extra)
+ 
+     def claim(self, sid: str, record: dict) -> dict | None:
+         """Register ``record`` live under the resume lock, or reuse a concurrent winner's session."""
+@@ -702,6 +709,8 @@ def _resume_response(
+                "started_at": record["created_at"] if started_at is None else started_at, "status": status}
+     if auto_continue is not None:
+         payload["auto_continue"] = auto_continue
++    if ctx.internal_boot:
++        payload["internal_boot_created"] = bool(ctx.created_runtime)
+     return _ok(ctx.rid, _attach_todo_state(payload, record))
+ 
+ 
+@@ -765,7 +774,8 @@ def _resume_cold(ctx: _Resume) -> dict:
+     _schedule_session_cap_enforcement()  # trim detached idle sessions over the cap
+     return _resume_response(ctx, sid, record, info=ctx.info(cwd, overrides), display=display_history,
+                             count_source=raw_history,
+-                            auto_continue=_maybe_schedule_auto_continue(sid, record, ctx.target))
++                            auto_continue=(None if ctx.skip_auto_continue
++                                           else _maybe_schedule_auto_continue(sid, record, ctx.target)))
+ 
+ 
+ def _resume_eager(ctx: _Resume) -> dict:
+@@ -793,7 +803,9 @@ def _resume_eager(ctx: _Resume) -> dict:
+         try:
+             with _profile_build_scope(ctx.profile_home):
+                 _init_session(sid, ctx.target, agent, history, cols=ctx.cols, cwd=ctx.profile_resume_cwd,
+-                              session_db=ctx.db, source=source, explicit_cwd=bool(ctx.profile_resume_cwd))
++                              session_db=ctx.db, source=source, explicit_cwd=bool(ctx.profile_resume_cwd),
++                              internal_boot=ctx.internal_boot)
++                ctx.created_runtime = True
+                 # Ownership TRANSFER: the agent holds the handle for life (AIAgent.close() releases it). The
+                 # owns_db drop is UNCONDITIONAL — the session is registered against the handle, so the finally
+                 # must not close it even if the transfer was refused (a leak beats "closed database" every
+@@ -819,7 +831,8 @@ def _resume_eager(ctx: _Resume) -> dict:
+     return _resume_response(
+         ctx, sid, session, info=_session_info(agent, session), display=display_history, count_source=raw_history,
+         started_at=float(session.get("created_at") or time.time()),
+-        auto_continue=_maybe_schedule_auto_continue(sid, session, ctx.target) if session else None)
++        auto_continue=(None if ctx.skip_auto_continue
++                       else _maybe_schedule_auto_continue(sid, session, ctx.target) if session else None))
+ 
+ 
+ @method("session.resume")
+diff --git a/tui_gateway/server.py b/tui_gateway/server.py
+index cbfe41572d..9dd1c3112f 100644
+--- a/tui_gateway/server.py
++++ b/tui_gateway/server.py
+@@ -965,6 +965,10 @@ def _attach_built_agent(current: dict, agent) -> None:
+     if _title_hint := str(current.get("pending_title") or "").strip():
+         agent._session_title_hint = _title_hint
+     current["agent"] = agent
++    # A deferred runtime may have been reused by boot reconciliation while its
++    # agent was still building. Once it is usable, release the bootstrap fence
++    # so the normal poller can make its next idle-boundary attempt.
++    current.pop("_bot_live_delivery_boot_pending", None)
+     _session_todo_state(current)
+     # Baseline for the per-turn config sync (profile home override still active).
+     current["config_model_seen"] = _config_model_target()
+@@ -2356,7 +2360,7 @@ def _hydrate_session_cwd(sid: str, key: str, session_db, profile_home: str | Non
+ def _init_session(
+     sid: str, key: str, agent, history: list, cols: int = 80, cwd: str | None = None,
+     session_db=None, source: str | None = None, profile_home: str | None = None,
+-    explicit_cwd: bool = False):
++    explicit_cwd: bool = False, internal_boot: bool = False):
+     now = time.time()
+     with _sessions_lock:
+         _sessions[sid] = {
+@@ -2368,6 +2372,7 @@ def _init_session(
+             "tool_progress_mode": _load_tool_progress_mode(), "edit_snapshots": {}, "tool_started_at": {},
+             # Profile-scoped HERMES_HOME (None = launch); SessionBranch copies the parent's (same state.db).
+             "profile_home": profile_home,
++            "_bot_live_delivery_boot_pending": bool(internal_boot),
+             # In-session /model switch, honored on rebuild (/new, resume) — never leaks to siblings via env vars.
+             "model_override": None,
+             # Async events go to the transport that created the session (stdio for Ink, WS for the dashboard).
+@@ -2419,7 +2424,7 @@ def _deferred_session_record(
+     close_on_disconnect: bool = False, display_history_prefix: list | None = None,
+     profile_home: Path | None = None, lazy: bool = False, model_override=None,
+     resume_runtime_overrides: dict | None = None, todo_state: dict | None = None,
+-    explicit_cwd: bool = False) -> dict:
++    explicit_cwd: bool = False, skip_auto_continue: bool = False, internal_boot: bool = False) -> dict:
+     """A live-session record whose AIAgent is built later (lazy watch / cold resume) — _init_session's shape minus the agent."""
+     now = time.time()
+     return {
+@@ -2433,6 +2438,8 @@ def _deferred_session_record(
+         "profile_home": str(profile_home) if profile_home is not None else None,
+         "resume_runtime_overrides": resume_runtime_overrides, "resume_session_id": session_key,
+         "running": False, "session_key": session_key, "show_reasoning": _load_show_reasoning(),
++        "skip_auto_continue": bool(skip_auto_continue),
++        "_bot_live_delivery_boot_pending": bool(internal_boot),
+         "slash_worker": None, "source": source, "tool_progress_mode": _load_tool_progress_mode(),
+         "tool_started_at": {}, "todo_state": todo_state,
+         "transport": current_transport() or _stdio_transport,
+@@ -2562,7 +2569,8 @@ def _schedule_resume_hydration(sid: str, stored_id: str, db, *, close_db: bool =
+             session["resume_history_ready"].set()
+             _emit("session.resume_progress", sid,
+                   {"message_count": len(display_history), "phase": "history", "status": "complete"})
+-            _maybe_schedule_auto_continue(sid, session, stored_id)
++            if not session.get("skip_auto_continue"):
++                _maybe_schedule_auto_continue(sid, session, stored_id)
+             _start_agent_build(sid, session)
+         except Exception as exc:
+             if _sessions.get(sid) is not session:
+diff --git a/tui_gateway/session_lifecycle.py b/tui_gateway/session_lifecycle.py
+index 210ef5dc66..a56a7d6c9b 100644
+--- a/tui_gateway/session_lifecycle.py
++++ b/tui_gateway/session_lifecycle.py
+@@ -209,15 +209,25 @@ def _lock_vault_managers(session: dict) -> None:
+ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> None:
+     """Best-effort finalize hook + memory commit; mirrors the CLI exit path so a force-quit mid-turn (double
+     Ctrl-C, terminal close, SIGHUP) loses nothing."""
+-    if not session or session.get("_finalized"):
++    if not session:
+         return
+-    session["_finalized"] = True
++    delivery_lock = session.setdefault("_bot_live_delivery_admission_lock", threading.Lock())
++    with delivery_lock:
++        if session.get("_finalized"):
++            return
++        session["_finalized"] = True
+     _lock_vault_managers(session)
+     if (history_ready := session.get("resume_history_ready")) is not None and not history_ready.is_set():
+         session["resume_history_error"] = "session resume cancelled"
+         history_ready.set()
+     _desktop_automatic_cleanup = (
+         end_reason in _AUTOMATIC_SESSION_END_REASONS and _session_source(session).strip().lower() == "desktop")
++    # Fence Bot Chat mailbox admission before releasing the active lease. The
++    # claim path checks this marker under the same mailbox lock, so a claimant
++    # discovered before close cannot convert queued work into a doomed turn.
++    with contextlib.suppress(Exception):
++        from hermes_cli.cli_bot_live_delivery import retire_live_owner_for_session
++        retire_live_owner_for_session(session)
+     # Automatic Desktop cleanup releases its lease inside the lifecycle guard below; other paths keep force/end semantics.
+     if not _desktop_automatic_cleanup:
+         _release_active_session_slot(session)
+@@ -369,11 +379,25 @@ def _close_session_by_id(
+     ``_session_resume_lock`` and call ``_teardown_popped_session`` after releasing it). Automatic reapers pass
+     ``predicate`` to revalidate under ``_sessions_lock`` right before the claim, so a stale scan can't close a
+     session that reattached."""
+-    with _sessions_lock:  # RLock: predicate + claim in one critical section
++    # A mailbox poller holds this lock from claim through starting its turn.
++    # Wait before popping so _run_prompt_submit can still observe a registered
++    # session; finalization then joins the started turn before releasing lease.
++    with _sessions_lock:
+         current = _sessions.get(sid)
+-        if predicate is not None and (current is None or not predicate(current)):
+-            return False
+-        session = _pop_session_by_id(sid)
++        admission_lock = (current or {}).get("_bot_live_delivery_admission_lock")
++    if admission_lock is not None:
++        with admission_lock:
++            with _sessions_lock:  # RLock: predicate + claim in one critical section
++                current = _sessions.get(sid)
++                if predicate is not None and (current is None or not predicate(current)):
++                    return False
++                session = _pop_session_by_id(sid)
++    else:
++        with _sessions_lock:  # RLock: predicate + claim in one critical section
++            current = _sessions.get(sid)
++            if predicate is not None and (current is None or not predicate(current)):
++                return False
++            session = _pop_session_by_id(sid)
+     return _teardown_popped_session(session, end_reason=end_reason)
+ 
+ 
+diff --git a/tui_gateway/session_notifications.py b/tui_gateway/session_notifications.py
+index 5d16abf471..e223ff1fe7 100644
+--- a/tui_gateway/session_notifications.py
++++ b/tui_gateway/session_notifications.py
+@@ -5,6 +5,7 @@ desktop UI wiring, HUD surface note. Bodies are rebound onto server.py's globals
+ from __future__ import annotations
+ 
+ import contextlib
++import threading
+ 
+ from .method_ctx import bind_module
+ 
+@@ -492,8 +493,20 @@ def _notif_handle_ready(sid, session, events, emitted, registry, fmt, deferred,
+ 
+ 
+ def _poll_bot_live_delivery_once(sid: str, session: dict) -> bool:
++    """Serialize mailbox claim/start against session close and boot owner setup."""
++    delivery_lock = session.setdefault("_bot_live_delivery_admission_lock", threading.Lock())
++    with delivery_lock:
++        if session.get("_bot_live_delivery_boot_pending"):
++            return False
++        return _poll_bot_live_delivery_once_impl(sid, session)
++
++
++def _poll_bot_live_delivery_once_impl(sid: str, session: dict) -> bool:
+     """Run one durable envelope only after local FIFO/continuations yield the idle boundary."""
+-    from tools.bot_live_delivery import claim_pending_delivery, complete_delivery, find_canonical_live_owner
++    from tools.bot_live_delivery import (
++        claim_pending_delivery, complete_delivery, find_canonical_live_owner,
++    )
++    from hermes_cli.cli_bot_live_delivery import recover_pending_deliveries
+ 
+     home = _session_home(session)
+     with session["history_lock"]:
+@@ -509,6 +522,10 @@ def _poll_bot_live_delivery_once(sid: str, session: dict) -> bool:
+                 or owner.get("live_session_id") != sid
+                 or owner.get("session_id") != session.get("session_key")):
+             return False
++        # Reconcile never-claimed work from a dead/restarted owner before claiming.
++        # Claimed work remains fenced and is intentionally not replayed.
++        if owner.get("profile_home") == str(home.resolve()):
++            recover_pending_deliveries(home, owner)
+         # The mailbox matches each envelope to this pinned lease/live id and compression lineage.
+         claimed = claim_pending_delivery(home, owner)
+         if claimed is None:
