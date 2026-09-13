@@ -125,6 +125,27 @@ describe("Hermes profile model qualification", () => {
     ]);
   });
 
+  it("rejects an edited empty toolset selection before any native RPC", async () => {
+    await expect(
+      renderProfileMutations().configure.mutateAsync({
+        name: "alpha",
+        model: selection,
+        enabledToolsets: [],
+      }),
+    ).rejects.toThrow("Select at least one toolset");
+    expect(mocks.request).not.toHaveBeenCalled();
+
+    mocks.request.mockResolvedValueOnce({ ok: true, applied: { toolsets: true } });
+    await renderProfileMutations().configure.mutateAsync({
+      name: "alpha",
+      enabledToolsets: ["browser"],
+    });
+    expect(mocks.request).toHaveBeenCalledWith({
+      method: "profiles.configure",
+      params: { name: "alpha", enabled_toolsets: ["browser"] },
+    });
+  });
+
   it.each([
     { ok: false, reason: "request_rejected", error: "OAuth authentication is not allowed" },
     { ...verified, response_model: "different-model" },

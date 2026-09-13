@@ -1,0 +1,34 @@
+diff --git a/hermes_cli/profiles.py b/hermes_cli/profiles.py
+index 37547f54c5..e0f3465f6d 100644
+--- a/hermes_cli/profiles.py
++++ b/hermes_cli/profiles.py
+@@ -1566,0 +1567 @@ def import_profile(archive_path: str, name: Optional[str] = None) -> Path:
++    clear_named_profile_deleted(profile_dir)
+diff --git a/tests/hermes_cli/test_profiles.py b/tests/hermes_cli/test_profiles.py
+index b7c7bf61a4..9a84448928 100644
+--- a/tests/hermes_cli/test_profiles.py
++++ b/tests/hermes_cli/test_profiles.py
+@@ -779,0 +780,23 @@ class TestExportImport:
++    def test_import_after_delete_restores_profile_visibility_and_memory(self, profile_env, tmp_path):
++        profile_dir = create_profile("worker", no_alias=True, no_skills=True)
++        memory_path = profile_dir / "memories" / "MEMORY.md"
++        memory_path.write_text("Keep this harmless context.", encoding="utf-8")
++        archive = tmp_path / "worker.tar.gz"
++        export_profile("worker", str(archive))
++
++        with patch("hermes_cli.profiles._cleanup_gateway_service"), patch(
++            "hermes_cli.profiles._stop_profile_backends"
++        ):
++            delete_profile("worker", yes=True)
++
++        assert not profiles.profile_exists("worker")
++        restored = import_profile(str(archive), name="worker")
++
++        assert restored == get_profile_dir("worker")
++        assert profiles.profile_exists("worker")
++        assert "worker" in {profile.name for profile in list_profiles()}
++        assert (restored / "memories" / "MEMORY.md").read_text(encoding="utf-8") == (
++            "Keep this harmless context."
++        )
++
++

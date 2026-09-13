@@ -583,12 +583,15 @@ function ProfileEditorForm({
     .filter((entry) => entry.enabled)
     .map((entry) => entry.name)
     .join("|");
+  const toolsetsEdited =
+    [...toolsets].sort().join("|") !== initialToolsets.split("|").sort().join("|");
+  const emptyToolsetsEdited = toolsetsEdited && toolsets.length === 0;
   const dirty =
     title.trim() !== (profile.title ?? "") ||
     description.trim() !== detail.description ||
     soul !== detail.soul ||
     (model.provider !== "" && model.model !== "") ||
-    [...toolsets].sort().join("|") !== initialToolsets.split("|").sort().join("|") ||
+    toolsetsEdited ||
     [...skillsEnabled].sort().join("|") !== initialSkills.split("|").sort().join("|");
 
   const save = (confirmExpensive: boolean) => {
@@ -603,9 +606,7 @@ function ProfileEditorForm({
       ...(description.trim() !== detail.description ? { description: description.trim() } : {}),
       ...(soul !== detail.soul ? { soul } : {}),
       ...(model.provider && model.model ? { model: { ...model, confirmExpensive } } : {}),
-      ...([...toolsets].sort().join("|") !== initialToolsets.split("|").sort().join("|")
-        ? { enabledToolsets: toolsets }
-        : {}),
+      ...(toolsetsEdited ? { enabledToolsets: toolsets } : {}),
       ...([...skillsEnabled].sort().join("|") !== initialSkills.split("|").sort().join("|")
         ? {
             disabledSkills: detail.skills
@@ -749,7 +750,12 @@ function ProfileEditorForm({
             <AlertDescription>
               <span>{confirm}</span>
               <div className="flex gap-1.5">
-                <Button size="xs" variant="outline" disabled={busy} onClick={() => save(true)}>
+                <Button
+                  size="xs"
+                  variant="outline"
+                  disabled={busy || emptyToolsetsEdited}
+                  onClick={() => save(true)}
+                >
                   Confirm and save
                 </Button>
                 <Button size="xs" variant="ghost" disabled={busy} onClick={() => setConfirm(null)}>
@@ -800,6 +806,11 @@ function ProfileEditorForm({
             </p>
           ) : null}
         </div>
+        {emptyToolsetsEdited ? (
+          <p className="text-xs text-destructive">
+            Select at least one toolset before saving. An empty selection restores gateway defaults.
+          </p>
+        ) : null}
       </section>
 
       <section className="space-y-3">
@@ -847,7 +858,7 @@ function ProfileEditorForm({
         </Alert>
       ) : null}
       <div className="flex justify-end">
-        <Button disabled={busy || !dirty} onClick={() => save(false)}>
+        <Button disabled={busy || !dirty || emptyToolsetsEdited} onClick={() => save(false)}>
           {mutations.configure.isPending ? "Saving…" : "Save profile"}
         </Button>
       </div>

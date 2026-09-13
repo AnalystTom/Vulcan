@@ -1123,6 +1123,11 @@ export function useHermesProfileMutations() {
   });
   const configure = useMutation({
     mutationFn: async (input: HermesProfileConfigureInput) => {
+      if (input.enabledToolsets?.length === 0) {
+        throw new Error(
+          "Select at least one toolset before saving; an empty selection restores gateway defaults.",
+        );
+      }
       if (input.model) await checkProfileModel(input.name, input.model);
       const params: Record<string, Schema.Json> = { name: input.name };
       if (input.description !== undefined) params.description = input.description;
