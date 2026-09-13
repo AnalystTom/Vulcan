@@ -594,6 +594,41 @@ describe("websocket RPC payload admission", () => {
     }
   });
 
+  it("terminates an idle bootstrap socket before HTTP shutdown waits", async () => {
+    const server = await startTestServer();
+    const sockets: WebSocket[] = [];
+    let closed = false;
+    let shutdown: Promise<void> | undefined;
+    try {
+      sockets.push(await connect(`${server.origin}${WS_BOOTSTRAP_PATH}`));
+      sockets.push(await connect(`${server.origin}${WS_BOOTSTRAP_PATH}`));
+      shutdown = server.close();
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(
+          () => reject(new Error("Timed out waiting for server shutdown")),
+          500,
+        );
+        shutdown!.then(
+          () => {
+            clearTimeout(timeout);
+            resolve();
+          },
+          (error) => {
+            clearTimeout(timeout);
+            reject(error);
+          },
+        );
+      });
+      closed = true;
+      await Promise.all(sockets.map((socket) => waitForClose(socket)));
+    } finally {
+      if (!closed) {
+        for (const socket of sockets) socket.terminate();
+        await (shutdown ?? server.close());
+      }
+    }
+  });
+
   it("admits an unfragmented message just below the byte ceiling", async () => {
     const server = await startTestServer();
     try {

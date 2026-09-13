@@ -850,6 +850,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       submittingEditedUserMessageId,
       threadMarkersByMessageId,
       toolGroupSummaryOverrides,
+      worktreeSetupPendingAction,
     }),
     [
       crossTaskOrigin,
@@ -868,6 +869,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       submittingEditedUserMessageId,
       threadMarkersByMessageId,
       toolGroupSummaryOverrides,
+      worktreeSetupPendingAction,
     ],
   );
   // Latest rows kept in a ref so the imperative scroll controller can look up a message's

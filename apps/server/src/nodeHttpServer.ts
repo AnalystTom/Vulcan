@@ -6,6 +6,7 @@ import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import { Effect, Scope } from "effect";
 import * as HttpServer from "effect/unstable/http/HttpServer";
 import { ServeError } from "effect/unstable/http/HttpServerError";
+import type { Duplex } from "node:stream";
 import { WebSocketServer } from "ws";
 
 export const MAX_WEBSOCKET_MESSAGE_BYTES = 2 * 1024 * 1024;
@@ -125,6 +126,13 @@ export const makeBoundedNodeHttpServer = Effect.fnUntraced(function* (
 ) {
   const scope = yield* Effect.scope;
   const server = evaluate();
+  const upgradedSockets = new Set<Duplex>();
+  let sawUpgrade = false;
+  const trackUpgradedSocket = (_request: http.IncomingMessage, socket: Duplex) => {
+    sawUpgrade = true;
+    upgradedSockets.add(socket);
+    socket.once("close", () => upgradedSockets.delete(socket));
+  };
 
   // Install before `listen()`: no accepted connection may exist without a
   // permanent error boundary, including connections reset during startup.
@@ -134,6 +142,16 @@ export const makeBoundedNodeHttpServer = Effect.fnUntraced(function* (
     scope,
     Effect.callback<void>((resume) => {
       server.off("connection", protectClientSocket);
+      // Upgraded sockets are not closed by Node's HTTP server. Destroy only
+      // those sockets before waiting on server.close(), which otherwise waits
+      // forever for a browser that keeps its WebSocket open during shutdown.
+      for (const socket of upgradedSockets) socket.destroy();
+      upgradedSockets.clear();
+      // Bun keeps upgraded handles in its HTTP server bookkeeping after the
+      // raw socket is destroyed; release that bookkeeping before close waits.
+      if (process.versions.bun !== undefined && sawUpgrade) {
+        server.closeAllConnections();
+      }
       if (!server.listening) {
         resume(Effect.void);
         return;
@@ -223,10 +241,12 @@ export const makeBoundedNodeHttpServer = Effect.fnUntraced(function* (
       yield* Effect.addFinalizer(() =>
         Effect.sync(() => {
           server.off("request", handler);
+          server.off("upgrade", trackUpgradedSocket);
           server.off("upgrade", upgradeHandler);
         }),
       );
       server.on("request", handler);
+      server.on("upgrade", trackUpgradedSocket);
       server.on("upgrade", upgradeHandler);
     }),
   });
