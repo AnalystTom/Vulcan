@@ -22,7 +22,13 @@ import type {
   NativeApi,
 } from "@vulcan/contracts";
 import { Schema } from "effect";
-import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import {
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type QueryClient,
+  type QueryKey,
+} from "@tanstack/react-query";
 import { useEffect, useMemo } from "react";
 
 import { readNativeApi } from "../nativeApi";
@@ -56,6 +62,26 @@ async function call(
   params: HermesBotRequest["params"] = {},
 ): Promise<unknown> {
   return requireApi().request({ method, params });
+}
+
+const HERMES_REGISTRY_READ_CAPACITY_CODE = "RPC_REQUEST_CAPACITY_EXCEEDED";
+const HERMES_REGISTRY_READ_RETRY_LIMIT = 4;
+const HERMES_REGISTRY_READ_RETRY_MS = 250;
+
+function errorCause(error: unknown): unknown {
+  return rec(error)?.cause;
+}
+
+export function shouldRetryHermesRegistryRead(failureCount: number, error: unknown): boolean {
+  return (
+    rec(errorCause(error))?.code === HERMES_REGISTRY_READ_CAPACITY_CODE &&
+    failureCount < HERMES_REGISTRY_READ_RETRY_LIMIT
+  );
+}
+
+function hermesRegistryReadRetryDelay(_attempt: number, error: unknown): number {
+  const retryAfterMs = num(rec(errorCause(error))?.retryAfterMs);
+  return retryAfterMs !== null && retryAfterMs > 0 ? retryAfterMs : HERMES_REGISTRY_READ_RETRY_MS;
 }
 
 // ── Tolerant payload readers ───────────────────────────────────────────────────
@@ -486,6 +512,7 @@ export async function resolveCanonicalChat(profile: string, knownCanonicalId: st
   } catch (cause) {
     throw new Error(
       `Could not check ${profile}'s Bot Chat registry (${errorMessage(cause)}). Not starting a new chat.`,
+      { cause },
     );
   }
   const existing = rows.find((row) => row.title === HERMES_BOT_CHAT_TITLE) ?? null;
@@ -898,16 +925,38 @@ export function useHermesEvent(handler: ((event: HermesBotsEvent) => void) | nul
   }, [api, handler]);
 }
 
-function routeEventInvalidation(queryClient: QueryClient, event: HermesBotsEvent) {
+const HERMES_EVENT_INVALIDATION_OPTIONS = { cancelRefetch: false } as const;
+
+function invalidateHermesQueries(queryClient: QueryClient, queryKey: QueryKey): void {
+  const pendingReads = queryClient
+    .getQueryCache()
+    .findAll({ queryKey })
+    .filter((query) => query.state.fetchStatus === "fetching")
+    .flatMap((query) => (query.promise ? [{ key: query.queryKey, promise: query.promise }] : []));
+
+  void queryClient.invalidateQueries({ queryKey }, HERMES_EVENT_INVALIDATION_OPTIONS);
+  for (const pending of pendingReads) {
+    void pending.promise.then(
+      () =>
+        queryClient.invalidateQueries(
+          { queryKey: pending.key, exact: true },
+          HERMES_EVENT_INVALIDATION_OPTIONS,
+        ),
+      () => undefined,
+    );
+  }
+}
+
+export function routeEventInvalidation(queryClient: QueryClient, event: HermesBotsEvent) {
   const type = event.type;
   if (type.startsWith("connection") || type === "status" || type.startsWith("bridge")) {
-    void queryClient.invalidateQueries({ queryKey: hermesKeys.status });
+    invalidateHermesQueries(queryClient, hermesKeys.status);
     return;
   }
   if (/room|group/i.test(type)) {
-    void queryClient.invalidateQueries({ queryKey: hermesKeys.rooms });
-    void queryClient.invalidateQueries({ queryKey: [ROOT, "room-state"] });
-    void queryClient.invalidateQueries({ queryKey: [ROOT, "room-log"] });
+    invalidateHermesQueries(queryClient, hermesKeys.rooms);
+    invalidateHermesQueries(queryClient, [ROOT, "room-state"]);
+    invalidateHermesQueries(queryClient, [ROOT, "room-log"]);
     return;
   }
   if (
@@ -915,9 +964,9 @@ function routeEventInvalidation(queryClient: QueryClient, event: HermesBotsEvent
     type.startsWith("session.") ||
     type.startsWith("message.")
   ) {
-    void queryClient.invalidateQueries({ queryKey: hermesKeys.chats });
+    invalidateHermesQueries(queryClient, hermesKeys.chats);
     if (type === "message.complete" || type === "session.info") {
-      void queryClient.invalidateQueries({ queryKey: hermesKeys.profiles });
+      invalidateHermesQueries(queryClient, hermesKeys.profiles);
     }
   }
 }
@@ -1100,7 +1149,7 @@ export function useHermesProfileMutations() {
 // ── Canonical chat ─────────────────────────────────────────────────────────────
 
 export function useHermesChat(profile: string | null, knownCanonicalId: string | null) {
-  return useQuery({
+  return useQuery<HermesChatSnapshot, Error>({
     queryKey: hermesKeys.chat(profile ?? ""),
     queryFn: () => {
       if (!profile) throw new Error("Pick a bot first.");
@@ -1108,7 +1157,8 @@ export function useHermesChat(profile: string | null, knownCanonicalId: string |
     },
     enabled: profile !== null,
     refetchInterval: (query) => (query.state.data?.running ? 3_000 : false),
-    retry: false,
+    retry: shouldRetryHermesRegistryRead,
+    retryDelay: hermesRegistryReadRetryDelay,
   });
 }
 

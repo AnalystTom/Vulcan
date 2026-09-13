@@ -1,0 +1,230 @@
+diff --git a/hermes_cli/config_defaults.py b/hermes_cli/config_defaults.py
+index 41b846a56f..2824a6c57e 100644
+--- a/hermes_cli/config_defaults.py
++++ b/hermes_cli/config_defaults.py
+@@ -408,6 +408,9 @@ DEFAULT_CONFIG = {
+         # Firefox etc. fails closed. Also gates the browser_exec `local` argument (real-profile
+         # local session even under a cloud backend). Desktop Settings -> Browser.
+         "use_real_profile": False,
++        # Require browser_exec callers in this profile to provide a named session.
++        # False preserves the shared task-scoped default behavior.
++        "require_named_session": False,
+         # Windows only: a running Chrome/Edge/Brave locks its cookie DB, so the profile can't be
+         # copied. When on, a locked profile still blocks and the agent ASKS first; on approval it
+         # runs `hermes browser close-profile` (kills that profile's browser tree, unsaved tabs lost)
+diff --git a/tests/tools/test_browser_use_cli.py b/tests/tools/test_browser_use_cli.py
+index cfdef3bab6..9135c534af 100644
+--- a/tests/tools/test_browser_use_cli.py
++++ b/tests/tools/test_browser_use_cli.py
+@@ -909,6 +909,112 @@ class TestSkillTextDescription:
+ 
+ 
+ class TestBrowserExec:
++    @pytest.mark.parametrize("config_setup", ["malformed", "unreadable"])
++    def test_config_error_returns_tool_error_before_backend_lookup(self, tmp_path, monkeypatch, config_setup):
++        config_path = tmp_path / "config.yaml"
++        if config_setup == "malformed":
++            config_path.write_text("browser: [MALFORMED_SECRET_SENTINEL", encoding="utf-8")
++        else:
++            config_path.mkdir()
++        monkeypatch.setattr("hermes_cli.config.get_config_path", lambda: config_path)
++        seen = []
++        monkeypatch.setattr(bu_cli, "_find_cli", lambda: seen.append(True) or ["/usr/bin/browser-use"])
++        result = json.loads(bu_cli.browser_exec("print(1)"))
++        assert "error" in result
++        assert "browser configuration" in result["error"].lower()
++        assert "MALFORMED_SECRET_SENTINEL" not in result["error"]
++        assert seen == []
++
++    def test_missing_config_preserves_default_backend_lookup(self, tmp_path, monkeypatch):
++        config_path = tmp_path / "missing-config.yaml"
++        cli = _fake_cli(tmp_path, 'cat > /dev/null\necho "ok"\n')
++        monkeypatch.setattr("hermes_cli.config.get_config_path", lambda: config_path)
++        monkeypatch.setattr(bu_cli, "_find_cli", lambda: [cli])
++        result = json.loads(bu_cli.browser_exec("print(1)"))
++        assert result["success"] is True
++
++    @pytest.mark.parametrize(
++        ("browser_cfg", "error_fragment"),
++        [([], "browser config section"), ({"require_named_session": "oops"}, "browser.require_named_session")],
++    )
++    def test_invalid_browser_policy_config_returns_tool_error_before_backend_lookup(
++        self, tmp_path, monkeypatch, browser_cfg, error_fragment
++    ):
++        config_path = tmp_path / "config.yaml"
++        import yaml
++        config_path.write_text(yaml.safe_dump({"browser": browser_cfg}), encoding="utf-8")
++        monkeypatch.setattr("hermes_cli.config.get_config_path", lambda: config_path)
++        seen = []
++        monkeypatch.setattr(bu_cli, "_find_cli", lambda: seen.append(True) or ["/usr/bin/browser-use"])
++        result = json.loads(bu_cli.browser_exec("print(1)"))
++        assert "error" in result
++        assert error_fragment in result["error"].lower()
++        assert seen == []
++
++    def test_explicit_false_named_session_policy_preserves_default_backend_lookup(self, tmp_path, monkeypatch):
++        config_path = tmp_path / "config.yaml"
++        cli = _fake_cli(tmp_path, 'cat > /dev/null\necho "ok"\n')
++        import yaml
++        config_path.write_text(
++            yaml.safe_dump({"browser": {"require_named_session": False}}), encoding="utf-8"
++        )
++        monkeypatch.setattr("hermes_cli.config.get_config_path", lambda: config_path)
++        monkeypatch.setattr(bu_cli, "_find_cli", lambda: [cli])
++        result = json.loads(bu_cli.browser_exec("print(1)"))
++        assert result["success"] is True
++
++    def test_default_profile_allows_unnamed_session(self, tmp_path, monkeypatch):
++        cli = _fake_cli(tmp_path, 'cat > /dev/null\necho "ok"\n')
++        monkeypatch.setattr(bu_cli, "_read_browser_cfg", lambda **_: {})
++        monkeypatch.setattr(bu_cli, "_find_cli", lambda: [cli])
++        result = json.loads(bu_cli.browser_exec("print(1)"))
++        assert result["success"] is True
++
++    def test_required_named_session_rejected_before_backend_lookup(self, monkeypatch):
++        seen = []
++        monkeypatch.setattr(bu_cli, "_read_browser_cfg", lambda **_: {"require_named_session": True})
++        monkeypatch.setattr(bu_cli, "_find_cli", lambda: seen.append(True) or ["/usr/bin/browser-use"])
++        result = json.loads(bu_cli.browser_exec("print(1)"))
++        assert "error" in result
++        assert "named browser session" in result["error"].lower()
++        assert seen == []
++
++    @pytest.mark.parametrize("session", ["strict-seo\n", " strict-seo", 123, []])
++    def test_required_named_session_rejects_invalid_value_before_backend_lookup(self, session, monkeypatch):
++        seen = []
++        monkeypatch.setattr(bu_cli, "_read_browser_cfg", lambda **_: {"require_named_session": True})
++        monkeypatch.setattr(bu_cli, "_find_cli", lambda: seen.append(True) or ["/usr/bin/browser-use"])
++        result = json.loads(bu_cli.browser_exec("print(1)", session=session))
++        assert "error" in result
++        assert "invalid session name" in result["error"].lower()
++        assert seen == []
++
++    def test_required_named_session_allows_named_backend(self, tmp_path, monkeypatch):
++        cli = _fake_cli(tmp_path, 'cat > /dev/null\necho "bu:$BU_NAME"\n')
++        monkeypatch.setattr(bu_cli, "_read_browser_cfg", lambda **_: {"require_named_session": True})
++        monkeypatch.setattr(bu_cli, "_find_cli", lambda: [cli])
++        result = json.loads(bu_cli.browser_exec("print(1)", session="strict-seo"))
++        assert result["success"] is True
++        assert result["session"] == "strict-seo"
++        assert "bu:strict-seo" in result["output"]
++
++    def test_dynamic_schema_requires_named_session(self, monkeypatch):
++        static_session = dict(bu_cli.BROWSER_EXEC_SCHEMA["parameters"]["properties"]["session"])
++        monkeypatch.setattr(bu_cli, "_real_profile_consented", lambda: False)
++        monkeypatch.setattr(bu_cli, "_read_browser_cfg", lambda **_: {"require_named_session": True})
++        schema = bu_cli._dynamic_schema_overrides()["parameters"]
++        strict_session = schema["properties"]["session"]
++        assert "session" in schema["required"]
++        assert "omit" not in strict_session["description"].lower()
++        assert "unique" in strict_session["description"].lower()
++        assert strict_session != static_session
++        assert bu_cli.BROWSER_EXEC_SCHEMA["parameters"]["properties"]["session"] == static_session
++
++        monkeypatch.setattr(bu_cli, "_read_browser_cfg", lambda **_: {})
++        default_overrides = bu_cli._dynamic_schema_overrides()
++        assert "parameters" not in default_overrides
++        assert bu_cli.BROWSER_EXEC_SCHEMA["parameters"]["properties"]["session"] == static_session
++
+     def test_missing_cli_returns_install_hint(self, monkeypatch):
+         monkeypatch.setattr(bu_cli, "_find_cli", lambda: None)
+         result = json.loads(bu_cli.browser_exec("print(page_info())"))
+diff --git a/tools/browser_use_cli.py b/tools/browser_use_cli.py
+index 3b80646dae..38c207c0f0 100644
+--- a/tools/browser_use_cli.py
++++ b/tools/browser_use_cli.py
+@@ -167,8 +167,20 @@ def _floor_subprocess_path(path: str) -> str:
+     return os.pathsep.join(parts + [d for d in _FHS_BIN_DIRS if d not in set(parts) and os.path.isdir(d)])
+ 
+ 
+-def _read_browser_cfg() -> dict:
+-    """Return the ``browser:`` config section, or {} on any failure."""
++def _read_browser_cfg(*, strict: bool = False) -> dict:
++    """Return the browser config section. Strict reads preserve config failures for the tool."""
++    if strict:
++        from hermes_cli.config import get_config_path, require_readable_config_before_write
++        try:
++            raw = require_readable_config_before_write(get_config_path())
++        except Exception as exc:
++            raise ValueError("config.yaml must be readable and valid YAML") from exc
++        cfg = raw.get("browser", {})
++        if not isinstance(cfg, dict):
++            raise ValueError("browser config section must be a mapping")
++        if "require_named_session" in cfg and not isinstance(cfg["require_named_session"], bool):
++            raise ValueError("browser.require_named_session must be a boolean")
++        return cfg
+     try:
+         from hermes_cli.config import cfg_get, read_raw_config
+         cfg = cfg_get(read_raw_config(), "browser", default={})
+@@ -591,6 +603,22 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
+     if blocked:
+         return tool_error(blocked)
+ 
++    try:
++        browser_cfg = _read_browser_cfg(strict=True)
++    except ValueError as e:
++        return tool_error("Browser configuration error: " + str(e))
++    require_named_session = is_truthy_value(browser_cfg.get("require_named_session"), default=False)
++    # Validate before CLI/backend resolution so a strict profile cannot create or attach
++    # to a browser under the task-scoped default key by omission.
++    if not isinstance(session, str) or (session and _SESSION_RE.fullmatch(session) is None):
++        return tool_error(f"Invalid session name {session!r}: use 1-64 letters, digits, "
++                          "dashes, or underscores (e.g. 'r7k2').")
++    if require_named_session and not session:
++        return tool_error(
++            "A named browser session is required by this profile. Pass the native top-level "
++            "browser_exec `session` argument; a label inside `code` does not count."
++        )
++
+     cmd = _find_cli()
+     if not cmd:
+         return tool_error("browser-use CLI not found on PATH, and uvx is unavailable for a zero-install run. "
+@@ -599,9 +627,6 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
+ 
+     env = _base_subprocess_env()
+     if session:
+-        if not _SESSION_RE.match(session):
+-            return tool_error(f"Invalid session name {session!r}: use 1-64 letters, digits, "
+-                              "dashes, or underscores (e.g. 'r7k2').")
+         env["BU_NAME"] = session
+     route_err = _route_backend(env, session, task_id, bool(local))
+     if route_err:
+@@ -718,11 +743,15 @@ def _description_header() -> str:
+ 
+ def _dynamic_schema_overrides() -> dict:
+     overrides: dict = {"description": _description_header() + _HELPERS_DIGEST}
++    browser_cfg = _read_browser_cfg()
++    props = dict(BROWSER_EXEC_SCHEMA["parameters"]["properties"])
++    base_required = BROWSER_EXEC_SCHEMA["parameters"].get("required", [])
++    required = list(base_required)
+     # ``local`` exists ONLY when the user consented to real-profile browsing — everyone
+     # else's schema carries zero extra surface. The caller memoizes on config.yaml mtime,
+     # so toggling consent applies next session, not mid-chat.
+-    if _real_profile_consented():
+-        props = dict(BROWSER_EXEC_SCHEMA["parameters"]["properties"])
++    real_profile_consented = _real_profile_consented()
++    if real_profile_consented:
+         props["local"] = {
+             "type": "boolean", "default": False,
+             "description": ("Drive the user's own local browser (a Hermes-managed copy of their real "
+@@ -730,7 +759,19 @@ def _dynamic_schema_overrides() -> dict:
+                             "cloud browser backend. Use when the user asks to act as themselves — their "
+                             "accounts, their sessions. No-op when the backend is already local. Default false."),
+         }
+-        overrides["parameters"] = {**BROWSER_EXEC_SCHEMA["parameters"], "properties": props}
++    require_named_session = is_truthy_value(browser_cfg.get("require_named_session"), default=False)
++    if require_named_session:
++        required = list(dict.fromkeys([*required, "session"]))
++        session_prop = dict(props["session"])
++        session_prop["description"] = (
++            "Required named isolated browser session for this goal. Provide a unique name for each "
++            "independent goal and reuse that exact name on every related browser_exec call."
++        )
++        props["session"] = session_prop
++    if real_profile_consented or required != list(base_required):
++        overrides["parameters"] = {
++            **BROWSER_EXEC_SCHEMA["parameters"], "properties": props, "required": required
++        }
+     return overrides
+ 
+ 

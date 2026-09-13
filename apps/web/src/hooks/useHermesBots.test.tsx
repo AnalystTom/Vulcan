@@ -1,4 +1,5 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, QueryObserver } from "@tanstack/react-query";
+import { WsRpcError } from "@vulcan/contracts";
 import type { ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -11,7 +12,9 @@ import {
   parseRoutineList,
   parseRoomList,
   readHermesRoomLog,
+  routeEventInvalidation,
   resolveCanonicalChat,
+  shouldRetryHermesRegistryRead,
   useHermesProfileMutations,
   useHermesRoutineMutations,
   useHermesRoomMutations,
@@ -269,6 +272,87 @@ describe("Hermes native response boundaries", () => {
     );
   });
 
+  it("retries a capacity failure from the registry read before resuming and never creates a chat", async () => {
+    const capacity = new WsRpcError({
+      code: "RPC_REQUEST_CAPACITY_EXCEEDED",
+      retryable: true,
+      retryAfterMs: 250,
+      message: "WebSocket standard request capacity exceeded.",
+    });
+    let listAttempts = 0;
+    mocks.request.mockImplementation(async ({ method }: { method: string }) => {
+      if (method === "session.list") {
+        listAttempts += 1;
+        if (listAttempts === 1) throw capacity;
+        return { sessions: [{ id: "stored-alpha", title: "Bot Chat" }] };
+      }
+      return { session_id: "runtime-alpha", status: "idle", running: false, messages: [] };
+    });
+
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const chat = await queryClient.fetchQuery({
+      queryKey: hermesKeys.chat("alpha"),
+      queryFn: () => resolveCanonicalChat("alpha", null),
+      retry: shouldRetryHermesRegistryRead,
+      retryDelay: 0,
+    });
+
+    expect(chat.runtimeSessionId).toBe("runtime-alpha");
+    expect(mocks.request.mock.calls.map(([request]) => request.method)).toEqual([
+      "session.list",
+      "session.list",
+      "session.resume",
+    ]);
+    expect(mocks.request).not.toHaveBeenCalledWith(
+      expect.objectContaining({ method: "session.create" }),
+    );
+  });
+
+  it("stops retrying a registry capacity failure at the bounded limit", async () => {
+    const capacity = new WsRpcError({
+      code: "RPC_REQUEST_CAPACITY_EXCEEDED",
+      retryable: true,
+      retryAfterMs: 250,
+      message: "WebSocket standard request capacity exceeded.",
+    });
+    mocks.request.mockRejectedValue(capacity);
+    const queryClient = new QueryClient();
+
+    await expect(
+      queryClient.fetchQuery({
+        queryKey: hermesKeys.chat("alpha"),
+        queryFn: () => resolveCanonicalChat("alpha", null),
+        retry: shouldRetryHermesRegistryRead,
+        retryDelay: 0,
+      }),
+    ).rejects.toThrow("Could not check alpha's Bot Chat registry");
+    expect(mocks.request).toHaveBeenCalledTimes(5);
+    expect(mocks.request).not.toHaveBeenCalledWith(
+      expect.objectContaining({ method: "session.create" }),
+    );
+  });
+
+  it("does not retry a capacity failure after session resume may have started work", async () => {
+    const capacity = new WsRpcError({
+      code: "RPC_REQUEST_CAPACITY_EXCEEDED",
+      retryable: true,
+      retryAfterMs: 250,
+      message: "WebSocket standard request capacity exceeded.",
+    });
+    mocks.request.mockImplementation(async ({ method }: { method: string }) => {
+      if (method === "session.list")
+        return { sessions: [{ id: "stored-alpha", title: "Bot Chat" }] };
+      throw capacity;
+    });
+
+    await expect(resolveCanonicalChat("alpha", "stored-alpha")).rejects.toBe(capacity);
+    expect(shouldRetryHermesRegistryRead(0, capacity)).toBe(false);
+    expect(mocks.request.mock.calls.map(([request]) => request.method)).toEqual([
+      "session.list",
+      "session.resume",
+    ]);
+  });
+
   it("replays a failed native turn instead of presenting its idle session as successful", async () => {
     // Captured shape from the pinned gateway after an Anthropic HTTP 403.
     mocks.request.mockImplementation(async ({ method }: { method: string }) =>
@@ -367,4 +451,190 @@ it("renders a persisted native chat row once when resume repeats history", () =>
   const rows = parseChatMessages([message, toolCall, tool, message, tool]);
   expect(rows.map((row) => row.rowId)).toEqual(["8", null, null]);
   expect(rows.map((row) => row.role)).toEqual(["assistant", "tool", "tool"]);
+});
+
+describe("Hermes event invalidation", () => {
+  it("keeps one pending chat read alive across an event burst", async () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const key = hermesKeys.chat("alpha");
+    queryClient.setQueryData(key, { revision: 1 });
+
+    let reads = 0;
+    let resolveRead!: (value: { revision: number }) => void;
+    const pendingRead = new Promise<{ revision: number }>((resolve) => {
+      resolveRead = resolve;
+    });
+    const observer = new QueryObserver(queryClient, {
+      queryKey: key,
+      queryFn: async () => {
+        reads += 1;
+        return reads === 1 ? pendingRead : { revision: 2 };
+      },
+      staleTime: Number.POSITIVE_INFINITY,
+    });
+    const updates: Array<{ revision: number } | undefined> = [];
+    const unsubscribe = observer.subscribe((result) => updates.push(result.data));
+
+    const event = { type: "message.delta", payload: { session_id: "runtime-alpha" } };
+    routeEventInvalidation(queryClient, event);
+    routeEventInvalidation(queryClient, event);
+    routeEventInvalidation(queryClient, event);
+    await vi.waitFor(() => expect(reads).toBe(1));
+
+    routeEventInvalidation(queryClient, {
+      type: "message.complete",
+      payload: { session_id: "runtime-alpha" },
+    });
+    resolveRead({ revision: 1 });
+    await vi.waitFor(() => expect(updates.at(-1)).toEqual({ revision: 2 }));
+    expect(reads).toBe(2);
+    unsubscribe();
+  });
+
+  it("does not trail a failed cached read and replay an uncertain operation", async () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const key = hermesKeys.chat("alpha");
+    queryClient.setQueryData(key, { revision: 1 });
+    let reads = 0;
+    const observer = new QueryObserver(queryClient, {
+      queryKey: key,
+      queryFn: async () => {
+        reads += 1;
+        throw new Error("resume outcome is unknown");
+      },
+      staleTime: Number.POSITIVE_INFINITY,
+    });
+    const unsubscribe = observer.subscribe(() => undefined);
+
+    routeEventInvalidation(queryClient, {
+      type: "message.complete",
+      payload: { session_id: "runtime-alpha" },
+    });
+    await vi.waitFor(() => expect(observer.getCurrentResult().isRefetchError).toBe(true));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(reads).toBe(1);
+    unsubscribe();
+  });
+
+  it("trails a completion event that arrives during a cold chat read", async () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const key = hermesKeys.chat("alpha");
+    let reads = 0;
+    let resolveRead!: (value: { revision: number }) => void;
+    const pendingRead = new Promise<{ revision: number }>((resolve) => {
+      resolveRead = resolve;
+    });
+    const observer = new QueryObserver(queryClient, {
+      queryKey: key,
+      queryFn: async () => {
+        reads += 1;
+        return reads === 1 ? pendingRead : { revision: 2 };
+      },
+      staleTime: Number.POSITIVE_INFINITY,
+    });
+    const updates: Array<{ revision: number } | undefined> = [];
+    const unsubscribe = observer.subscribe((result) => updates.push(result.data));
+    await vi.waitFor(() => expect(reads).toBe(1));
+
+    routeEventInvalidation(queryClient, {
+      type: "message.complete",
+      payload: { session_id: "runtime-alpha" },
+    });
+    resolveRead({ revision: 1 });
+    await vi.waitFor(() => expect(updates.at(-1)).toEqual({ revision: 2 }));
+    expect(reads).toBe(2);
+    unsubscribe();
+  });
+
+  it("does not repeat a trailing read after that follow-up fails", async () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const key = hermesKeys.chat("alpha");
+    queryClient.setQueryData(key, { revision: 1 });
+    let reads = 0;
+    let resolveRead!: (value: { revision: number }) => void;
+    const pendingRead = new Promise<{ revision: number }>((resolve) => {
+      resolveRead = resolve;
+    });
+    const observer = new QueryObserver(queryClient, {
+      queryKey: key,
+      queryFn: async () => {
+        reads += 1;
+        if (reads === 1) return pendingRead;
+        throw new Error("follow-up read failed");
+      },
+      staleTime: Number.POSITIVE_INFINITY,
+    });
+    const unsubscribe = observer.subscribe(() => undefined);
+    routeEventInvalidation(queryClient, {
+      type: "message.complete",
+      payload: { session_id: "runtime-alpha" },
+    });
+    await vi.waitFor(() => expect(reads).toBe(1));
+    routeEventInvalidation(queryClient, {
+      type: "message.complete",
+      payload: { session_id: "runtime-alpha" },
+    });
+    resolveRead({ revision: 1 });
+    await vi.waitFor(() => expect(reads).toBe(2));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(reads).toBe(2);
+    unsubscribe();
+  });
+
+  it("trails each profile independently when one pending read fails", async () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const alphaKey = hermesKeys.chat("alpha");
+    const betaKey = hermesKeys.chat("beta");
+    queryClient.setQueryData(alphaKey, { revision: 1 });
+    queryClient.setQueryData(betaKey, { revision: 1 });
+    let alphaReads = 0;
+    let betaReads = 0;
+    let rejectAlpha!: (error: Error) => void;
+    let resolveBeta!: (value: { revision: number }) => void;
+    const alphaRead = new Promise<never>((_resolve, reject) => {
+      rejectAlpha = reject;
+    });
+    const betaRead = new Promise<{ revision: number }>((resolve) => {
+      resolveBeta = resolve;
+    });
+    const alphaObserver = new QueryObserver(queryClient, {
+      queryKey: alphaKey,
+      queryFn: async () => {
+        alphaReads += 1;
+        return alphaRead;
+      },
+      staleTime: Number.POSITIVE_INFINITY,
+    });
+    const betaObserver = new QueryObserver(queryClient, {
+      queryKey: betaKey,
+      queryFn: async () => {
+        betaReads += 1;
+        return betaReads === 1 ? betaRead : { revision: 2 };
+      },
+      staleTime: Number.POSITIVE_INFINITY,
+    });
+    const unsubscribeAlpha = alphaObserver.subscribe(() => undefined);
+    const betaUpdates: Array<{ revision: number } | undefined> = [];
+    const unsubscribeBeta = betaObserver.subscribe((result) => betaUpdates.push(result.data));
+
+    routeEventInvalidation(queryClient, {
+      type: "message.complete",
+      payload: { session_id: "runtime-alpha" },
+    });
+    await vi.waitFor(() => {
+      expect(alphaReads).toBe(1);
+      expect(betaReads).toBe(1);
+    });
+    routeEventInvalidation(queryClient, {
+      type: "message.complete",
+      payload: { session_id: "runtime-alpha" },
+    });
+    rejectAlpha(new Error("alpha read failed"));
+    resolveBeta({ revision: 1 });
+    await vi.waitFor(() => expect(betaUpdates.at(-1)).toEqual({ revision: 2 }));
+    expect(alphaReads).toBe(1);
+    expect(betaReads).toBe(2);
+    unsubscribeAlpha();
+    unsubscribeBeta();
+  });
 });
