@@ -1,8 +1,7 @@
 diff --git a/cli.py b/cli.py
-index 58702f1967..3e1112df6f 100644
 --- a/cli.py
 +++ b/cli.py
-@@ -960,6 +960,11 @@ def _wait_for_oneshot_background_completions(cli) -> None:
+@@ -960,6 +960,11 @@
      from tools.process_registry import process_registry
  
      _agent, task_id = _oneshot_agent_and_session(cli)
@@ -14,7 +13,7 @@ index 58702f1967..3e1112df6f 100644
      result = process_registry.wait_for_pending_completions(None)
      if result.get("waited"):
          logger.info(
-@@ -988,6 +993,12 @@ def _finalize_single_query(cli) -> None:
+@@ -988,6 +993,12 @@
          _notify_single_query_session_finalize(cli)
          _run_cleanup(notify_session_finalize=False)
      finally:
@@ -27,12 +26,13 @@ index 58702f1967..3e1112df6f 100644
          cli._release_active_session()
  
  
-@@ -2959,14 +2970,22 @@ class HermesCLI(CLIProcessNotificationsMixin, CLIAgentSetupMixin, CLICommandsMix
+@@ -2959,14 +2970,22 @@
              return True
          try:
              from hermes_cli.active_sessions import format_refusal_stderr, try_acquire_active_session
+-
 +            from hermes_cli.cli_bot_live_delivery import is_bot_live_delivery_consumer
- 
++
 +            self._bot_live_delivery_consumer = bool(is_bot_live_delivery_consumer(self))
 +            if self._bot_live_delivery_consumer:
 +                self._bot_live_delivery_live_session_id = str(self.session_id)
@@ -51,12 +51,17 @@ index 58702f1967..3e1112df6f 100644
              )
          except Exception as exc:
              logger.warning("Failed to claim active session slot: %s", exc)
-@@ -4080,7 +4099,12 @@ def _run_quiet_single_query(cli, effective_query):
+@@ -4080,7 +4099,17 @@
          sys.exit(130)
      # The exit line below reports session_id to stderr for automation wrappers;
      # without this sync it would point at the ended parent after compression.
 +    _old_session_id = cli.session_id
      _sync_cli_session_id_from_agent(cli)
++    # Quiet one-shot turns also host the native Bot Chat mailbox consumer. Keep its
++    # in-memory snapshot at the finalized turn boundary before a queued reply calls
++    # cli.chat(); otherwise that next turn replays the pre-turn (stale) history.
++    if isinstance(result, dict) and isinstance(result.get("messages"), list):
++        cli.conversation_history = result["messages"]
 +    if cli.session_id != _old_session_id and getattr(cli, "_bot_live_delivery_consumer", False):
 +        from hermes_cli.cli_bot_live_delivery import transfer_live_owner_after_compression
 +
@@ -474,10 +479,9 @@ index d95f8182a6..c633d0c243 100644
          # renderer does its WS handshake + first hydration reads, so arm it one
 diff --git a/tests/cli/test_bot_live_delivery.py b/tests/cli/test_bot_live_delivery.py
 new file mode 100644
-index 0000000000..fa5b04ae21
 --- /dev/null
 +++ b/tests/cli/test_bot_live_delivery.py
-@@ -0,0 +1,852 @@
+@@ -0,0 +1,916 @@
 +"""Focused native one-shot Bot Chat mailbox-consumer regressions."""
 +from types import SimpleNamespace
 +from pathlib import Path
@@ -1330,6 +1334,70 @@ index 0000000000..fa5b04ae21
 +    monkeypatch.setattr("hermes_cli.profiles.profiles_to_serve",
 +                        lambda multiplex: [("default", root)])
 +    assert startup._profile_targets("stale-active") == [("research", named)]
++
++
++def test_quiet_initial_turn_history_feeds_queued_mailbox_turn(tmp_path, monkeypatch):
++    """The initial resumed turn's finalized context must reach a real mailbox drain."""
++    import cli as cli_mod
++    from hermes_cli import cli_bot_live_delivery
++    from tools import bot_live_delivery as mailbox
++
++    db = _bot_chat_db(tmp_path)
++    lease = _owner(tmp_path, db, live="chat")
++    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: tmp_path)
++    resumed = [
++        {"role": "user", "content": "stale prior goal E"},
++        {"role": "assistant", "content": "prior E answer"},
++    ]
++    after_initial = resumed + [
++        {"role": "user", "content": "new goal F"},
++        {"role": "assistant", "content": "F handoff context"},
++    ]
++    after_reply = after_initial + [
++        {"role": "user", "content": "queued child return"},
++        {"role": "assistant", "content": "F verified reply"},
++    ]
++    seen = []
++    results = iter([
++        {"final_response": "F handoff context", "messages": after_initial, "completed": True},
++        {"final_response": "F verified reply", "messages": after_reply, "completed": True},
++    ])
++
++    def run_conversation(*, user_message, conversation_history):
++        seen.append((user_message, list(conversation_history)))
++        return next(results)
++    agent = SimpleNamespace(run_conversation=run_conversation, session_id="chat")
++    cli = SimpleNamespace(
++        agent=agent, conversation_history=resumed, session_id="chat",
++        _single_query_mode=True, _bot_live_delivery_consumer=True,
++        _bot_live_delivery_live_session_id="chat", _active_session_lease=lease,
++        _session_db=db, _last_turn_result=None, _last_turn_interrupted=False,
++    )
++
++    def chat(message):
++        outcome = run_conversation(user_message=message, conversation_history=cli.conversation_history)
++        cli._last_turn_result = outcome
++        cli._last_turn_interrupted = False
++        return outcome["final_response"]
++
++    cli.chat = chat
++    try:
++        with pytest.raises(SystemExit) as exc_info:
++            cli_mod._run_quiet_single_query(cli, "new goal F")
++        assert exc_info.value.code == 0
++        owner = mailbox.find_canonical_live_owner(tmp_path)
++        queued = mailbox.deliver_to_live_owner(tmp_path, owner, "queued child return")
++        assert cli_bot_live_delivery.drain_one(cli) is True
++        receipt = mailbox.read_delivery_result(tmp_path, queued["delivery_id"])
++        assert receipt["status"] == "settled"
++        assert seen == [
++            ("new goal F", resumed),
++            ("queued child return", after_initial),
++        ]
++        assert cli.conversation_history == after_initial
++    finally:
++        lease.release()
++        db.close()
 diff --git a/tools/bot_live_delivery.py b/tools/bot_live_delivery.py
 index 981346c779..20555bd708 100644
 --- a/tools/bot_live_delivery.py
