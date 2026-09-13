@@ -85,6 +85,7 @@ const ATTACHMENT_SVG = "<svg xmlns='http://www.w3.org/2000/svg' width='120' heig
 let attachmentResponseDelayMs = 0;
 let attachmentUploadSequence = 0;
 let attachmentUploadBarrier: Promise<void> | null = null;
+let attachmentUploadStarted = false;
 
 interface WsRequestEnvelope {
   id: string;
@@ -1401,6 +1402,7 @@ const worker = setupWorker(
     });
   }),
   http.post(`*${ATTACHMENT_UPLOAD_ROUTE_PATH}`, async ({ request }) => {
+    attachmentUploadStarted = true;
     const url = new URL(request.url);
     const bytes = await request.arrayBuffer();
     await attachmentUploadBarrier;
@@ -2040,6 +2042,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
     attachmentResponseDelayMs = 0;
     attachmentUploadSequence = 0;
     attachmentUploadBarrier = null;
+    attachmentUploadStarted = false;
     localStorage.clear();
     useLatestProjectStore.setState({ latestProjectId: null });
     useWorkspacePathsStore.setState({
@@ -6376,11 +6379,19 @@ describe("ChatView timeline estimator parity (full app)", () => {
           previewUrl: "blob:new-worktree-cancel-upload-image",
         }),
       );
+      await expect
+        .element(page.getByRole("button", { name: "Preview queued-image.png" }))
+        .toBeInTheDocument();
       const composerForm = document.querySelector<HTMLFormElement>(
         'form[data-chat-composer-form="true"]',
       );
       expect(composerForm).not.toBeNull();
       composerForm!.requestSubmit();
+
+      // The setup card can render before the async upload reaches MSW. Wait for
+      // the real request to enter the barrier so Cancel exercises the intended
+      // in-flight upload path instead of racing a pre-upload cleanup.
+      await expect.poll(() => attachmentUploadStarted).toBe(true);
 
       await expect
         .poll(

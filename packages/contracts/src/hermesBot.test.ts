@@ -5,6 +5,16 @@ import { Effect, Schema } from "effect";
 import { HermesBotRequest } from "./hermesBot";
 
 describe("Hermes Bot RPC JSON codec", () => {
+  it.effect("allows a profile-scoped native model check through the bot bridge", () =>
+    Effect.gen(function* () {
+      const request = {
+        method: "model.check",
+        params: { profile: "research", provider: "openai-codex", model: "gpt-5.6-luna" },
+      };
+      expect(yield* Schema.decodeUnknownEffect(HermesBotRequest)(request)).toEqual(request);
+    }),
+  );
+
   it.effect("preserves native params and JSON results on the wire", () =>
     Effect.gen(function* () {
       const request = {

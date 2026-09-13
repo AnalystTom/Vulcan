@@ -35,6 +35,7 @@ export const HERMES_BOT_METHODS = [
   "groups.approve",
   "cron.manage",
   "model.options",
+  "model.check",
 ] as const;
 
 export const HermesBotMethod = Schema.Literals(HERMES_BOT_METHODS);

@@ -1,0 +1,835 @@
+diff --git a/agent/auxiliary_client.py b/agent/auxiliary_client.py
+index 18e5d123db..f23e52003d 100644
+--- a/agent/auxiliary_client.py
++++ b/agent/auxiliary_client.py
+@@ -1513,7 +1513,15 @@ class _CodexCompletionsAdapter:
+         choice = SimpleNamespace(
+             index=0, message=message, finish_reason="stop" if not tool_calls_raw else "tool_calls"
+         )
+-        return SimpleNamespace(choices=[choice], model=model, usage=usage)
++        provider_model = getattr(final, "_hermes_provider_model", _MISSING_PROVIDER_MODEL)
++        if provider_model is _MISSING_PROVIDER_MODEL:
++            provider_model = _field(final, "model")
++        provider_model = provider_model.strip() if isinstance(provider_model, str) and provider_model.strip() else None
++        provider_status = _field(final, "status")
++        provider_status = provider_status.strip().lower() if isinstance(provider_status, str) and provider_status.strip() else None
++        return SimpleNamespace(choices=[choice], model=model, usage=usage,
++                               _hermes_provider_model=provider_model,
++                               _hermes_provider_status=provider_status)
+ 
+ 
+ class _ChatShim:
+@@ -1708,7 +1716,10 @@ class _AnthropicCompletionsAdapter:
+             message=SimpleNamespace(content=_nr.content, tool_calls=_nr.tool_calls, reasoning=_nr.reasoning),
+             finish_reason=_nr.finish_reason,
+         )
+-        return SimpleNamespace(choices=[choice], model=model, usage=usage)
++        provider_model = getattr(response, "model", None)
++        provider_model = provider_model.strip() if isinstance(provider_model, str) and provider_model.strip() else None
++        return SimpleNamespace(choices=[choice], model=model, usage=usage,
++                               _hermes_provider_model=provider_model)
+ 
+ 
+ class AnthropicAuxiliaryClient:
+@@ -1767,6 +1778,9 @@ class _BedrockCompletionsAdapter:
+         )
+         # Converse is complete-response here: mark provider progress only after
+         # return so TTFP reflects real Bedrock latency, not dispatch/setup.
++        # The normalized Converse shape echoes the request model; Bedrock does not
++        # expose provider model provenance in this response, so strict checks must fail closed.
++        setattr(response, "_hermes_provider_model", None)
+         _notify_aux_provider_response()
+         return response
+ 
+@@ -6483,6 +6497,7 @@ def _aggregate_chat_stream(
+ 
+ # Reasoning-detail fields whose non-empty text counts as forward progress.
+ _REASONING_DETAIL_TEXT_FIELDS = ("summary", "thinking", "content", "text")
++_MISSING_PROVIDER_MODEL = object()
+ 
+ 
+ class _ChatStreamAccumulator:
+@@ -6505,6 +6520,9 @@ class _ChatStreamAccumulator:
+         self.finish_reason = self.usage = None
+         self.resp_id = ""
+         self.resp_model = model or ""
++        # ``resp_model`` is the request fallback used by existing auxiliary callers.
++        # Keep provider evidence separate: some adapters synthesize ``model`` from the request.
++        self.provider_model: Optional[str] = None
+ 
+     def _check_deadlines(self) -> None:
+         """Raise TimeoutError past the total ceiling or the host deadline."""
+@@ -6562,6 +6580,11 @@ class _ChatStreamAccumulator:
+         self._check_deadlines()
+         self.resp_id = getattr(chunk, "id", None) or self.resp_id
+         self.resp_model = getattr(chunk, "model", None) or self.resp_model
++        provider_model = getattr(chunk, "_hermes_provider_model", _MISSING_PROVIDER_MODEL)
++        if provider_model is _MISSING_PROVIDER_MODEL:
++            provider_model = getattr(chunk, "model", None)
++        if isinstance(provider_model, str) and provider_model.strip():
++            self.provider_model = provider_model.strip()
+         chunk_usage = getattr(chunk, "usage", None)
+         if chunk_usage:
+             self.usage = chunk_usage
+@@ -6605,7 +6628,8 @@ class _ChatStreamAccumulator:
+         )
+         choice = SimpleNamespace(index=0, message=message, finish_reason=self.finish_reason or "stop")
+         return SimpleNamespace(id=self.resp_id, model=self.resp_model, object="chat.completion",
+-                               choices=[choice], usage=self.usage)
++                               choices=[choice], usage=self.usage,
++                               _hermes_provider_model=self.provider_model)
+ 
+ 
+ async def _aggregate_chat_stream_async(
+diff --git a/agent/codex_runtime.py b/agent/codex_runtime.py
+index 48a6c1a673..2feaf1e9a5 100644
+--- a/agent/codex_runtime.py
++++ b/agent/codex_runtime.py
+@@ -605,6 +605,7 @@ class _CodexResponseAssembler:
+         # back in stream order.
+         self.output_indexes, self.output_sequences = [], []
+         self.text_deltas, self.commentary_text_deltas = [], []
++        self.terminal_model = None
+         # pending_function_calls: announced-but-unconfirmed function calls keyed by item id. announced_output_order:
+         # first-observed (sequence, output_index) per announced item id so a later .done keeps its announced position.
+         self.pending_function_calls: Dict[str, Dict[str, Any]] = {}
+@@ -706,6 +707,7 @@ class _CodexResponseAssembler:
+         resp_obj = _event_field(event, "response")
+         if resp_obj is not None:
+             self.terminal_usage, self.terminal_response_id = _event_field(resp_obj, "usage"), _event_field(resp_obj, "id")
++            self.terminal_model = _event_field(resp_obj, "model")
+             rstatus = _event_field(resp_obj, "status")
+             if isinstance(rstatus, str):
+                 self.terminal_status = rstatus
+@@ -771,8 +773,9 @@ class _CodexResponseAssembler:
+             raise RuntimeError("Codex Responses stream did not emit a terminal response")
+         return SimpleNamespace(
+             output=output, output_text="".join(self.text_deltas), usage=self.terminal_usage, status=self.terminal_status,
+-            id=self.terminal_response_id, model=self.model, incomplete_details=self.terminal_incomplete_details,
+-            error=self.terminal_error)
++            id=self.terminal_response_id, model=self.model,
++            _hermes_provider_model=self.terminal_model,
++            incomplete_details=self.terminal_incomplete_details, error=self.terminal_error)
+ 
+ 
+ def _consume_codex_event_stream(
+diff --git a/agent/gemini_native_adapter.py b/agent/gemini_native_adapter.py
+index 9dafa4d6bf..9393a71c52 100644
+--- a/agent/gemini_native_adapter.py
++++ b/agent/gemini_native_adapter.py
+@@ -442,10 +442,13 @@ def _usage_from_metadata(usage_meta: Dict[str, Any]) -> SimpleNamespace:
+     )
+ 
+ 
+-def _envelope(model: str, object_: str, choice: SimpleNamespace, usage: Any, cls: type = SimpleNamespace) -> Any:
++def _envelope(
++    model: str, object_: str, choice: SimpleNamespace, usage: Any, cls: type = SimpleNamespace,
++    provider_model: Optional[str] = None,
++) -> Any:
+     """OpenAI chat.completion / chat.completion.chunk envelope around one choice."""
+     return cls(id=f"chatcmpl-{uuid.uuid4().hex[:12]}", object=object_, created=int(time.time()), model=model,
+-               choices=[choice], usage=usage)
++               choices=[choice], usage=usage, _hermes_provider_model=provider_model)
+ 
+ 
+ def _tool_call_ns(name: str, arguments: str, index: int, call_id: str, extra_content: Any) -> SimpleNamespace:
+@@ -484,17 +487,23 @@ def translate_gemini_response(resp: Dict[str, Any], model: str) -> SimpleNamespa
+             tool_calls.append(_tool_call_ns(str(fc["name"]), _dump_call_args(fc), index, _new_call_id(fc), _tool_call_extra_from_part(part)))
+     finish_reason = "tool_calls" if tool_calls else _FINISH_REASON_MAP.get(str((cand or {}).get("finishReason") or "").upper(), "stop")
+     usage = _usage_from_metadata((resp.get("usageMetadata") or {}) if cand is not None else {})
++    provider_model = resp.get("modelVersion")
++    provider_model = provider_model.strip() if isinstance(provider_model, str) and provider_model.strip() else None
+     reasoning = "".join(pieces[True]) or None
+     message = SimpleNamespace(role="assistant", content="".join(pieces[False]) if pieces[False] else ("" if cand is None else None),
+                               tool_calls=tool_calls or None, reasoning=reasoning, reasoning_content=reasoning, reasoning_details=None)
+-    return _envelope(model, "chat.completion", SimpleNamespace(index=0, message=message, finish_reason=finish_reason), usage)
++    return _envelope(
++        model, "chat.completion", SimpleNamespace(index=0, message=message, finish_reason=finish_reason),
++        usage, provider_model=provider_model,
++    )
+ 
+ 
+ class _GeminiStreamChunk(SimpleNamespace): ...
+ 
+ 
+ def _make_stream_chunk(
+-    *, model: str, content: str = "", tool_call_delta: Optional[Dict[str, Any]] = None, finish_reason: Optional[str] = None, reasoning: str = "",
++    *, model: str, content: str = "", tool_call_delta: Optional[Dict[str, Any]] = None, finish_reason: Optional[str] = None,
++    reasoning: str = "", provider_model: Optional[str] = None,
+ ) -> _GeminiStreamChunk:
+     d = tool_call_delta
+     tool_calls = None if d is None else [
+@@ -503,7 +512,7 @@ def _make_stream_chunk(
+     delta = SimpleNamespace(role="assistant", content=content or None, tool_calls=tool_calls, reasoning=reasoning or None,
+                             reasoning_content=reasoning or None)
+     choice = SimpleNamespace(index=0, delta=delta, finish_reason=finish_reason)
+-    return _envelope(model, "chat.completion.chunk", choice, None, cls=_GeminiStreamChunk)
++    return _envelope(model, "chat.completion.chunk", choice, None, cls=_GeminiStreamChunk, provider_model=provider_model)
+ 
+ 
+ def _iter_sse_events(response: httpx.Response) -> Iterator[Dict[str, Any]]:
+@@ -533,15 +542,17 @@ def translate_stream_event(event: Dict[str, Any], model: str, tool_call_indices:
+     cand = candidates[0] if isinstance(candidates[0], dict) else {}
+     parts = (cand.get("content") or {}).get("parts") or []
+     chunks: List[_GeminiStreamChunk] = []
++    provider_model = event.get("modelVersion")
++    provider_model = provider_model.strip() if isinstance(provider_model, str) and provider_model.strip() else None
+     for part_index, part in enumerate(parts):
+         if not isinstance(part, dict):
+             continue
+         text, is_thought = _part_text(part)
+         if is_thought:
+-            chunks.append(_make_stream_chunk(model=model, reasoning=text))
++            chunks.append(_make_stream_chunk(model=model, reasoning=text, provider_model=provider_model))
+             continue
+         if text:
+-            chunks.append(_make_stream_chunk(model=model, content=text))
++            chunks.append(_make_stream_chunk(model=model, content=text, provider_model=provider_model))
+         if fc := _part_function_call(part):
+             name = str(fc["name"])
+             args_str = _dump_call_args(fc, sort_keys=True)
+@@ -554,10 +565,10 @@ def translate_stream_event(event: Dict[str, Any], model: str, tool_call_indices:
+             slot["last_arguments"] = args_str
+             delta = {"index": slot["index"], "id": slot["id"], "name": name, "extra_content": _tool_call_extra_from_part(part),
+                      "arguments": args_str[len(last_arguments):] if args_str.startswith(last_arguments) else args_str}
+-            chunks.append(_make_stream_chunk(model=model, tool_call_delta=delta))
++            chunks.append(_make_stream_chunk(model=model, tool_call_delta=delta, provider_model=provider_model))
+     if finish_reason_raw := str(cand.get("finishReason") or ""):
+         finish_reason = "tool_calls" if tool_call_indices else _FINISH_REASON_MAP.get(finish_reason_raw.upper(), "stop")
+-        finish_chunk = _make_stream_chunk(model=model, finish_reason=finish_reason)
++        finish_chunk = _make_stream_chunk(model=model, finish_reason=finish_reason, provider_model=provider_model)
+         if usage_meta := event.get("usageMetadata") or {}:  # rides on the finish chunk so the stream loop records tokens
+             finish_chunk.usage = _usage_from_metadata(usage_meta)
+         chunks.append(finish_chunk)
+diff --git a/tui_gateway/methods_config.py b/tui_gateway/methods_config.py
+index 424fb48210..77245b4a0e 100644
+--- a/tui_gateway/methods_config.py
++++ b/tui_gateway/methods_config.py
+@@ -331,6 +331,50 @@ def _(rid, params: dict) -> dict:
+         return _ok(rid, {"ok": False, "error": str(e)})
+ 
+ 
++@method("model.check")
++def _(rid, params: dict) -> dict:
++    """Smoke one exact profile/provider/model without config or session mutation.
++
++    Unlike model.options and setup.runtime_check, this reports request-level serving. The
++    check helper resolves one concrete client directly, so no configured fallback can turn a
++    different provider/model into a false positive.
++    """
++    provider_value = params.get("provider")
++    model_value = params.get("model")
++    provider = provider_value.strip() if isinstance(provider_value, str) else ""
++    model = model_value.strip() if isinstance(model_value, str) else ""
++    if not provider or not model:
++        return _ok(rid, {
++            "ok": False,
++            "status": "unqualified",
++            "reason": "invalid_request",
++            "provider": provider,
++            "model": model,
++        })
++
++    try:
++        from agent.model_access_check import check_model_access
++
++        def probe(_profile, scoped):
++            return {**check_model_access(provider, model), **scoped}
++
++        return _readiness_check(rid, params, probe)
++    except Exception as error:
++        from agent.redact import redact_sensitive_text
++
++        return _ok(rid, {
++            "ok": False,
++            "status": "unqualified",
++            "reason": "check_failed",
++            "provider": provider,
++            "model": model,
++            "error": redact_sensitive_text(
++                str(error) or type(error).__name__, force=True, redact_url_credentials=True
++            )[:512],
++            **({"profile": params.get("profile")} if params.get("profile") else {}),
++        })
++
++
+ def _safe_client_label(label: str) -> str:
+     """Alnum/._- () only, ≤64 chars, dot-runs and leading dots collapsed (no traversal shapes)."""
+     safe = "".join(ch for ch in label if ch.isalnum() or ch in "._- ()").strip()[:64]
+diff --git a/tui_gateway/server.py b/tui_gateway/server.py
+index cbfe41572d..9f568f415f 100644
+--- a/tui_gateway/server.py
++++ b/tui_gateway/server.py
+@@ -170,7 +170,7 @@ _LONG_HANDLERS = frozenset({
+     "profiles.list", "profiles.set_asset", "bot_relay.roster.sync", "bot_relay.outbox.drain",
+     "bot_relay.deliver", "bot_relay.reply", "image.generate", "projects.discover_repos",
+     "projects.record_repos", "projects.for_cwd", "projects.tree", "projects.project_sessions",
+-    "setup.runtime_check", "setup.status", "voice.toggle", "voice.record", "voice.tts", "wake.start",
++    "setup.runtime_check", "model.check", "setup.status", "voice.toggle", "voice.record", "voice.tts", "wake.start",
+     "wake.status", "session.active_list", "session.branch", "session.compress", "session.list",
+     "session.resume", "session.workspace.move", "shell.exec", "skills.manage", "slash.exec",
+     "command.dispatch",  # /goal draft invokes the auxiliary model; never block the RPC reader
+diff --git a/agent/model_access_check.py b/agent/model_access_check.py
+new file mode 100644
+index 0000000000..5d7164ca71
+--- /dev/null
++++ b/agent/model_access_check.py
+@@ -0,0 +1,198 @@
++"""Exact model access checks for profile-scoped setup surfaces.
++
++This is deliberately separate from the auxiliary call policy: checking one candidate must never
++silently switch to another provider/model or write a session/config row.
++"""
++
++from typing import Any, Optional
++
++
++def _safe_error(error: BaseException) -> str:
++    from agent.redact import redact_sensitive_text
++
++    return redact_sensitive_text(
++        str(error) or type(error).__name__, force=True, redact_url_credentials=True
++    )[:512]
++
++
++def _result(
++    *,
++    provider: str,
++    model: str,
++    status: str,
++    reason: Optional[str] = None,
++    resolved_provider: Optional[str] = None,
++    resolved_model: Optional[str] = None,
++    response_model: Optional[str] = None,
++    error: Optional[BaseException] = None,
++) -> dict[str, Any]:
++    payload: dict[str, Any] = {
++        "ok": status == "smoke_verified",
++        "status": status,
++        "provider": provider,
++        "model": model,
++        "resolved_provider": resolved_provider,
++        "resolved_model": resolved_model,
++        "response_model": response_model,
++    }
++    if reason:
++        payload["reason"] = reason
++    if error is not None:
++        payload["error"] = _safe_error(error)
++        status_code = getattr(error, "status_code", None)
++        if isinstance(status_code, int):
++            payload["status_code"] = status_code
++    return payload
++
++
++def check_model_access(
++    provider: Any,
++    model: Any,
++    *,
++    timeout: float = 15.0,
++) -> dict[str, Any]:
++    """Make one exact, stateless request and report only provider-backed provenance.
++
++    This deliberately bypasses ``call_llm``: its recovery ladder can choose another
++    provider/model. Adapter responses carry ``_hermes_provider_model`` when their
++    public ``model`` field is synthesized; a missing marker is treated as raw
++    OpenAI-compatible provider evidence.
++    """
++    provider = provider.strip() if isinstance(provider, str) else ""
++    model = model.strip() if isinstance(model, str) else ""
++    if not provider or not model:
++        return _result(provider=provider, model=model, status="unqualified", reason="invalid_request")
++
++    from agent.auxiliary_client import (
++        _MISSING_PROVIDER_MODEL,
++        _build_call_kwargs,
++        _create_with_progress,
++        _effective_provider_for_client,
++        _normalize_aux_provider,
++        _provider_requires_stream,
++        resolve_provider_client,
++    )
++
++    normalized_provider = _normalize_aux_provider(provider)
++    if normalized_provider in {"auto", "moa"}:
++        return _result(
++            provider=provider, model=model, status="unqualified",
++            reason="provider_must_be_explicit",
++        )
++
++    try:
++        client, resolved_model = resolve_provider_client(
++            provider, model=model, async_mode=False, task=None,
++        )
++    except Exception as error:
++        return _result(
++            provider=provider, model=model, status="unqualified",
++            reason="resolution_failed", error=error,
++        )
++
++    resolved_provider = _effective_provider_for_client(client, provider) if client is not None else None
++    if client is None:
++        return _result(
++            provider=provider, model=model, status="unqualified",
++            reason="credentials_unavailable", resolved_provider=resolved_provider,
++            resolved_model=resolved_model,
++        )
++
++    resolved_model = resolved_model.strip() if isinstance(resolved_model, str) else None
++    if resolved_model != model:
++        return _result(
++            provider=provider, model=model, status="unqualified",
++            reason="model_resolution_mismatch", resolved_provider=resolved_provider,
++            resolved_model=resolved_model,
++        )
++    if _normalize_aux_provider(str(resolved_provider or "")) != normalized_provider:
++        return _result(
++            provider=provider, model=model, status="unqualified",
++            reason="provider_resolution_mismatch", resolved_provider=resolved_provider,
++            resolved_model=resolved_model,
++        )
++
++    client_base_url = str(getattr(client, "base_url", "") or "")
++    kwargs = _build_call_kwargs(
++        str(resolved_provider or provider), model,
++        [{"role": "user", "content": "Reply with the single word OK."}],
++        temperature=0, max_tokens=32, timeout=timeout, base_url=client_base_url, task=None,
++    )
++    try:
++        response = _create_with_progress(
++            client, kwargs, "model_check",
++            force_stream=_provider_requires_stream(str(resolved_provider or provider), client_base_url),
++        )
++    except Exception as error:
++        return _result(
++            provider=provider, model=model, status="unqualified",
++            reason="request_rejected", resolved_provider=resolved_provider,
++            resolved_model=resolved_model, error=error,
++        )
++
++    choices = getattr(response, "choices", None)
++    if not isinstance(choices, (list, tuple)) or not choices:
++        return _result(
++            provider=provider, model=model, status="unqualified",
++            reason="invalid_response", resolved_provider=resolved_provider,
++            resolved_model=resolved_model,
++        )
++    choice = choices[0]
++    message = getattr(choice, "message", None)
++    if message is None:
++        return _result(
++            provider=provider, model=model, status="unqualified",
++            reason="invalid_response", resolved_provider=resolved_provider,
++            resolved_model=resolved_model,
++        )
++    provider_status = getattr(response, "_hermes_provider_status", _MISSING_PROVIDER_MODEL)
++    if provider_status is not _MISSING_PROVIDER_MODEL:
++        provider_status = provider_status.strip().lower() if isinstance(provider_status, str) else ""
++        if provider_status != "completed":
++            return _result(
++                provider=provider, model=model, status="unqualified",
++                reason="incomplete_response", resolved_provider=resolved_provider,
++                resolved_model=resolved_model,
++            )
++    finish_reason = str(getattr(choice, "finish_reason", "") or "").strip().lower()
++    if finish_reason in {"length", "max_tokens"}:
++        return _result(
++            provider=provider, model=model, status="unqualified",
++            reason="truncated_response", resolved_provider=resolved_provider,
++            resolved_model=resolved_model,
++        )
++    if provider_status is _MISSING_PROVIDER_MODEL and finish_reason not in {"stop", "end_turn"}:
++        return _result(
++            provider=provider, model=model, status="unqualified",
++            reason="nonterminal_response", resolved_provider=resolved_provider,
++            resolved_model=resolved_model,
++        )
++    content = getattr(message, "content", None)
++    if not isinstance(content, str) or not content.strip():
++        return _result(
++            provider=provider, model=model, status="unqualified",
++            reason="empty_response", resolved_provider=resolved_provider,
++            resolved_model=resolved_model,
++        )
++
++    marker = getattr(response, "_hermes_provider_model", _MISSING_PROVIDER_MODEL)
++    response_model = marker if marker is not _MISSING_PROVIDER_MODEL else getattr(response, "model", None)
++    response_model = response_model.strip() if isinstance(response_model, str) else None
++    if not response_model:
++        return _result(
++            provider=provider, model=model, status="unqualified",
++            reason="response_model_missing", resolved_provider=resolved_provider,
++            resolved_model=resolved_model,
++        )
++    if response_model != model:
++        return _result(
++            provider=provider, model=model, status="unqualified",
++            reason="response_model_mismatch", resolved_provider=resolved_provider,
++            resolved_model=resolved_model, response_model=response_model,
++        )
++    return _result(
++        provider=provider, model=model, status="smoke_verified",
++        resolved_provider=resolved_provider, resolved_model=resolved_model,
++        response_model=response_model,
++    )
++
+diff --git a/tests/agent/test_model_access_check.py b/tests/agent/test_model_access_check.py
+new file mode 100644
+index 0000000000..a6d7e1af64
+--- /dev/null
++++ b/tests/agent/test_model_access_check.py
+@@ -0,0 +1,354 @@
++from types import SimpleNamespace
++
++import pytest
++
++import agent.auxiliary_client as auxiliary
++from agent.model_access_check import check_model_access
++
++
++class ProviderError(Exception):
++    status_code = 403
++
++
++def _response(model=None, *, marker=..., content="OK", finish_reason="stop", provider_status=...):
++    response = SimpleNamespace(
++        model=model,
++        choices=[SimpleNamespace(
++            message=SimpleNamespace(content=content), finish_reason=finish_reason,
++        )],
++    )
++    if marker is not ...:
++        response._hermes_provider_model = marker
++    if provider_status is not ...:
++        response._hermes_provider_status = provider_status
++    return response
++
++
++def _patch_resolution(monkeypatch, client, *, model="candidate", response=None, error=None):
++    calls = []
++    monkeypatch.setattr(
++        auxiliary,
++        "resolve_provider_client",
++        lambda *args, **kwargs: (calls.append((args, kwargs)) or (client, model)),
++    )
++    monkeypatch.setattr(
++        auxiliary,
++        "_effective_provider_for_client",
++        lambda _client, fallback: fallback,
++    )
++    monkeypatch.setattr(auxiliary, "_normalize_aux_provider", lambda value: value.lower())
++    monkeypatch.setattr(
++        auxiliary,
++        "_build_call_kwargs",
++        lambda provider, model, messages, **kwargs: {
++            "provider": provider,
++            "model": model,
++            "messages": messages,
++            **kwargs,
++        },
++    )
++    monkeypatch.setattr(auxiliary, "_provider_requires_stream", lambda *_args: False)
++    if error is not None:
++        def reject(*_args, **_kwargs):
++            raise error
++        monkeypatch.setattr(auxiliary, "_create_with_progress", reject)
++    else:
++        monkeypatch.setattr(auxiliary, "_create_with_progress", lambda *_args, **_kwargs: response)
++    return calls
++
++
++def test_exact_success_uses_requested_route_and_response_model(monkeypatch):
++    client = SimpleNamespace(base_url="https://example.test/v1")
++    calls = _patch_resolution(monkeypatch, client, response=_response("candidate"))
++
++    result = check_model_access("example", "candidate")
++
++    assert result == {
++        "ok": True,
++        "status": "smoke_verified",
++        "provider": "example",
++        "model": "candidate",
++        "resolved_provider": "example",
++        "resolved_model": "candidate",
++        "response_model": "candidate",
++    }
++    assert calls[0][0] == ("example",)
++    assert calls[0][1]["model"] == "candidate"
++    assert calls[0][1]["task"] is None
++
++
++def test_missing_credentials_never_invokes_a_fallback_or_request(monkeypatch):
++    calls = _patch_resolution(monkeypatch, None, model=None)
++
++    result = check_model_access("example", "candidate")
++
++    assert result["ok"] is False
++    assert result["status"] == "unqualified"
++    assert result["reason"] == "credentials_unavailable"
++    assert result["provider"] == "example"
++    assert result["model"] == "candidate"
++    assert len(calls) == 1
++
++
++@pytest.mark.parametrize(
++    ("response", "error", "reason"),
++    [
++        (_response("other"), None, "response_model_mismatch"),
++        (_response(None), None, "response_model_missing"),
++        (None, ProviderError("OAuth authentication is not allowed"), "request_rejected"),
++    ],
++)
++def test_failed_or_unproven_response_is_unqualified(monkeypatch, response, error, reason):
++    client = SimpleNamespace(base_url="https://example.test/v1")
++    _patch_resolution(monkeypatch, client, response=response, error=error)
++
++    result = check_model_access("example", "candidate")
++
++    assert result["ok"] is False
++    assert result["status"] == "unqualified"
++    assert result["reason"] == reason
++    if error is not None:
++        assert result["status_code"] == 403
++        assert result["error"] == "OAuth authentication is not allowed"
++
++
++def test_profile_checks_use_the_requested_profile_scope(monkeypatch, tmp_path):
++    import tui_gateway.server as server
++    from agent import secret_scope
++    from hermes_constants import get_hermes_home
++
++    homes = {name: tmp_path / name for name in ("alpha", "beta")}
++    for name, home in homes.items():
++        home.mkdir()
++        (home / ".env").write_text(f"OPENROUTER_API_KEY=sk-{name}-profile-secret-0000\n")
++    monkeypatch.setattr("hermes_cli.profiles.profile_exists", homes.__contains__)
++    monkeypatch.setattr(server, "_profile_home", lambda name: homes.get(name))
++    seen = []
++
++    def fake_check(provider, model):
++        seen.append((provider, model, str(get_hermes_home()), secret_scope.get_secret("OPENROUTER_API_KEY")))
++        return {
++            "ok": True,
++            "status": "smoke_verified",
++            "provider": provider,
++            "model": model,
++            "resolved_provider": provider,
++            "resolved_model": model,
++            "response_model": model,
++        }
++
++    monkeypatch.setattr("agent.model_access_check.check_model_access", fake_check)
++    secret_scope.set_multiplex_active(True)
++    try:
++        first = server.handle_request({
++            "id": "1",
++            "method": "model.check",
++            "params": {"profile": "alpha", "provider": "openrouter", "model": "candidate"},
++        })
++        second = server.handle_request({
++            "id": "2",
++            "method": "model.check",
++            "params": {"profile": "beta", "provider": "openrouter", "model": "candidate"},
++        })
++    finally:
++        secret_scope.set_multiplex_active(False)
++
++    assert first["result"]["status"] == "smoke_verified"
++    assert second["result"]["status"] == "smoke_verified"
++    assert seen == [
++        ("openrouter", "candidate", str(homes["alpha"]), "sk-alpha-profile-secret-0000"),
++        ("openrouter", "candidate", str(homes["beta"]), "sk-beta-profile-secret-0000"),
++    ]
++
++
++def test_non_string_request_fields_are_rejected_without_resolution(monkeypatch):
++    called = []
++    monkeypatch.setattr(auxiliary, "resolve_provider_client", lambda *args, **kwargs: called.append(args))
++
++    assert check_model_access({"provider": "example"}, "candidate")["reason"] == "invalid_request"
++    assert check_model_access("example", ["candidate"])["reason"] == "invalid_request"
++    assert called == []
++
++
++def test_auto_and_moa_cannot_switch_route(monkeypatch):
++    called = []
++    monkeypatch.setattr(auxiliary, "resolve_provider_client", lambda *args, **kwargs: called.append(args))
++
++    assert check_model_access("auto", "candidate")["reason"] == "provider_must_be_explicit"
++    assert check_model_access("moa", "candidate")["reason"] == "provider_must_be_explicit"
++    assert called == []
++
++
++def test_synthesized_adapter_model_is_not_provider_provenance(monkeypatch):
++    client = SimpleNamespace(base_url="https://example.test/v1")
++    _patch_resolution(monkeypatch, client, response=_response("candidate", marker=None))
++
++    result = check_model_access("example", "candidate")
++
++    assert result["ok"] is False
++    assert result["reason"] == "response_model_missing"
++
++
++def test_empty_or_truncated_response_is_unqualified(monkeypatch):
++    client = SimpleNamespace(base_url="https://example.test/v1")
++    for response, reason in (
++        (_response("candidate", content=""), "empty_response"),
++        (_response("candidate", finish_reason="length"), "truncated_response"),
++    ):
++        _patch_resolution(monkeypatch, client, response=response)
++        assert check_model_access("example", "candidate")["reason"] == reason
++
++
++def test_real_call_path_uses_request_and_raw_response_model(monkeypatch):
++    class Completions:
++        def __init__(self):
++            self.kwargs = None
++
++        def create(self, **kwargs):
++            self.kwargs = kwargs
++            return _response("candidate")
++
++    completions = Completions()
++    client = SimpleNamespace(
++        base_url="https://example.test/v1",
++        chat=SimpleNamespace(completions=completions),
++    )
++    monkeypatch.setattr(auxiliary, "resolve_provider_client", lambda *args, **kwargs: (client, "candidate"))
++    monkeypatch.setattr(auxiliary, "_effective_provider_for_client", lambda _client, fallback: fallback)
++
++    result = check_model_access("openrouter", "candidate")
++
++    assert result["ok"] is True
++    assert completions.kwargs["model"] == "candidate"
++    assert (completions.kwargs.get("max_tokens") or completions.kwargs.get("max_completion_tokens")) == 32
++
++
++def test_gemini_adapter_marks_echoed_model_as_unproven():
++    from agent.gemini_native_adapter import translate_gemini_response
++
++    response = translate_gemini_response(
++        {
++            "modelVersion": "provider-candidate",
++            "candidates": [{"content": {"parts": [{"text": "OK"}]}, "finishReason": "STOP"}],
++        },
++        model="candidate",
++    )
++
++    assert response.model == "candidate"
++    assert response._hermes_provider_model == "provider-candidate"
++
++
++def test_anthropic_adapter_uses_raw_message_model_marker(monkeypatch):
++    raw = SimpleNamespace(
++        model="provider-candidate",
++        content=[SimpleNamespace(type="text", text="OK")],
++        stop_reason="end_turn", usage=None,
++    )
++    monkeypatch.setattr("agent.anthropic_adapter.create_anthropic_message", lambda *_args, **_kwargs: raw)
++
++    adapter = auxiliary._AnthropicCompletionsAdapter(SimpleNamespace(), "candidate")
++    response = adapter.create(
++        model="candidate", messages=[{"role": "user", "content": "OK"}], max_tokens=32,
++    )
++
++    assert response.model == "candidate"
++    assert response._hermes_provider_model == "provider-candidate"
++
++
++def test_stream_accumulator_does_not_promote_gemini_request_echo(monkeypatch):
++    from agent.gemini_native_adapter import translate_stream_event
++
++    chunks = translate_stream_event(
++        {"candidates": [{"content": {"parts": [{"text": "OK"}]}, "finishReason": "STOP"}]},
++        model="candidate", tool_call_indices={},
++    )
++    acc = auxiliary._ChatStreamAccumulator(model="candidate")
++    for chunk in chunks:
++        acc.feed(chunk)
++    response = acc.finish()
++
++    assert response.model == "candidate"
++    assert response._hermes_provider_model is None
++
++
++def test_codex_stream_keeps_terminal_provider_model_separate_from_request():
++    from agent.codex_runtime import _CodexResponseAssembler
++
++    assembler = _CodexResponseAssembler(
++        model="candidate", on_text_delta=None, on_reasoning_delta=None,
++        on_commentary_message=None, on_first_delta=None,
++    )
++    assembler.feed({
++        "type": "response.completed",
++        "response": {"id": "resp-1", "model": "provider-candidate", "status": "completed"},
++    })
++    response = assembler.result()
++
++    assert response.model == "candidate"
++    assert response._hermes_provider_model == "provider-candidate"
++
++
++@pytest.mark.parametrize("provider_status", [None, "incomplete", "failed", "cancelled"])
++def test_noncompleted_adapter_status_cannot_verify(monkeypatch, provider_status):
++    client = SimpleNamespace(base_url="https://example.test/v1")
++    _patch_resolution(
++        monkeypatch, client,
++        response=_response("candidate", provider_status=provider_status),
++    )
++
++    result = check_model_access("example", "candidate")
++
++    assert result["ok"] is False
++    assert result["reason"] == "incomplete_response"
++
++
++@pytest.mark.parametrize("terminal_status", [None, "incomplete", "failed", "cancelled"])
++def test_codex_adapter_preserves_terminal_status_for_strict_checks(monkeypatch, terminal_status):
++    import threading
++
++    class Guard:
++        def __init__(self, _client, _timeout):
++            self.timed_out = threading.Event()
++            self.on_event = lambda _event: None
++
++        def start(self):
++            pass
++
++        def adopt_stream(self, _stream):
++            pass
++
++        def release_stream(self, _stream):
++            pass
++
++        def cancel_requested(self):
++            return False
++
++        def finish(self):
++            pass
++
++    final_kwargs = {
++        "output": [SimpleNamespace(
++            type="message",
++            content=[SimpleNamespace(type="output_text", text="OK")],
++        )],
++        "model": "candidate", "usage": None,
++    }
++    if terminal_status is not None:
++        final_kwargs["status"] = terminal_status
++    final = SimpleNamespace(**final_kwargs)
++    client = SimpleNamespace(
++        base_url="https://example.test/v1",
++        responses=SimpleNamespace(create=lambda **_kwargs: final),
++    )
++    adapter = auxiliary._CodexCompletionsAdapter(client, "candidate")
++    monkeypatch.setattr(auxiliary, "_CodexStreamGuard", Guard)
++    monkeypatch.setattr(
++        adapter, "_build_responses_kwargs",
++        lambda _kwargs: ({"model": "candidate"}, "candidate", None),
++    )
++
++    response = adapter.create(messages=[{"role": "user", "content": "OK"}])
++
++    assert response.model == "candidate"
++    assert response._hermes_provider_model == "candidate"
++    assert response._hermes_provider_status == terminal_status

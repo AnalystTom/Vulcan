@@ -1016,7 +1016,7 @@ export function useHermesProfileDetail(name: string | null) {
   });
 }
 
-/** Only providers the gateway reports as authenticated, or all when it reports nothing. */
+/** Discovery hints only; a profile model change also requires a live qualification check. */
 export function useHermesModelCatalog(enabled: boolean) {
   return useQuery({
     queryKey: hermesKeys.models,
@@ -1065,6 +1065,29 @@ function parseConfigureResult(body: unknown): HermesProfileConfigureResult {
   };
 }
 
+async function checkProfileModel(name: string, selection: { provider: string; model: string }) {
+  const result = rec(
+    await call("model.check", {
+      profile: name,
+      provider: selection.provider,
+      model: selection.model,
+    }),
+  );
+  if (
+    result?.ok !== true ||
+    result.status !== "smoke_verified" ||
+    result.profile !== name ||
+    result.provider !== selection.provider ||
+    result.model !== selection.model ||
+    result.response_model !== selection.model
+  ) {
+    const reason = str(result?.error) ?? str(result?.reason)?.replaceAll("_", " ");
+    throw new Error(
+      `Hermes could not verify ${selection.provider}/${selection.model} for @${name}. ${reason ?? "No matching model reply was confirmed."}`,
+    );
+  }
+}
+
 export function useHermesProfileMutations() {
   const queryClient = useQueryClient();
   const invalidate = (name?: string) => {
@@ -1100,6 +1123,7 @@ export function useHermesProfileMutations() {
   });
   const configure = useMutation({
     mutationFn: async (input: HermesProfileConfigureInput) => {
+      if (input.model) await checkProfileModel(input.name, input.model);
       const params: Record<string, Schema.Json> = { name: input.name };
       if (input.description !== undefined) params.description = input.description;
       if (input.soul !== undefined) params.soul = input.soul;

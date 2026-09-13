@@ -98,6 +98,51 @@ function renderProfileMutations() {
   return captured.current;
 }
 
+describe("Hermes profile model qualification", () => {
+  beforeEach(() => {
+    mocks.request.mockReset();
+    mocks.toast.mockReset();
+  });
+
+  const selection = { provider: "openai-codex", model: "gpt-5.6-luna" };
+  const verified = {
+    ok: true,
+    status: "smoke_verified",
+    profile: "alpha",
+    ...selection,
+    response_model: selection.model,
+  };
+
+  it("checks the selected model in the target profile before saving any changes", async () => {
+    mocks.request.mockResolvedValueOnce(verified).mockResolvedValueOnce({
+      ok: true,
+      applied: { model: true },
+    });
+    await renderProfileMutations().configure.mutateAsync({ name: "alpha", model: selection });
+    expect(mocks.request.mock.calls.map(([request]) => request)).toEqual([
+      { method: "model.check", params: { profile: "alpha", ...selection } },
+      { method: "profiles.configure", params: { name: "alpha", ...selection } },
+    ]);
+  });
+
+  it.each([
+    { ok: false, reason: "request_rejected", error: "OAuth authentication is not allowed" },
+    { ...verified, response_model: "different-model" },
+    { ...verified, profile: "other-profile" },
+    { ...verified, status: "unqualified" },
+  ])("does not configure a model without matching native evidence: %j", async (result) => {
+    mocks.request.mockResolvedValueOnce(result);
+    await expect(
+      renderProfileMutations().configure.mutateAsync({
+        name: "alpha",
+        model: selection,
+        description: "Updated role",
+      }),
+    ).rejects.toThrow("Hermes could not verify");
+    expect(mocks.request).toHaveBeenCalledTimes(1);
+  });
+});
+
 const room = {
   room_id: "room-1",
   name: "Launch",
