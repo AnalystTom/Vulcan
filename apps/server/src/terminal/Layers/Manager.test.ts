@@ -23,6 +23,7 @@ import {
   __terminalHistorySanitizeTesting,
   __terminalManagerShellTesting,
   TerminalManagerRuntime,
+  resolveGrokLoginLaunch,
   type TerminalSubprocessActivity,
 } from "./Manager";
 import type { ProcessTreeKiller } from "../processTreeKiller";
@@ -291,6 +292,50 @@ describe("TerminalManager", () => {
     expect(ptyAdapter.spawnInputs[0]?.shell).toBe("/usr/bin/herdr");
     expect(ptyAdapter.spawnInputs[0]?.args).toEqual(["session", "attach", "vulcan-1"]);
 
+    manager.dispose();
+  });
+
+  it("resolves the fixed Grok device-auth command with only Grok provider credentials", async () => {
+    const launch = resolveGrokLoginLaunch("  /opt/grok  ", {
+      PATH: "/usr/bin",
+      XAI_API_KEY: "allowed-for-grok",
+      GROK_CODE_XAI_API_KEY: "also-allowed",
+      ANTHROPIC_API_KEY: "not-for-grok",
+      VULCAN_AUTH_TOKEN: "not-for-provider-child",
+    });
+
+    expect(launch).toMatchObject({
+      shell: "/opt/grok",
+      args: ["login", "--device-auth"],
+    });
+    expect(launch.baseEnv).toMatchObject({
+      PATH: "/usr/bin",
+      XAI_API_KEY: "allowed-for-grok",
+      GROK_CODE_XAI_API_KEY: "also-allowed",
+    });
+    expect(launch.baseEnv).not.toHaveProperty("ANTHROPIC_API_KEY");
+    expect(launch.baseEnv).not.toHaveProperty("VULCAN_AUTH_TOKEN");
+  });
+
+  it("does not merge client terminal env into the fixed Grok launch", async () => {
+    const { manager, ptyAdapter } = makeManager(5, {
+      launchResolver: async () =>
+        resolveGrokLoginLaunch("/opt/grok", {
+          PATH: "/usr/bin",
+          XAI_API_KEY: "server-owned-grok-env",
+        }),
+    });
+
+    await manager.open(
+      openInput({
+        launch: { kind: "grok-login" },
+        env: { XAI_API_KEY: "client-supplied-value", VULCAN_AUTH_TOKEN: "client-secret" },
+      }),
+    );
+
+    expect(ptyAdapter.spawnInputs[0]?.args).toEqual(["login", "--device-auth"]);
+    expect(ptyAdapter.spawnInputs[0]?.env.XAI_API_KEY).toBe("server-owned-grok-env");
+    expect(ptyAdapter.spawnInputs[0]?.env).not.toHaveProperty("VULCAN_AUTH_TOKEN");
     manager.dispose();
   });
 
@@ -686,6 +731,35 @@ describe("TerminalManager", () => {
     expect(reopened.history).toBe("");
     expect(ptyAdapter.spawnInputs).toHaveLength(2);
     expect(fs.readFileSync(historyLogPath(logsDir), "utf8")).toBe("");
+
+    manager.dispose();
+  });
+
+  it("reattaches an exited Grok login without relaunching until explicit restart", async () => {
+    const { manager, ptyAdapter } = makeManager(5, {
+      launchResolver: async (launch) =>
+        launch.kind === "grok-login"
+          ? resolveGrokLoginLaunch("/opt/grok", { PATH: "/usr/bin" })
+          : null,
+    });
+    const events: TerminalEvent[] = [];
+    manager.on("event", (event) => events.push(event));
+    const input = openInput({ launch: { kind: "grok-login" } });
+
+    await manager.open(input);
+    const firstProcess = ptyAdapter.processes[0];
+    expect(firstProcess).toBeDefined();
+    if (!firstProcess) return;
+    firstProcess.emitExit({ exitCode: 1, signal: 0 });
+    await waitFor(() => events.some((event) => event.type === "exited"));
+
+    const reattached = await manager.open(input);
+    expect(reattached.status).toBe("exited");
+    expect(ptyAdapter.spawnInputs).toHaveLength(1);
+
+    const retried = await manager.restart(restartInput());
+    expect(retried.status).toBe("running");
+    expect(ptyAdapter.spawnInputs).toHaveLength(2);
 
     manager.dispose();
   });

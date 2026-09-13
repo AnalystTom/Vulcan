@@ -107,6 +107,8 @@ export interface TerminalSessionState {
 export interface ShellCandidate {
   shell: string;
   args?: string[];
+  /** Optional sanitized base environment for a fixed server-owned launch. */
+  baseEnv?: NodeJS.ProcessEnv;
 }
 
 export interface TerminalStartInput extends TerminalOpenInput {

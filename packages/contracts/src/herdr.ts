@@ -83,6 +83,7 @@ export type HerdrStatus = typeof HerdrStatus.Type;
  */
 export const TerminalLaunch = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("shell") }),
+  Schema.Struct({ kind: Schema.Literal("grok-login") }),
   Schema.Struct({
     kind: Schema.Literal("herdr"),
     sessionName: TrimmedNonEmptyString.check(Schema.isMaxLength(128)),

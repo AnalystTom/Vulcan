@@ -65,6 +65,7 @@ import { Switch } from "../ui/switch";
 import { toastManager } from "../ui/toast";
 import { DebouncedSettingTextInput } from "./DebouncedSettingTextInput";
 import { SettingResetButton, useSettingsRestoreSignal } from "./SettingControls";
+import { GrokLoginControl } from "./GrokLoginControl";
 import { SettingsListRow, SettingsRow, SettingsSection } from "./SettingsPanelPrimitives";
 
 type ProviderInstallTextKey =
@@ -674,6 +675,7 @@ function ProviderToolRow(props: {
   onOpenChange: (open: boolean) => void;
   onUpdate: (provider: ProviderKind) => void;
   updateSettings: (patch: Partial<AppSettings>) => void;
+  grokWorkingDirectory: string;
 }) {
   const title = PROVIDER_DISPLAY_NAMES[props.config.provider];
   const isDirty = isProviderInstallConfigDirty(props.config, props.settings, props.defaults);
@@ -789,6 +791,9 @@ function ProviderToolRow(props: {
                   updateSettings={props.updateSettings}
                 />
               ))}
+              {props.config.provider === "grok" ? (
+                <GrokLoginControl cwd={props.grokWorkingDirectory} />
+              ) : null}
             </div>
           </div>
         </CollapsiblePanel>
@@ -1117,6 +1122,7 @@ export function ProvidersSettingsPanel({
                     }
                     onUpdate={(provider) => void runProviderUpdate(provider)}
                     updateSettings={updateSettings}
+                    grokWorkingDirectory={serverConfigQuery.data?.cwd ?? ""}
                   />
                 ))}
               </div>

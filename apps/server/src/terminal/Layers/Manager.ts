@@ -33,6 +33,8 @@ import { Effect, Encoding, Layer, Schema } from "effect";
 
 import { HerdrBridge } from "../../herdr/Services/HerdrBridge";
 import { createLogger } from "../../logger";
+import { buildProviderChildEnvironment } from "../../providerChildEnvironment";
+import { ServerSettingsService } from "../../serverSettings";
 import { PtyAdapter, PtyAdapterShape, type PtyExitEvent, type PtyProcess } from "../Services/PTY";
 import { ServerConfig } from "../../config";
 import {
@@ -766,6 +768,17 @@ interface TerminalManagerOptions {
   maxRetainedInactiveSessions?: number;
 }
 
+export function resolveGrokLoginLaunch(
+  binaryPath: string | null | undefined,
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): ShellCandidate {
+  return {
+    shell: binaryPath?.trim() || "grok",
+    args: ["login", "--device-auth"],
+    baseEnv: buildProviderChildEnvironment({ provider: "grok", baseEnv }),
+  };
+}
+
 interface KillEscalationHandle {
   timer: ReturnType<typeof setTimeout>;
   unsubscribeExit: (() => void) | null;
@@ -933,6 +946,16 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
       // when explicitly provided, otherwise keep the session's current mode.
       if (input.streamOutput !== undefined) {
         existing.streamOutput = input.streamOutput;
+      }
+      // Reattaching a terminal after a one-shot login has exited must preserve
+      // its output. A new device-auth process is an explicit retry, so it uses
+      // the restart operation instead of renderer attachment.
+      if (
+        !existing.process &&
+        (existing.status === "exited" || existing.status === "error") &&
+        existing.launch.kind === "grok-login"
+      ) {
+        return this.snapshot(existing);
       }
       const nextRuntimeEnv = normalizedRuntimeEnv(input.env);
       const currentRuntimeEnv = existing.runtimeEnv;
@@ -1295,10 +1318,6 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
       // If its backing tool is unavailable the spawn fails here, so the operator
       // is told the tool is missing rather than handed a shell wearing its name.
       const shellCandidates = await this.resolveLaunchCandidates(session.launch, session.cwd);
-      const terminalEnv = createTerminalSpawnEnv(process.env, session.runtimeEnv, {
-        binDir: this.managedWrapperBinDir,
-        zshDir: this.managedWrapperZshDir,
-      });
       let lastSpawnError: unknown = null;
 
       const spawnWithCandidate = (candidate: ShellCandidate) =>
@@ -1309,7 +1328,14 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
             cwd: session.cwd,
             cols: session.cols,
             rows: session.rows,
-            env: terminalEnv,
+            env: createTerminalSpawnEnv(
+              candidate.baseEnv ?? process.env,
+              candidate.baseEnv ? null : session.runtimeEnv,
+              {
+                binDir: this.managedWrapperBinDir,
+                zshDir: this.managedWrapperZshDir,
+              },
+            ),
           }),
         );
 
@@ -2427,16 +2453,21 @@ export const TerminalManagerLive = Layer.effect(
 
     const ptyAdapter = yield* PtyAdapter;
     const herdr = yield* HerdrBridge;
+    const serverSettings = yield* ServerSettingsService;
     const runtime = yield* Effect.acquireRelease(
       Effect.sync(
         () =>
           new TerminalManagerRuntime({
             logsDir: terminalLogsDir,
             ptyAdapter,
-            launchResolver: (launch, cwd) =>
-              launch.kind === "herdr"
-                ? Effect.runPromise(herdr.resolveAttachCommand(launch.sessionName, cwd))
-                : Promise.resolve(null),
+            launchResolver: async (launch, cwd) => {
+              if (launch.kind === "herdr") {
+                return Effect.runPromise(herdr.resolveAttachCommand(launch.sessionName, cwd));
+              }
+              if (launch.kind !== "grok-login") return null;
+              const settings = await Effect.runPromise(serverSettings.getSettings);
+              return resolveGrokLoginLaunch(settings.providers.grok.binaryPath);
+            },
           }),
       ),
       (r) => Effect.promise(() => r.disposeForShutdown()),

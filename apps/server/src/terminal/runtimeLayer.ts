@@ -1,6 +1,7 @@
 import { Effect, FileSystem, Layer, Path } from "effect";
 
 import { HerdrBridgeLive } from "../herdr/Layers/HerdrBridge";
+import { ServerSettingsLive } from "../serverSettings";
 import { TerminalManagerLive } from "./Layers/Manager";
 import { PtyAdapter } from "./Services/PTY";
 
@@ -27,5 +28,6 @@ const makeRuntimePtyAdapterLayer = () =>
 // disagree, and the UI would then offer a fallback for a Herdr that just worked.
 export const TerminalLayerLive = TerminalManagerLive.pipe(
   Layer.provideMerge(HerdrBridgeLive),
+  Layer.provideMerge(ServerSettingsLive),
   Layer.provide(makeRuntimePtyAdapterLayer()),
 );
