@@ -757,7 +757,7 @@ interface TerminalManagerOptions {
    * the operator has to be told Herdr is unavailable and choose the fallback
    * explicitly.
    */
-  launchResolver?: (launch: TerminalLaunch) => Promise<ShellCandidate | null>;
+  launchResolver?: (launch: TerminalLaunch, cwd: string) => Promise<ShellCandidate | null>;
   subprocessChecker?: TerminalSubprocessChecker;
   processSnapshotObserver?: ProcessChildrenSnapshotObserver;
   processTreeKiller?: ProcessTreeKiller;
@@ -783,7 +783,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
   private readonly ptyAdapter: PtyAdapterShape;
   private readonly shellResolver: () => string;
   private readonly launchResolver:
-    | ((launch: TerminalLaunch) => Promise<ShellCandidate | null>)
+    | ((launch: TerminalLaunch, cwd: string) => Promise<ShellCandidate | null>)
     | null;
   private readonly persistQueues = new Map<string, Promise<void>>();
   private readonly persistTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -1294,7 +1294,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
       // A non-shell launch has exactly one acceptable command and no fallbacks.
       // If its backing tool is unavailable the spawn fails here, so the operator
       // is told the tool is missing rather than handed a shell wearing its name.
-      const shellCandidates = await this.resolveLaunchCandidates(session.launch);
+      const shellCandidates = await this.resolveLaunchCandidates(session.launch, session.cwd);
       const terminalEnv = createTerminalSpawnEnv(process.env, session.runtimeEnv, {
         binDir: this.managedWrapperBinDir,
         zshDir: this.managedWrapperZshDir,
@@ -2248,7 +2248,10 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
    * operator is looking at. When the backing tool is unavailable this throws, and
    * the caller records the session as failed with the reason.
    */
-  private async resolveLaunchCandidates(launch: TerminalLaunch): Promise<ShellCandidate[]> {
+  private async resolveLaunchCandidates(
+    launch: TerminalLaunch,
+    cwd: string,
+  ): Promise<ShellCandidate[]> {
     if (launch.kind === "shell") {
       return resolveShellCandidates(this.shellResolver);
     }
@@ -2257,7 +2260,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
         `This server cannot start a ${launch.kind} terminal because no launch resolver is configured.`,
       );
     }
-    const candidate = await this.launchResolver(launch);
+    const candidate = await this.launchResolver(launch, cwd);
     if (!candidate) {
       throw new Error(
         `${launch.kind} is unavailable, so this terminal was not started. Check its status and retry, or choose the built-in terminal instead.`,
@@ -2430,9 +2433,9 @@ export const TerminalManagerLive = Layer.effect(
           new TerminalManagerRuntime({
             logsDir: terminalLogsDir,
             ptyAdapter,
-            launchResolver: (launch) =>
+            launchResolver: (launch, cwd) =>
               launch.kind === "herdr"
-                ? Effect.runPromise(herdr.resolveAttachCommand(launch.sessionName))
+                ? Effect.runPromise(herdr.resolveAttachCommand(launch.sessionName, cwd))
                 : Promise.resolve(null),
           }),
       ),

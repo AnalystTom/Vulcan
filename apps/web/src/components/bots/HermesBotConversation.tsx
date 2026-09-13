@@ -6,12 +6,21 @@
 // Layer: Web UI (bots)
 // Exports: HermesBotChat, HermesGroupRoom
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import type { HermesBotReadFileResult } from "@vulcan/contracts";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import ChatMarkdown from "~/components/ChatMarkdown";
 import { Alert, AlertDescription, AlertTitle } from "~/components/ui/alert";
 import { Button } from "~/components/ui/button";
 import { DisclosureRegion } from "~/components/ui/DisclosureRegion";
+import {
+  Dialog,
+  DialogDescription,
+  DialogHeader,
+  DialogPanel,
+  DialogPopup,
+  DialogTitle,
+} from "~/components/ui/dialog";
 import { Input } from "~/components/ui/input";
 import { Switch } from "~/components/ui/switch";
 import { Textarea } from "~/components/ui/textarea";
@@ -29,6 +38,8 @@ import {
 } from "~/hooks/useHermesBots";
 import { StopIcon } from "~/lib/icons";
 import { cn } from "~/lib/utils";
+import { WorkspaceFileOpenerContext } from "~/lib/workspaceFileOpener";
+import { readNativeApi } from "~/nativeApi";
 
 import {
   ApprovalCard,
@@ -59,6 +70,97 @@ function useMessageFollow(messageCount: number) {
     if (node) following.current = node.scrollHeight - node.scrollTop - node.clientHeight < 64;
   };
   return { ref: listRef, onScroll };
+}
+
+const HERMES_REPORT_PATH_RE = /\.(?:md|markdown|mdx|txt)$/i;
+const HERMES_REPORT_POSITION_RE = /:\d+(?::\d+)?$/;
+
+function hermesReportPath(rawPath: string): string | null {
+  const path = rawPath.trim().replace(HERMES_REPORT_POSITION_RE, "");
+  return HERMES_REPORT_PATH_RE.test(path) ? path : null;
+}
+
+function HermesReportDialog({ path, onClose }: { path: string; onClose: () => void }) {
+  const [state, setState] = useState<
+    | { readonly kind: "loading" }
+    | { readonly kind: "error"; readonly message: string }
+    | { readonly kind: "loaded"; readonly file: HermesBotReadFileResult }
+  >({ kind: "loading" });
+
+  useEffect(() => {
+    let cancelled = false;
+    setState({ kind: "loading" });
+    const readFile = readNativeApi()?.hermesBots?.readFile;
+    if (!readFile) {
+      setState({ kind: "error", message: "Remote Hermes report preview is unavailable." });
+      return;
+    }
+    void readFile({ path })
+      .then((file) => {
+        if (!cancelled) setState({ kind: "loaded", file });
+      })
+      .catch((cause: unknown) => {
+        if (!cancelled) {
+          setState({
+            kind: "error",
+            message: cause instanceof Error ? cause.message : "Hermes report could not be read.",
+          });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [path]);
+
+  return (
+    <Dialog open onOpenChange={(open) => (!open ? onClose() : undefined)}>
+      <DialogPopup className="max-w-4xl">
+        <DialogHeader>
+          <DialogTitle>Hermes report</DialogTitle>
+          <DialogDescription className="break-all font-mono text-xs">{path}</DialogDescription>
+        </DialogHeader>
+        <DialogPanel className="min-h-0 max-h-[min(72vh,760px)] overflow-y-auto">
+          {state.kind === "loading" ? (
+            <p className="text-sm text-muted-foreground">Reading the report from Hermes…</p>
+          ) : state.kind === "error" ? (
+            <p className="text-sm text-destructive">{state.message}</p>
+          ) : (
+            <div data-testid="hermes-report-viewer">
+              <div className="mb-3 text-xs text-muted-foreground">
+                {state.file.name} · {state.file.size.toLocaleString()} bytes · {state.file.mimeType}
+              </div>
+              {state.file.contents.length === 0 ? (
+                <p className="text-sm text-muted-foreground">This report is empty.</p>
+              ) : (
+                <ChatMarkdown text={state.file.contents} cwd={undefined} />
+              )}
+            </div>
+          )}
+        </DialogPanel>
+      </DialogPopup>
+    </Dialog>
+  );
+}
+
+function HermesReportOpener({ children }: { children: ReactNode }) {
+  const [path, setPath] = useState<string | null>(null);
+  const opener = useMemo(
+    () => ({
+      openFile: (rawPath: string) => {
+        const reportPath = hermesReportPath(rawPath);
+        if (!reportPath) return false;
+        setPath(reportPath);
+        return true;
+      },
+    }),
+    [],
+  );
+  return (
+    <WorkspaceFileOpenerContext.Provider value={opener}>
+      {children}
+      {path ? <HermesReportDialog path={path} onClose={() => setPath(null)} /> : null}
+    </WorkspaceFileOpenerContext.Provider>
+  );
 }
 
 // ── Canonical Bot Chat ─────────────────────────────────────────────────────────
@@ -178,68 +280,70 @@ export function HermesBotChat({ profile }: { profile: HermesProfile }) {
         ) : null}
       </header>
 
-      <div {...follow} className="min-h-0 flex-1 space-y-2 overflow-y-auto px-4 py-4">
-        {chat.isLoading ? (
-          <p className="text-sm text-muted-foreground">Opening {label}&apos;s chat…</p>
-        ) : chat.error ? (
-          <ErrorNotice
-            title="Could not open this chat"
-            message={chat.error.message}
-            onRetry={() => void chat.refetch()}
-          />
-        ) : snapshot && snapshot.messages.length === 0 ? (
-          <p className="text-sm text-muted-foreground">
-            No messages yet. Everything you send here stays in this bot&apos;s one chat.
-          </p>
-        ) : (
-          snapshot?.messages.map((message) => (
-            <ChatMessageRow
-              key={message.rowId ?? `i-${message.index}`}
-              message={message}
-              who={label}
+      <HermesReportOpener>
+        <div {...follow} className="min-h-0 flex-1 space-y-2 overflow-y-auto px-4 py-4">
+          {chat.isLoading ? (
+            <p className="text-sm text-muted-foreground">Opening {label}&apos;s chat…</p>
+          ) : chat.error ? (
+            <ErrorNotice
+              title="Could not open this chat"
+              message={chat.error.message}
+              onRetry={() => void chat.refetch()}
             />
-          ))
-        )}
-        {snapshot?.failure ? (
-          <Alert variant="error" size="sm">
-            <AlertTitle>Bot could not complete this turn</AlertTitle>
-            <AlertDescription>
-              <p className="break-words">{snapshot.failure.message}</p>
-              {snapshot.failure.retryable === false ? (
-                <p>Resolve this error before sending another message.</p>
-              ) : null}
-            </AlertDescription>
-          </Alert>
-        ) : null}
-        {snapshot?.pendingApproval ? (
-          <ApprovalCard
-            approval={snapshot.pendingApproval}
-            who={label}
-            busy={busy}
-            onChoose={(choice) =>
-              actions.respondApproval.mutate({
-                runtimeSessionId: snapshot.runtimeSessionId,
-                requestId: snapshot.pendingApproval?.requestId ?? null,
-                choice,
-              })
-            }
-          />
-        ) : null}
-        {snapshot?.pendingClarify ? (
-          <ClarifyCard
-            clarify={snapshot.pendingClarify}
-            who={label}
-            busy={busy}
-            onAnswer={(answer) =>
-              actions.respondClarify.mutate({
-                runtimeSessionId: snapshot.runtimeSessionId,
-                requestId: snapshot.pendingClarify?.requestId ?? null,
-                answer,
-              })
-            }
-          />
-        ) : null}
-      </div>
+          ) : snapshot && snapshot.messages.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              No messages yet. Everything you send here stays in this bot&apos;s one chat.
+            </p>
+          ) : (
+            snapshot?.messages.map((message) => (
+              <ChatMessageRow
+                key={message.rowId ?? `i-${message.index}`}
+                message={message}
+                who={label}
+              />
+            ))
+          )}
+          {snapshot?.failure ? (
+            <Alert variant="error" size="sm">
+              <AlertTitle>Bot could not complete this turn</AlertTitle>
+              <AlertDescription>
+                <p className="break-words">{snapshot.failure.message}</p>
+                {snapshot.failure.retryable === false ? (
+                  <p>Resolve this error before sending another message.</p>
+                ) : null}
+              </AlertDescription>
+            </Alert>
+          ) : null}
+          {snapshot?.pendingApproval ? (
+            <ApprovalCard
+              approval={snapshot.pendingApproval}
+              who={label}
+              busy={busy}
+              onChoose={(choice) =>
+                actions.respondApproval.mutate({
+                  runtimeSessionId: snapshot.runtimeSessionId,
+                  requestId: snapshot.pendingApproval?.requestId ?? null,
+                  choice,
+                })
+              }
+            />
+          ) : null}
+          {snapshot?.pendingClarify ? (
+            <ClarifyCard
+              clarify={snapshot.pendingClarify}
+              who={label}
+              busy={busy}
+              onAnswer={(answer) =>
+                actions.respondClarify.mutate({
+                  runtimeSessionId: snapshot.runtimeSessionId,
+                  requestId: snapshot.pendingClarify?.requestId ?? null,
+                  answer,
+                })
+              }
+            />
+          ) : null}
+        </div>
+      </HermesReportOpener>
 
       <form
         className="space-y-2 border-t border-border px-4 py-3"
@@ -754,54 +858,56 @@ export function HermesGroupRoom({
         </div>
       </header>
 
-      <div {...follow} className="min-h-0 flex-1 space-y-2 overflow-y-auto px-4 py-4">
-        {state.error ? (
-          <ErrorNotice
-            title="Could not read this group"
-            message={state.error.message}
-            onRetry={() => void state.refetch()}
-          />
-        ) : null}
-        {log.error ? (
-          <ErrorNotice
-            title="Could not read the group log"
-            message={log.error.message}
-            onRetry={() => void log.refetch()}
-          />
-        ) : null}
-        {!driver && state.data ? (
-          <Alert variant="warning" size="sm">
-            <AlertTitle>The group driver is not running on the gateway</AlertTitle>
-            <AlertDescription>
-              Messages are stored, but nobody will answer until the gateway&apos;s Group Chat worker
-              is up.
-            </AlertDescription>
-          </Alert>
-        ) : null}
-        {driver?.pendingActions.map((action, index) => (
-          <PendingActionCard
-            key={`${action.kind}-${"taskId" in action ? action.taskId : index}`}
-            action={action}
-            roomId={roomId}
-            memberLabel={memberLabel}
-            busy={busy}
-            onApprove={(input) => actions.approve.mutate(input)}
-            onRetry={(input) => actions.retry.mutate(input)}
-          />
-        ))}
-        {log.isLoading ? (
-          <p className="text-sm text-muted-foreground">Loading the discussion…</p>
-        ) : visibleRows.length === 0 && !log.error ? (
-          <p className="text-sm text-muted-foreground">Nothing has been said here yet.</p>
-        ) : (
-          visibleRows.map((row) => <RoomEventRow key={row.event.seq} row={row} />)
-        )}
-        {log.data?.hasMore ? (
-          <p className="text-[11px] text-muted-foreground">
-            More events exist; they load on the next refresh.
-          </p>
-        ) : null}
-      </div>
+      <HermesReportOpener>
+        <div {...follow} className="min-h-0 flex-1 space-y-2 overflow-y-auto px-4 py-4">
+          {state.error ? (
+            <ErrorNotice
+              title="Could not read this group"
+              message={state.error.message}
+              onRetry={() => void state.refetch()}
+            />
+          ) : null}
+          {log.error ? (
+            <ErrorNotice
+              title="Could not read the group log"
+              message={log.error.message}
+              onRetry={() => void log.refetch()}
+            />
+          ) : null}
+          {!driver && state.data ? (
+            <Alert variant="warning" size="sm">
+              <AlertTitle>The group driver is not running on the gateway</AlertTitle>
+              <AlertDescription>
+                Messages are stored, but nobody will answer until the gateway&apos;s Group Chat
+                worker is up.
+              </AlertDescription>
+            </Alert>
+          ) : null}
+          {driver?.pendingActions.map((action, index) => (
+            <PendingActionCard
+              key={`${action.kind}-${"taskId" in action ? action.taskId : index}`}
+              action={action}
+              roomId={roomId}
+              memberLabel={memberLabel}
+              busy={busy}
+              onApprove={(input) => actions.approve.mutate(input)}
+              onRetry={(input) => actions.retry.mutate(input)}
+            />
+          ))}
+          {log.isLoading ? (
+            <p className="text-sm text-muted-foreground">Loading the discussion…</p>
+          ) : visibleRows.length === 0 && !log.error ? (
+            <p className="text-sm text-muted-foreground">Nothing has been said here yet.</p>
+          ) : (
+            visibleRows.map((row) => <RoomEventRow key={row.event.seq} row={row} />)
+          )}
+          {log.data?.hasMore ? (
+            <p className="text-[11px] text-muted-foreground">
+              More events exist; they load on the next refresh.
+            </p>
+          ) : null}
+        </div>
+      </HermesReportOpener>
 
       {outcomes.length > 0 ? <OutcomesPanel outcomes={outcomes} /> : null}
 

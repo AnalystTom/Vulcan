@@ -2206,6 +2206,11 @@ const makeWsRpcHandlersLayer = () =>
             requireHermesOwner.pipe(Effect.andThen(hermesBots.request(input))),
             "Hermes could not confirm this operation",
           ),
+        [WS_METHODS.hermesBotReadFile]: (input) =>
+          rpcEffect(
+            requireHermesOwner.pipe(Effect.andThen(hermesBots.readFile(input))),
+            "Hermes report could not be read",
+          ),
         [WS_METHODS.subscribeHermesBotEvents]: (_, { clientId }) =>
           streamAdmission.guard(
             clientId,

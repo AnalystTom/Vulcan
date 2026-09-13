@@ -238,7 +238,7 @@ describe("TerminalManager", () => {
       processKillGraceMs?: number;
       maxRetainedInactiveSessions?: number;
       ptyAdapter?: FakePtyAdapter;
-      launchResolver?: (launch: TerminalLaunch) => Promise<ShellCandidate | null>;
+      launchResolver?: (launch: TerminalLaunch, cwd: string) => Promise<ShellCandidate | null>;
       prepareLogs?: (logsDir: string) => void;
     } = {},
   ) {
@@ -270,10 +270,12 @@ describe("TerminalManager", () => {
 
   it("runs the resolved command for a named launch and never a shell", async () => {
     const resolved: TerminalLaunch[] = [];
+    const resolvedCwds: string[] = [];
     const { manager, ptyAdapter } = makeManager(5, {
       shellResolver: () => "/bin/bash",
-      launchResolver: async (launch) => {
+      launchResolver: async (launch, cwd) => {
         resolved.push(launch);
+        resolvedCwds.push(cwd);
         return { shell: "/usr/bin/herdr", args: ["session", "attach", "vulcan-1"] };
       },
     });
@@ -284,6 +286,7 @@ describe("TerminalManager", () => {
     });
 
     expect(resolved).toEqual([{ kind: "herdr", sessionName: "vulcan-1" }]);
+    expect(resolvedCwds).toEqual([process.cwd()]);
     expect(ptyAdapter.spawnInputs).toHaveLength(1);
     expect(ptyAdapter.spawnInputs[0]?.shell).toBe("/usr/bin/herdr");
     expect(ptyAdapter.spawnInputs[0]?.args).toEqual(["session", "attach", "vulcan-1"]);

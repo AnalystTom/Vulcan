@@ -531,6 +531,7 @@ export function createWsNativeApi(): NativeApi {
       status: () => transport.request(WS_METHODS.hermesBotStatus, {}),
       connect: (input) => transport.request(WS_METHODS.hermesBotConnect, input),
       request: (input) => transport.request(WS_METHODS.hermesBotRequest, input),
+      readFile: (input) => transport.request(WS_METHODS.hermesBotReadFile, input),
       onEvent: (listener) => {
         const unsubscribeListener = hermesBotEventListeners.subscribe(listener);
         if (!unsubscribeHermesBotEventTransport) {

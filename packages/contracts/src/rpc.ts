@@ -76,6 +76,8 @@ import { HerdrStatus } from "./herdr";
 import {
   HermesBotConnectInput,
   HermesBotEvent,
+  HermesBotReadFileInput,
+  HermesBotReadFileResult,
   HermesBotRequest,
   HermesBotStatus,
 } from "./hermesBot";
@@ -817,6 +819,12 @@ export const WsHermesBotRequestRpc = Rpc.make(WS_METHODS.hermesBotRequest, {
   error: WsRpcError,
 });
 
+export const WsHermesBotReadFileRpc = Rpc.make(WS_METHODS.hermesBotReadFile, {
+  payload: HermesBotReadFileInput,
+  success: HermesBotReadFileResult,
+  error: WsRpcError,
+});
+
 export const WsSubscribeHermesBotEventsRpc = Rpc.make(WS_METHODS.subscribeHermesBotEvents, {
   payload: Schema.Struct({}),
   success: HermesBotEvent,
@@ -1453,6 +1461,7 @@ export const WsFeatureRpcGroup = RpcGroup.make(
   WsHermesBotStatusRpc,
   WsHermesBotConnectRpc,
   WsHermesBotRequestRpc,
+  WsHermesBotReadFileRpc,
   WsSubscribeHermesBotEventsRpc,
 );
 

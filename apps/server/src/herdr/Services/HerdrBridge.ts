@@ -29,11 +29,12 @@ export interface HerdrBridgeShape {
   }) => Effect.Effect<HerdrAvailability>;
 
   /**
-   * The argv that attaches to `sessionName`, or null when Herdr is unavailable.
-   * Creating the session if it does not exist is Herdr's own behaviour on attach.
+   * Ensures a new named session is supervised on Linux, then returns the argv
+   * that attaches to it. Existing running sessions are reused unchanged.
    */
   readonly resolveAttachCommand: (
     sessionName: string,
+    cwd: string,
   ) => Effect.Effect<{ readonly shell: string; readonly args: string[] } | null>;
 }
 

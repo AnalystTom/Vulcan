@@ -71,6 +71,21 @@ export const HermesBotRequest = Schema.Struct({
 });
 export type HermesBotRequest = typeof HermesBotRequest.Type;
 
+/** Read-only report content from the owner-configured Hermes gateway. */
+export const HermesBotReadFileInput = Schema.Struct({
+  path: TrimmedNonEmptyString.check(Schema.isMaxLength(4_096)),
+});
+export type HermesBotReadFileInput = typeof HermesBotReadFileInput.Type;
+
+export const HermesBotReadFileResult = Schema.Struct({
+  name: HermesBotString,
+  path: HermesBotString,
+  size: NonNegativeInt,
+  mimeType: HermesBotString,
+  contents: Schema.String,
+});
+export type HermesBotReadFileResult = typeof HermesBotReadFileResult.Type;
+
 export const HermesBotEvent = Schema.Struct({
   type: HermesBotString,
   payload: HermesBotParams,

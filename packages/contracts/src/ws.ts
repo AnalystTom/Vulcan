@@ -78,7 +78,12 @@ import {
   GitUnstageFilesInput,
   GitWorktreeSetupProgressEvent,
 } from "./git";
-import { HermesBotEvent, HermesBotRequest, HermesBotConnectInput } from "./hermesBot";
+import {
+  HermesBotEvent,
+  HermesBotRequest,
+  HermesBotConnectInput,
+  HermesBotReadFileInput,
+} from "./hermesBot";
 import {
   TerminalAckOutputInput,
   TerminalClearInput,
@@ -321,6 +326,7 @@ export const WS_METHODS = {
   hermesBotStatus: "bot.hermes.status",
   hermesBotConnect: "bot.hermes.connect",
   hermesBotRequest: "bot.hermes.request",
+  hermesBotReadFile: "bot.hermes.readFile",
   subscribeHermesBotEvents: "bot.hermes.subscribe",
 } as const;
 
@@ -520,6 +526,7 @@ const WebSocketRequestBody = Schema.Union([
   tagRequestBody(WS_METHODS.hermesBotStatus, Schema.Struct({})),
   tagRequestBody(WS_METHODS.hermesBotConnect, HermesBotConnectInput),
   tagRequestBody(WS_METHODS.hermesBotRequest, HermesBotRequest),
+  tagRequestBody(WS_METHODS.hermesBotReadFile, HermesBotReadFileInput),
   tagRequestBody(WS_METHODS.subscribeHermesBotEvents, Schema.Struct({})),
 ]);
 

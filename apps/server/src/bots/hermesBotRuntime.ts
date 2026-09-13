@@ -1,6 +1,8 @@
 import type {
   HermesBotConnectInput,
   HermesBotEvent,
+  HermesBotReadFileInput,
+  HermesBotReadFileResult,
   HermesBotRequest,
   HermesBotStatus,
 } from "@vulcan/contracts";
@@ -58,12 +60,158 @@ export function resolveHermesConnection(
   };
 }
 
+const HERMES_REPORT_MAX_BYTES = 512 * 1024;
+const HERMES_FILE_RESPONSE_MAX_BYTES = 1_000_000;
+const HERMES_FILE_READ_TIMEOUT_MS = 15_000;
+
+function hermesHttpFileUrl(connectionUrl: string, path: string): string {
+  const url = new URL(connectionUrl);
+  url.protocol = url.protocol === "wss:" ? "https:" : "http:";
+  url.pathname = "/api/files/read";
+  url.search = new URLSearchParams({ path }).toString();
+  url.hash = "";
+  return url.toString();
+}
+
+async function readBoundedResponse(response: Response): Promise<string> {
+  const declaredLength = Number(response.headers.get("content-length") ?? "");
+  if (Number.isFinite(declaredLength) && declaredLength > HERMES_FILE_RESPONSE_MAX_BYTES) {
+    throw new Error("Hermes report response is too large to preview.");
+  }
+  if (!response.body) {
+    const text = await response.text();
+    if (new TextEncoder().encode(text).byteLength > HERMES_FILE_RESPONSE_MAX_BYTES) {
+      throw new Error("Hermes report response is too large to preview.");
+    }
+    return text;
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      total += next.value.byteLength;
+      if (total > HERMES_FILE_RESPONSE_MAX_BYTES) {
+        await reader.cancel();
+        throw new Error("Hermes report response is too large to preview.");
+      }
+      chunks.push(next.value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
+}
+
+function decodeHermesReportResponse(value: unknown): HermesBotReadFileResult {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Hermes returned an invalid report response.");
+  }
+  const record = value as Record<string, unknown>;
+  const name = record.name;
+  const path = record.path;
+  const size = record.size;
+  const mimeType = record.mime_type;
+  const dataUrl = record.data_url;
+  if (
+    typeof name !== "string" ||
+    !name ||
+    typeof path !== "string" ||
+    !path ||
+    typeof size !== "number" ||
+    !Number.isSafeInteger(size) ||
+    size < 0 ||
+    size > HERMES_REPORT_MAX_BYTES ||
+    typeof mimeType !== "string" ||
+    !mimeType ||
+    typeof dataUrl !== "string"
+  ) {
+    if (typeof size === "number" && Number.isSafeInteger(size) && size > HERMES_REPORT_MAX_BYTES) {
+      throw new Error("Hermes report is too large to preview.");
+    }
+    throw new Error("Hermes returned an invalid report response.");
+  }
+  if (
+    !mimeType.toLowerCase().startsWith("text/") &&
+    mimeType.toLowerCase() !== "application/markdown"
+  ) {
+    throw new Error("Hermes report is binary and cannot be previewed as text.");
+  }
+  const separator = dataUrl.indexOf(",");
+  const header = separator >= 0 ? dataUrl.slice(0, separator) : "";
+  const encoded = separator >= 0 ? dataUrl.slice(separator + 1) : "";
+  const [dataMime, ...parameters] = header.split(";");
+  if (
+    dataMime?.toLowerCase() !== `data:${mimeType.toLowerCase()}` ||
+    !parameters.some((parameter) => parameter.toLowerCase() === "base64") ||
+    (encoded.length > 0 && (!/^[A-Za-z0-9+/=]+$/.test(encoded) || encoded.length % 4 !== 0))
+  ) {
+    throw new Error("Hermes returned an invalid report response.");
+  }
+  let bytes: Uint8Array;
+  try {
+    bytes = Uint8Array.from(Buffer.from(encoded, "base64"));
+  } catch {
+    throw new Error("Hermes returned an invalid report response.");
+  }
+  if (bytes.byteLength !== size || Buffer.from(bytes).toString("base64") !== encoded) {
+    throw new Error("Hermes returned an invalid report response.");
+  }
+  let contents: string;
+  try {
+    contents = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new Error("Hermes report is binary and cannot be previewed as text.");
+  }
+  return { name, path, size, mimeType, contents };
+}
+
+async function readHermesReport(connection: Connection, input: HermesBotReadFileInput) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), HERMES_FILE_READ_TIMEOUT_MS);
+  try {
+    const response = await fetch(hermesHttpFileUrl(connection.url, input.path), {
+      headers: connection.token ? { Authorization: `Bearer ${connection.token}` } : undefined,
+      redirect: "error",
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      const detail =
+        response.status === 401 || response.status === 403
+          ? "Hermes report access was denied."
+          : response.status === 404
+            ? "Hermes report was not found on the gateway."
+            : response.status === 413
+              ? "Hermes report is too large to preview."
+              : `Hermes report read failed (HTTP ${response.status}).`;
+      throw new Error(detail);
+    }
+    return decodeHermesReportResponse(JSON.parse(await readBoundedResponse(response)));
+  } catch (cause) {
+    if (cause instanceof Error && cause.message.startsWith("Hermes ")) throw cause;
+    throw new Error("Hermes report could not be read.");
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 interface HermesBotRuntimeShape {
   readonly status: Effect.Effect<HermesBotStatus, HermesBotRuntimeError>;
   readonly connect: (
     input: HermesBotConnectInput,
   ) => Effect.Effect<HermesBotStatus, HermesBotRuntimeError>;
   readonly request: (input: HermesBotRequest) => Effect.Effect<Schema.Json, HermesBotRuntimeError>;
+  readonly readFile: (
+    input: HermesBotReadFileInput,
+  ) => Effect.Effect<HermesBotReadFileResult, HermesBotRuntimeError>;
   readonly events: Stream.Stream<HermesBotEvent>;
 }
 
@@ -270,6 +418,22 @@ const makeHermesBotRuntime = Effect.gen(function* () {
       return yield* attempt(() => active.request(input.method, input.params));
     });
 
+  const readFile = (input: HermesBotReadFileInput) =>
+    Effect.gen(function* () {
+      const connection = yield* connectionLock.withPermit(
+        Effect.gen(function* () {
+          const saved = yield* readConnection;
+          if (!saved)
+            return yield* Effect.fail(
+              new HermesBotRuntimeError({ message: "Connect Hermes before opening a report." }),
+            );
+          yield* attempt(() => attach(saved));
+          return saved;
+        }),
+      );
+      return yield* attempt(() => readHermesReport(connection, input));
+    });
+
   yield* Effect.addFinalizer(() =>
     Effect.sync(() => {
       disposed = true;
@@ -281,6 +445,7 @@ const makeHermesBotRuntime = Effect.gen(function* () {
     status,
     connect,
     request,
+    readFile,
     events: Stream.fromPubSub(events),
   } satisfies HermesBotRuntimeShape;
 });

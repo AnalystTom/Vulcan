@@ -169,4 +169,124 @@ describe("native Hermes connection boundary", () => {
       await runtime.dispose();
     }
   });
+
+  it("reads a bounded text report from the connected gateway without exposing the token to the client", async () => {
+    const store = makeSecretStore({
+      url: "ws://127.0.0.1:41493/api/ws",
+      token: "gateway-token",
+    });
+    const contents = "# LaunchPost report\n\nVerified source-backed result.";
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          name: "launchpost-report.md",
+          path: "/home/russki/report.md",
+          size: Buffer.byteLength(contents),
+          mime_type: "text/markdown",
+          data_url: `data:text/markdown;base64,${Buffer.from(contents).toString("base64")}`,
+          root: null,
+          locked_root: null,
+          can_change_path: true,
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = ManagedRuntime.make(
+      HermesBotRuntimeLive.pipe(Layer.provide(Layer.succeed(ServerSecretStore, store))),
+    );
+
+    try {
+      const bot = await runtime.runPromise(
+        Effect.gen(function* () {
+          return yield* HermesBotRuntime;
+        }),
+      );
+      await expect(
+        runtime.runPromise(bot.readFile({ path: "/home/russki/report.md" })),
+      ).resolves.toEqual({
+        name: "launchpost-report.md",
+        path: "/home/russki/report.md",
+        size: Buffer.byteLength(contents),
+        mimeType: "text/markdown",
+        contents,
+      });
+      expect(fetchMock).toHaveBeenCalledWith(
+        "http://127.0.0.1:41493/api/files/read?path=%2Fhome%2Frusski%2Freport.md",
+        expect.objectContaining({
+          redirect: "error",
+          headers: { Authorization: "Bearer gateway-token" },
+        }),
+      );
+    } finally {
+      await runtime.dispose();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("rejects oversized and binary gateway reports before returning content", async () => {
+    const store = makeSecretStore({ url: "ws://127.0.0.1:41493/api/ws", token: "token" });
+    const fetchMock = vi.fn<typeof fetch>();
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = ManagedRuntime.make(
+      HermesBotRuntimeLive.pipe(Layer.provide(Layer.succeed(ServerSecretStore, store))),
+    );
+    try {
+      const bot = await runtime.runPromise(
+        Effect.gen(function* () {
+          return yield* HermesBotRuntime;
+        }),
+      );
+      fetchMock.mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            name: "large.md",
+            path: "/large.md",
+            size: 512 * 1024 + 1,
+            mime_type: "text/markdown",
+            data_url: "data:text/markdown;base64,eA==",
+          }),
+          { status: 200 },
+        ),
+      );
+      await expect(runtime.runPromise(bot.readFile({ path: "/large.md" }))).rejects.toThrow(
+        "Hermes report is too large to preview",
+      );
+      fetchMock.mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            name: "image.md",
+            path: "/image.md",
+            size: 3,
+            mime_type: "image/png",
+            data_url: "data:image/png;base64,eA==",
+          }),
+          { status: 200 },
+        ),
+      );
+      await expect(runtime.runPromise(bot.readFile({ path: "/image.md" }))).rejects.toThrow(
+        "Hermes report is binary",
+      );
+      fetchMock.mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            name: "empty.md",
+            path: "/empty.md",
+            size: 0,
+            mime_type: "text/markdown",
+            data_url: "data:text/markdown;base64,",
+          }),
+          { status: 200 },
+        ),
+      );
+      await expect(runtime.runPromise(bot.readFile({ path: "/empty.md" }))).resolves.toMatchObject({
+        name: "empty.md",
+        size: 0,
+        contents: "",
+      });
+    } finally {
+      await runtime.dispose();
+      vi.unstubAllGlobals();
+    }
+  });
 });

@@ -12,6 +12,8 @@ import type { HerdrStatus } from "./herdr";
 import type {
   HermesBotConnectInput,
   HermesBotEvent,
+  HermesBotReadFileInput,
+  HermesBotReadFileResult,
   HermesBotRequest,
   HermesBotStatus,
 } from "./hermesBot";
@@ -664,6 +666,7 @@ export interface NativeApi {
     status: () => Promise<HermesBotStatus>;
     connect: (input: HermesBotConnectInput) => Promise<HermesBotStatus>;
     request: (input: HermesBotRequest) => Promise<unknown>;
+    readFile: (input: HermesBotReadFileInput) => Promise<HermesBotReadFileResult>;
     onEvent: (callback: (event: HermesBotEvent) => void) => () => void;
   };
   terminal: {
