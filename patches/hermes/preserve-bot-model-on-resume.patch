@@ -1,0 +1,56 @@
+diff --git a/hermes_cli/cli_model_switch_mixin.py b/hermes_cli/cli_model_switch_mixin.py
+index e52cc58a5f..812111b527 100644
+--- a/hermes_cli/cli_model_switch_mixin.py
++++ b/hermes_cli/cli_model_switch_mixin.py
+@@ -13,2 +13,3 @@ from __future__ import annotations
+ import copy
++import os
+ import sys
+@@ -36,2 +37,6 @@ def stored_session_route(session_meta, *, current_model, current_provider):
+     hard-fails on it (the TUI gateway keeps it when a base_url exists)."""
++    # Bot delivery already selected and qualified the profile route. Historical
++    # session metadata must not replace it before later mailbox turns run.
++    if os.environ.get("HERMES_STRICT_BOT_MODEL") == "1":
++        return None
+     stored_model = str((session_meta or {}).get("model") or "").strip()
+diff --git a/tests/cli/test_resume_model_restore.py b/tests/cli/test_resume_model_restore.py
+index aa01462527..30a836df19 100644
+--- a/tests/cli/test_resume_model_restore.py
++++ b/tests/cli/test_resume_model_restore.py
+@@ -367 +367,19 @@ def test_restore_session_model_restores_billing_provider_fallback():
+     assert stub.provider == "minimax"
++
++
++def test_strict_bot_resume_keeps_profile_model_for_followup_turns(monkeypatch):
++    monkeypatch.setenv("HERMES_STRICT_BOT_MODEL", "1")
++    calls = []
++
++    class Agent:
++        def switch_model(self, **kwargs):
++            calls.append(kwargs)
++
++    stub = _make_stub(model="gpt-6-astra", provider="openai-codex",
++                      requested_provider="openai-codex", agent=Agent())
++    stub._restore_session_model(_row(model="gpt-5.6-luna", model_config={
++        "gateway_runtime": {"provider": "openai-codex"},
++    }))
++    assert stub.model == "gpt-6-astra"
++    assert stub.provider == "openai-codex"
++    assert calls == []
+diff --git a/tests/hermes_cli/test_oneshot_resume.py b/tests/hermes_cli/test_oneshot_resume.py
+index 960f94288f..c132148872 100644
+--- a/tests/hermes_cli/test_oneshot_resume.py
++++ b/tests/hermes_cli/test_oneshot_resume.py
+@@ -268 +268,12 @@ class TestRunOneshotForwardsResume:
+         assert captured["resume"] == "sess-1"
++
++
++def test_strict_bot_oneshot_resume_keeps_profile_route(monkeypatch):
++    monkeypatch.setenv("HERMES_STRICT_BOT_MODEL", "1")
++    choice = _ModelChoice("gpt-6-astra", "openai-codex")
++    result = _apply_stored_session_runtime(choice, {
++        "model": "gpt-5.6-luna", "model_config": '{"provider":"openai-codex"}',
++    }, explicit_model=False)
++    assert result is choice
++    assert result.model == "gpt-6-astra"
++    assert result.provider == "openai-codex"
