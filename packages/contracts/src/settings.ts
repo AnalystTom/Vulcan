@@ -1,4 +1,4 @@
-import { Schema } from "effect";
+import { Schema, Struct } from "effect";
 import { TrimmedString } from "./baseSchemas";
 import { DEFAULT_GIT_TEXT_GENERATION_MODEL } from "./model";
 import { ModelSelection, ProviderKind, ThreadEnvironmentMode } from "./orchestration";
@@ -97,7 +97,27 @@ export const SkillsServerSettings = Schema.Struct({
 });
 export type SkillsServerSettings = typeof SkillsServerSettings.Type;
 
+// Reuses the managed MCP account format; credentials stay in ServerSecretStore.
+export const ManagedMcpConnection = Schema.Struct({
+  id: Schema.String.check(Schema.isPattern(/^[a-z0-9][a-z0-9-]{0,63}$/)),
+  name: StringSetting,
+  url: StringSetting.check(Schema.isPattern(/^https:\/\/[^\s?#@]+$/)),
+  enabled: Schema.Boolean,
+  botIds: Schema.Array(Schema.String).pipe(Schema.withDecodingDefault(() => [])),
+  allowedTools: Schema.Array(StringSetting).pipe(Schema.withDecodingDefault(() => [])),
+  profileGrants: Schema.Array(
+    Schema.Struct({
+      profile: StringSetting,
+      allowedTools: Schema.Array(StringSetting),
+    }),
+  ).pipe(Schema.withDecodingDefault(() => [])),
+});
+export type ManagedMcpConnection = typeof ManagedMcpConnection.Type;
+
 export const ServerSettings = Schema.Struct({
+  managedMcpConnections: Schema.Array(ManagedMcpConnection).pipe(
+    Schema.withDecodingDefault(() => []),
+  ),
   enableAssistantStreaming: Schema.Boolean.pipe(Schema.withDecodingDefault(() => true)),
   enableProviderUpdateChecks: Schema.Boolean.pipe(Schema.withDecodingDefault(() => true)),
   defaultThreadEnvMode: ThreadEnvironmentMode.pipe(Schema.withDecodingDefault(() => "local")),
@@ -128,7 +148,9 @@ export const DEFAULT_SERVER_SETTINGS: ServerSettings = Schema.decodeSync(ServerS
 
 // Public settings are structurally separate so the RPC contract can remain an
 // explicitly redacted boundary if server-only settings gain more fields later.
-export const ServerSettingsView = ServerSettings;
+export const ServerSettingsView = Schema.Struct(
+  Struct.omit(ServerSettings.fields, ["managedMcpConnections"]),
+);
 export type ServerSettingsView = typeof ServerSettingsView.Type;
 
 export const DEFAULT_SERVER_SETTINGS_VIEW: ServerSettingsView = Schema.decodeSync(
@@ -148,6 +170,7 @@ const ProviderSettingsBasePatch = {
 };
 
 export const ServerSettingsPatch = Schema.Struct({
+  managedMcpConnections: Schema.optionalKey(Schema.Array(ManagedMcpConnection)),
   enableAssistantStreaming: Schema.optionalKey(Schema.Boolean),
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),
   defaultThreadEnvMode: Schema.optionalKey(ThreadEnvironmentMode),

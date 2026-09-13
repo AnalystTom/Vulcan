@@ -247,7 +247,10 @@ export function makeServerRuntimeServicesLayer(
     automationSchedulerLayer,
     automationRunReactorLayer,
     botServiceLayer,
-    HermesBotRuntimeLive.pipe(Layer.provide(ServerSecretStoreLive)),
+    HermesBotRuntimeLive.pipe(
+      Layer.provide(ServerSecretStoreLive),
+      Layer.provide(ServerSettingsLive),
+    ),
     botThreadReconcilerLayer,
     botCommsServiceLayer,
     botDelegationDrainerLayer,

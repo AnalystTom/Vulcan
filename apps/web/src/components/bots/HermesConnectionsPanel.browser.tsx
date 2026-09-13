@@ -19,6 +19,7 @@ const fixture = vi.hoisted(() => {
   const request = vi.fn(
     async ({ method, params }: { method: string; params: Record<string, unknown> }) => {
       calls.push({ method, params });
+      if (method === "vulcan.accounts.list") return { connections: [] };
       if (method === "mcp.catalog") {
         return {
           servers: [

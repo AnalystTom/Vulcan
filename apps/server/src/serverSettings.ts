@@ -65,7 +65,8 @@ export interface ServerSettingsSnapshot {
 const SERVER_SETTINGS_MIGRATION_VERSION = 1;
 
 export function toServerSettingsView(settings: ServerSettings): ServerSettingsView {
-  return settings;
+  const { managedMcpConnections: _accounts, ...view } = settings;
+  return view;
 }
 
 export class ServerSettingsService extends ServiceMap.Service<

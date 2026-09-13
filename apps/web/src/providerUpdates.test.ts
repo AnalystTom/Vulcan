@@ -54,6 +54,7 @@ function serverSettings(overrides: Partial<ServerSettings["providers"]> = {}): S
   };
 
   return {
+    managedMcpConnections: [],
     enableAssistantStreaming: false,
     enableProviderUpdateChecks: true,
     defaultThreadEnvMode: "local",

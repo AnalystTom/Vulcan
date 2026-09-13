@@ -3,7 +3,7 @@ import { DEFAULT_MODEL_BY_PROVIDER } from "@vulcan/contracts";
 import { Effect, FileSystem, Layer } from "effect";
 import { describe, expect, it } from "vitest";
 import { ServerConfig } from "./config";
-import { ServerSettingsLive, ServerSettingsService } from "./serverSettings";
+import { ServerSettingsLive, ServerSettingsService, toServerSettingsView } from "./serverSettings";
 
 const serverConfigLayer = ServerConfig.layerTest(process.cwd(), {
   prefix: "vulcan-settings-test-",
@@ -103,6 +103,35 @@ describe("ServerSettingsService", () => {
     expect(JSON.stringify(result.view)).not.toContain('"serverPassword"');
     expect(result.persisted).not.toContain("kilo-secret");
     expect(result.persisted).not.toContain("opencode-secret");
+  });
+
+  it("keeps managed MCP connections out of every public settings view", async () => {
+    const managedMcpConnections = [
+      {
+        id: "shared-tools",
+        name: "Shared tools",
+        url: "https://mcp.example.test/tools",
+        enabled: true,
+        botIds: ["hermes"],
+        allowedTools: ["search"],
+        profileGrants: [],
+      },
+    ];
+    const result = await runWithSettings(
+      Effect.gen(function* () {
+        const service = yield* ServerSettingsService;
+        yield* service.start;
+        const updatedView = yield* service.updateSettingsView({ managedMcpConnections });
+        const internal = yield* service.getSettings;
+        const publicView = yield* service.getSettingsView;
+        return { internal, updatedView, publicView, mappedView: toServerSettingsView(internal) };
+      }),
+    );
+
+    expect(result.internal.managedMcpConnections).toEqual(managedMcpConnections);
+    expect(result.updatedView).not.toHaveProperty("managedMcpConnections");
+    expect(result.publicView).not.toHaveProperty("managedMcpConnections");
+    expect(result.mappedView).not.toHaveProperty("managedMcpConnections");
   });
 
   it("resolves text generation selection away from disabled providers", async () => {

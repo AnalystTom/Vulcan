@@ -49,6 +49,7 @@ vi.mock("./hermesGatewayClient", () => ({
 
 import { resolveHermesConnection, validateHermesConnection } from "./hermesBotRuntime";
 import { HermesBotRuntime, HermesBotRuntimeLive } from "./hermesBotRuntime";
+import { ServerSettingsService } from "../serverSettings";
 
 function makeSecretStore(initial: unknown): ServerSecretStoreShape & { read(): unknown } {
   let value: Uint8Array | null =
@@ -127,7 +128,10 @@ describe("native Hermes connection boundary", () => {
     });
     gatewayHarness.connectOutcomes.push(firstProbe, new Error("probe failed"));
     const runtime = ManagedRuntime.make(
-      HermesBotRuntimeLive.pipe(Layer.provide(Layer.succeed(ServerSecretStore, store))),
+      HermesBotRuntimeLive.pipe(
+        Layer.provide(Layer.succeed(ServerSecretStore, store)),
+        Layer.provide(ServerSettingsService.layerTest()),
+      ),
     );
 
     try {
@@ -193,7 +197,10 @@ describe("native Hermes connection boundary", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
     const runtime = ManagedRuntime.make(
-      HermesBotRuntimeLive.pipe(Layer.provide(Layer.succeed(ServerSecretStore, store))),
+      HermesBotRuntimeLive.pipe(
+        Layer.provide(Layer.succeed(ServerSecretStore, store)),
+        Layer.provide(ServerSettingsService.layerTest()),
+      ),
     );
 
     try {
@@ -229,7 +236,10 @@ describe("native Hermes connection boundary", () => {
     const fetchMock = vi.fn<typeof fetch>();
     vi.stubGlobal("fetch", fetchMock);
     const runtime = ManagedRuntime.make(
-      HermesBotRuntimeLive.pipe(Layer.provide(Layer.succeed(ServerSecretStore, store))),
+      HermesBotRuntimeLive.pipe(
+        Layer.provide(Layer.succeed(ServerSecretStore, store)),
+        Layer.provide(ServerSettingsService.layerTest()),
+      ),
     );
     try {
       const bot = await runtime.runPromise(

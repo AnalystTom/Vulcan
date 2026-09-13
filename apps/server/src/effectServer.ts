@@ -6,6 +6,7 @@ import { HttpRouter } from "effect/unstable/http";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { agentGatewayRouteLayer } from "./agentGateway/httpRoute";
+import { hermesSharedAccountsRouteLayer } from "./bots/hermesSharedAccountsRoute";
 import { AgentGatewayCredentials } from "./agentGateway/Services/AgentGatewayCredentials";
 import { AutomationRunReactor } from "./automation/Services/AutomationRunReactor";
 import { AutomationScheduler } from "./automation/Services/AutomationScheduler";
@@ -173,6 +174,7 @@ export const createEffectServer = Effect.fn(function* (
     makeEffectHttpRouteLayer(readiness, shutdownController),
     websocketRpcRouteLayer,
     agentGatewayRouteLayer,
+    hermesSharedAccountsRouteLayer,
     externalMcpRouteLayer,
   );
   const httpApp = yield* HttpRouter.toHttpEffect(routesLayer);

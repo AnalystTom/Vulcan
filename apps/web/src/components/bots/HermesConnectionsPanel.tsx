@@ -14,6 +14,7 @@ import {
 
 import { ErrorNotice, SectionHeading } from "./HermesBotParts";
 import { HermesMcpSignIn } from "./HermesMcpSignIn";
+import { HermesSharedAccountsPanel } from "./HermesSharedAccountsPanel";
 
 function connectionGranted(detail: HermesProfileDetail, name: string): boolean {
   const configured = detail.mcpServers.some((server) => server.name === name && server.enabled);
@@ -281,6 +282,7 @@ export function HermesConnectionsPanel({ profile }: { profile: string }) {
           </Button>
         </form>
       </DisclosureRegion>
+      <HermesSharedAccountsPanel key={profile} profile={profile} />
     </section>
   );
 }

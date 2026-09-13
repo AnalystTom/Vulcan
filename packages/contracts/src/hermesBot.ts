@@ -45,6 +45,12 @@ export const HERMES_BOT_METHODS = [
   "mcp.servers.oauth.poll",
   "mcp.servers.oauth.cancel",
   "mcp.servers.oauth.callback",
+  "vulcan.accounts.list",
+  "vulcan.accounts.save",
+  "vulcan.accounts.remove",
+  "vulcan.accounts.check",
+  "vulcan.accounts.grant",
+  "vulcan.accounts.revoke",
 ] as const;
 
 export const HermesBotMethod = Schema.Literals(HERMES_BOT_METHODS);

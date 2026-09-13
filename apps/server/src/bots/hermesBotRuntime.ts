@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type {
   HermesBotConnectInput,
   HermesBotEvent,
@@ -12,6 +13,8 @@ import { hermesSetupUrl as setupHttpUrl } from "@vulcan/shared/hermesSetup";
 
 import { ServerSecretStore } from "../auth/Services/ServerSecretStore";
 import { createHermesGatewayClient, type HermesGatewayClient } from "./hermesGatewayClient";
+import { makeHermesSharedAccounts } from "./hermesSharedAccounts";
+import { ServerSettingsService } from "../serverSettings";
 
 const CONNECTION_SECRET = "hermes-bot-runtime-connection";
 
@@ -367,6 +370,10 @@ async function readHermesReport(connection: Connection, input: HermesBotReadFile
 }
 
 interface HermesBotRuntimeShape {
+  readonly handleAccountMcpPost: (
+    authorizationHeader: string | undefined,
+    body: unknown,
+  ) => Effect.Effect<{ status: number; body?: unknown }, HermesBotRuntimeError>;
   readonly status: Effect.Effect<HermesBotStatus, HermesBotRuntimeError>;
   readonly connect: (
     input: HermesBotConnectInput,
@@ -384,6 +391,7 @@ export class HermesBotRuntime extends ServiceMap.Service<HermesBotRuntime, Herme
 
 const makeHermesBotRuntime = Effect.gen(function* () {
   const secrets = yield* ServerSecretStore;
+  const settings = yield* ServerSettingsService;
   // Notifications only invalidate views; durable messages and receipts are replayed from Hermes.
   const events = yield* PubSub.sliding<HermesBotEvent>(256);
   const connectionLock = yield* Semaphore.make(1);
@@ -566,7 +574,7 @@ const makeHermesBotRuntime = Effect.gen(function* () {
   const connect = (input: HermesBotConnectInput) =>
     connectionLock.withPermit(connectUnlocked(input));
 
-  const request = (input: HermesBotRequest) =>
+  const nativeRequest = (method: string, params: Record<string, unknown>) =>
     Effect.gen(function* () {
       const active = yield* connectionLock.withPermit(
         Effect.gen(function* () {
@@ -578,11 +586,47 @@ const makeHermesBotRuntime = Effect.gen(function* () {
           return yield* attempt(() => attach(connection));
         }),
       );
+      return yield* attempt(() => active.request(method, params as Record<string, Schema.Json>));
+    });
+
+  const accounts = makeHermesSharedAccounts({
+    secrets: {
+      get: (name) => Effect.runPromise(secrets.get(name)),
+      set: (name, value) => Effect.runPromise(secrets.set(name, value)),
+      remove: (name) => Effect.runPromise(secrets.remove(name)),
+    },
+    getConnections: () =>
+      Effect.runPromise(settings.getSettings).then((value) => value.managedMcpConnections),
+    saveConnections: (connections) =>
+      Effect.runPromise(settings.updateSettings({ managedMcpConnections: connections })).then(
+        () => undefined,
+      ),
+    runtimeKey: async () => {
+      const connection = await Effect.runPromise(readConnection);
+      if (!connection) throw new Error("Connect Hermes before granting account access.");
+      return createHash("sha256").update(JSON.stringify(connection)).digest("hex");
+    },
+    nativeRequest: (method, params) => Effect.runPromise(nativeRequest(method, params)),
+  });
+
+  const request = (input: HermesBotRequest) =>
+    Effect.gen(function* () {
+      if (input.method.startsWith("vulcan.accounts.")) {
+        return yield* attempt(async () => {
+          try {
+            return (await accounts.request(input.method, input.params)) as Schema.Json;
+          } catch {
+            throw new Error(
+              "Shared account request could not be confirmed. Review the connection and current grants before retrying.",
+            );
+          }
+        });
+      }
       return yield* attempt(async () => {
         try {
           return sanitizeHermesSetupResponse(
             input.method,
-            await active.request(input.method, input.params),
+            await Effect.runPromise(nativeRequest(input.method, input.params)),
           );
         } catch (cause) {
           if (HERMES_SETUP_METHODS.has(input.method)) {
@@ -623,6 +667,8 @@ const makeHermesBotRuntime = Effect.gen(function* () {
     }),
   );
   return {
+    handleAccountMcpPost: (authorizationHeader, body) =>
+      attempt(() => accounts.handleMcpPost(authorizationHeader, body)),
     status,
     connect,
     request,
