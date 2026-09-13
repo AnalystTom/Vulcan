@@ -85,7 +85,7 @@ const ATTACHMENT_SVG = "<svg xmlns='http://www.w3.org/2000/svg' width='120' heig
 let attachmentResponseDelayMs = 0;
 let attachmentUploadSequence = 0;
 let attachmentUploadBarrier: Promise<void> | null = null;
-let attachmentUploadStarted = false;
+const attachmentUploadStartedThreadIds = new Set<string | null>();
 
 interface WsRequestEnvelope {
   id: string;
@@ -1402,8 +1402,8 @@ const worker = setupWorker(
     });
   }),
   http.post(`*${ATTACHMENT_UPLOAD_ROUTE_PATH}`, async ({ request }) => {
-    attachmentUploadStarted = true;
     const url = new URL(request.url);
+    attachmentUploadStartedThreadIds.add(url.searchParams.get("threadId"));
     const bytes = await request.arrayBuffer();
     await attachmentUploadBarrier;
     attachmentUploadSequence += 1;
@@ -2042,7 +2042,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
     attachmentResponseDelayMs = 0;
     attachmentUploadSequence = 0;
     attachmentUploadBarrier = null;
-    attachmentUploadStarted = false;
+    attachmentUploadStartedThreadIds.clear();
     localStorage.clear();
     useLatestProjectStore.setState({ latestProjectId: null });
     useWorkspacePathsStore.setState({
@@ -6391,7 +6391,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
       // The setup card can render before the async upload reaches MSW. Wait for
       // the real request to enter the barrier so Cancel exercises the intended
       // in-flight upload path instead of racing a pre-upload cleanup.
-      await expect.poll(() => attachmentUploadStarted).toBe(true);
+      await expect.poll(() => attachmentUploadStartedThreadIds.has(newThreadId)).toBe(true);
 
       await expect
         .poll(
